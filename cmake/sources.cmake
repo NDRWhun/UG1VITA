@@ -1,0 +1,81 @@
+# Hand-written runtime sources. The generated game code is globbed separately.
+
+set(NFSU_PLATFORM_SOURCES
+  src/platform/config.cpp
+  src/platform/cores.cpp
+  src/platform/ime.cpp
+  src/platform/log.cpp
+  src/platform/perf.cpp
+  src/platform/time.cpp
+  src/platform/sha256.cpp
+  src/platform/sync.cpp
+  src/platform/msgqueue.cpp
+  src/platform/mmx_selftest.cpp
+  src/platform/fpu_selftest.cpp
+  src/platform/gxm/gxm_device.cpp
+)
+
+set(NFSU_LIB_SOURCES
+  src/lib/audio.cpp
+  src/lib/controls.cpp
+  src/lib/cpu.cpp
+  src/lib/event.cpp
+  src/lib/file.cpp
+  src/lib/gamepad.cpp
+  src/lib/heap.cpp
+  src/lib/jump.cpp
+  src/lib/library.cpp
+  src/lib/mutex.cpp
+  src/lib/palette.cpp
+  src/lib/registry.cpp
+  src/lib/renderer.cpp
+  src/lib/surface.cpp
+  src/lib/thread.cpp
+  src/lib/timer.cpp
+  src/lib/winapp.cpp
+  src/lib/window.cpp
+)
+
+set(NFSU_WINAPI_SOURCES
+  src/lib/winapi/advapi32.cpp
+  src/lib/winapi/com.cpp
+  src/lib/winapi/ddraw.cpp
+  src/lib/winapi/dinput.cpp
+  src/lib/winapi/dsound.cpp
+  src/lib/winapi/gdi32.cpp
+  src/lib/winapi/iforce2.cpp
+  src/lib/winapi/kernel32.cpp
+  src/lib/winapi/ole32.cpp
+  src/lib/winapi/user32.cpp
+  src/lib/winapi/winmm.cpp
+  src/lib/winapi/ddraw/idirectdraw2.cpp
+  src/lib/winapi/ddraw/idirectdrawpalette.cpp
+  src/lib/winapi/ddraw/idirectdrawsurface.cpp
+  src/lib/winapi/dinput/idirectinput2.cpp
+  src/lib/winapi/dinput/idirectinputdevice.cpp
+  src/lib/winapi/dsound/idirectsound.cpp
+  src/lib/winapi/dsound/idirectsound3dlistener.cpp
+  src/lib/winapi/dsound/idirectsoundbuffer.cpp
+)
+
+# Port code that works with guest addresses of Speed.exe (none yet).
+set(NFSU_GAME_PORT_SOURCES
+)
+
+# Runtime sources that include headers generated from the game binary (nfsu_layout.h).
+set(NFSU_GENERATED_HEADER_SOURCES
+  src/lib/memmap.cpp
+)
+
+# Runtime sources that build without the generated code (the CI runtime check).
+set(NFSU_STANDALONE_SOURCES
+  ${NFSU_PLATFORM_SOURCES}
+  ${NFSU_LIB_SOURCES}
+  ${NFSU_WINAPI_SOURCES}
+  ${NFSU_GAME_PORT_SOURCES}
+)
+
+set(NFSU_RUNTIME_SOURCES
+  ${NFSU_STANDALONE_SOURCES}
+  ${NFSU_GENERATED_HEADER_SOURCES}
+)

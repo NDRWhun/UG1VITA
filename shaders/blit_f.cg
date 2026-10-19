@@ -1,0 +1,7 @@
+// Shows the front image with the gamma table: colour^(1/gamma).
+
+half4 main(float2 vTexCoord : TEXCOORD0, uniform sampler2D uTexture, uniform half uInvGamma) : COLOR
+{
+    half3 color = tex2D<half4>(uTexture, vTexCoord).rgb;
+    return half4(pow(color, uInvGamma), 1.0);
+}

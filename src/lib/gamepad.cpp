@@ -1,0 +1,330 @@
+#include <lib/gamepad.h>
+#include <lib/window.h>
+#include <platform/ime.h>
+#include <platform/log.h>
+#include <platform/sync.h>
+#include <platform/time.h>
+#include <cmath>
+#include <cstring>
+#include <deque>
+
+namespace win32
+{
+
+namespace
+{
+
+// Typed text goes out one key message per this interval, so the game's 64-entry key queue never overflows.
+const uint64_t TypingIntervalUs = 20000;
+// The longest text typed outside a known field (the pilot name holds 19 characters).
+const uint32_t TextLength = 20;
+
+struct TypedKey
+{
+    controls::KeyCode   key;
+    bool                down;
+};
+
+// The text field the game edits (editText).
+struct Field
+{
+    bool        active;
+    bool        shown;          // the keyboard was opened for it
+    char16_t    title[pf::ime::MaxTitleLength + 1];
+    char16_t    text[pf::ime::MaxTextLength + 1];
+    uint32_t    maxLength;
+    bool        lettersOnly;
+};
+
+// The pump runs on the message thread, at frames and in polls; s_mutex guards everything below.
+pf::LwMutex             s_mutex("input");
+controls::Mapper        s_mapper;
+controls::State         s_state;
+uint32_t                s_keysDown;         // controls::Key bits posted down
+bool                    s_imeOpen;          // on-screen keyboard requested or shown
+bool                    s_imeForField;      // ... for s_field
+bool                    s_releaseWait;      // after the keyboard and its typing, until the pad is released
+Field                   s_field;
+std::deque<TypedKey>    s_typing;           // key messages of confirmed text not posted yet
+uint64_t                s_typedUs;          // when the last one was posted
+bool                    s_typedDown[256];   // typed keys down, by DirectInput code
+
+void copyText(char16_t* target, const char* source, uint32_t maxLength)
+{
+    uint32_t length = 0;
+    for (; source[length] && length < maxLength; ++length)
+        target[length] = char16_t(uint8_t(source[length]));
+    target[length] = 0;
+}
+
+void postKey(const controls::KeyCode& key, bool down)
+{
+    Window::pushKey(key.vk, key.scancode, key.extended, down);
+}
+
+// Posts the changes from s_keysDown to held: releases in reverse key order, then presses in key order.
+void postKeys(uint32_t held)
+{
+    const uint32_t released = s_keysDown & ~held;
+    const uint32_t pressed = held & ~s_keysDown;
+    for (int key = controls::KeyCount - 1; key >= 0; --key)
+    {
+        if (released & (uint32_t(1) << key))
+            postKey(controls::keyCode(controls::Key(key)), false);
+    }
+    for (int key = 0; key < controls::KeyCount; ++key)
+    {
+        if (pressed & (uint32_t(1) << key))
+            postKey(controls::keyCode(controls::Key(key)), true);
+    }
+    s_keysDown = held;
+}
+
+void queueKey(const controls::KeyCode& key)
+{
+    s_typing.push_back(TypedKey{ key, true });
+    s_typing.push_back(TypedKey{ key, false });
+}
+
+// Types confirmed text as key messages (capitals with Shift), at most maxLength characters, and ends it with Enter.
+void queueText(const char* text, uint32_t maxLength, bool lettersOnly)
+{
+    uint32_t typed = 0;
+    for (const char* c = text; *c && typed < maxLength; ++c)
+    {
+        controls::KeyCode key;
+        bool shift;
+        if (!controls::characterKey(*c, &key, &shift) || (lettersOnly && *c >= '0' && *c <= '9'))
+        {
+            pf::logInfo("input: '%c' cannot be typed", *c);
+            continue;
+        }
+        if (shift)
+            s_typing.push_back(TypedKey{ controls::shiftKey(), true });
+        queueKey(key);
+        if (shift)
+            s_typing.push_back(TypedKey{ controls::shiftKey(), false });
+        ++typed;
+    }
+    queueKey(controls::keyCode(controls::KeyEnter));
+}
+
+void openIme(bool forField)
+{
+    if (forField)
+        s_imeOpen = pf::ime::requestOpen(s_field.title, s_field.text, s_field.maxLength);
+    else
+        s_imeOpen = pf::ime::requestOpen(u"Text", u"", TextLength);
+    s_imeForField = s_imeOpen && forField;
+}
+
+void updateIme()
+{
+    char text[pf::ime::MaxTextLength + 1];
+    const pf::ime::Result result = pf::ime::takeResult(text, sizeof(text));
+    if (result == pf::ime::ResultPending)
+        return;
+    const bool field = s_imeForField;
+    s_imeOpen = false;
+    s_imeForField = false;
+    if (field && !s_field.active)
+        return;     // the field closed meanwhile
+    if (result == pf::ime::ResultConfirmed)
+        queueText(text, field ? s_field.maxLength : TextLength, field && s_field.lettersOnly);
+    else if (result == pf::ime::ResultCancelled && field)
+        queueKey(controls::keyCode(controls::KeyEscape));
+}
+
+void typeNext(uint64_t now)
+{
+    if (s_typing.empty() || now - s_typedUs < TypingIntervalUs)
+        return;
+    const TypedKey typed = s_typing.front();
+    s_typing.pop_front();
+    s_typedDown[typed.key.dik()] = typed.down;
+    postKey(typed.key, typed.down);
+    s_typedUs = now;
+}
+
+// Under s_mutex. While the on-screen keyboard is up or its text is being typed, and until every pad input is
+// released after that (a button that closed the keyboard does not reach the game), the pad holds no keys or buttons.
+void pump()
+{
+    const uint64_t now = pf::ticksUs();
+    const controls::PadSample pad = controls::readPad();
+    controls::State state = s_mapper.update(pad, now);
+    if (s_imeOpen || !s_typing.empty())
+        s_releaseWait = true;
+    else if (!pad.inputs)
+        s_releaseWait = false;
+    const bool busy = s_imeOpen || !s_typing.empty() || s_releaseWait;
+    if (!busy && s_field.active && !s_field.shown)
+    {
+        openIme(true);
+        s_field.shown = s_imeOpen;
+    }
+    else if (!busy && state.openIme)
+    {
+        openIme(s_field.active);
+    }
+    if (busy)
+    {
+        state.buttons = 0;
+        state.keys = 0;
+        memset(state.axes, 0, sizeof(state.axes));
+    }
+    postKeys(state.keys);
+    if (s_imeOpen)
+        updateIme();
+    typeNext(now);
+    s_state = state;
+}
+
+}
+
+x86::reg32 Input::getButtonCount() const
+{
+    return 0;
+}
+
+x86::reg32 Input::getAxesCount() const
+{
+    return 0;
+}
+
+// DIDEVTYPE_KEYBOARD, DIDEVTYPEKEYBOARD_PCENH.
+x86::reg32 Keyboard::getDeviceType() const
+{
+    return 0x0403;
+}
+
+x86::reg32 Keyboard::getButtonCount() const
+{
+    return 128;
+}
+
+void Keyboard::getState(x86::reg8 (&keys)[256])
+{
+    pf::LwLockGuard lock(s_mutex);
+    pump();
+    memset(keys, 0, sizeof(keys));
+    for (int key = 0; key < controls::KeyCount; ++key)
+    {
+        if (s_keysDown & (uint32_t(1) << key))
+            keys[controls::keyCode(controls::Key(key)).dik()] = 0x80;
+    }
+    for (int code = 0; code < 256; ++code)
+    {
+        if (s_typedDown[code])
+            keys[code] = 0x80;
+    }
+}
+
+// DIDEVTYPE_MOUSE, DIDEVTYPEMOUSE_TRADITIONAL.
+x86::reg32 Mouse::getDeviceType() const
+{
+    return 0x0202;
+}
+
+x86::reg32 Mouse::getButtonCount() const
+{
+    return 3;
+}
+
+x86::reg32 Mouse::getAxesCount() const
+{
+    return 3;
+}
+
+Gamepad::Gamepad(x86::reg32 gamepadIndex)
+    :   m_index(gamepadIndex)
+{
+    // DirectInput defaults: range 0..65535, no dead zone, saturation at full deflection.
+    for (AxisProperties& axis : m_axisProperties)
+        axis = { 0, 65535, 0, 10000 };
+}
+
+Gamepad::~Gamepad()
+{
+}
+
+x86::reg32 Gamepad::getCount()
+{
+    return 1;
+}
+
+x86::reg32 Gamepad::getButtonCount() const
+{
+    return controls::joystickButtonCount();
+}
+
+x86::reg32 Gamepad::getAxesCount() const
+{
+    return controls::presentAxisCount();
+}
+
+x86::reg32 Gamepad::getDeviceType() const
+{
+    return controls::JoystickDeviceType;
+}
+
+// Each stick is shaped as a whole with the properties of its first axis; absent axes read centred.
+void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount])
+{
+    controls::State state;
+    {
+        pf::LwLockGuard lock(s_mutex);
+        pump();
+        state = s_state;
+    }
+    float shaped[controls::AxisCount] = {};
+    const controls::Axis sticks[2][2] = { { controls::AxisX, controls::AxisY }, { controls::AxisRx, controls::AxisRy } };
+    for (const auto& stick : sticks)
+    {
+        const AxisProperties& properties = m_axisProperties[stick[0]];
+        controls::shapeStick(state.axes[stick[0]], state.axes[stick[1]], properties.deadZone, properties.saturation,
+                             &shaped[stick[0]], &shaped[stick[1]]);
+    }
+    for (int axis = 0; axis < controls::AxisCount; ++axis)
+    {
+        const AxisProperties& properties = m_axisProperties[axis];
+        const float position = (shaped[axis] + 1.0f) * 0.5f;
+        const float range = float(properties.max) - float(properties.min);
+        axes[axis] = x86::sreg32(std::lround(float(properties.min) + position * range));
+    }
+    *buttons = state.buttons;
+}
+
+void Gamepad::updateKeys()
+{
+    pf::LwLockGuard lock(s_mutex);
+    pump();
+}
+
+void Gamepad::editText(const char* title, const char* text, uint32_t maxLength, bool lettersOnly)
+{
+    pf::LwLockGuard lock(s_mutex);
+    if (!s_field.active)
+    {
+        s_field.active = true;
+        s_field.shown = false;
+        pf::logInfo("input: text field \"%s\" (%u characters)", text, unsigned(maxLength));
+    }
+    copyText(s_field.title, title, pf::ime::MaxTitleLength);
+    copyText(s_field.text, text, pf::ime::MaxTextLength);
+    s_field.maxLength = maxLength;
+    s_field.lettersOnly = lettersOnly;
+}
+
+void Gamepad::endTextEdit()
+{
+    pf::LwLockGuard lock(s_mutex);
+    if (!s_field.active)
+        return;
+    s_field.active = false;
+    if (s_imeForField)
+        pf::ime::requestClose();
+    pf::logInfo("input: text field closed");
+}
+
+}
