@@ -61,6 +61,11 @@ bool mustPark(const ThreadControl* control);
 // Blocks a thread that released the execution lock until it is resumed or cpu terminates.
 void park(ThreadControl* control, const x86::CPU& cpu);
 
+// Exit code of a guest thread (GetExitCodeThread): set by ExitThread or by the thread's return value, whichever
+// comes first. False while the thread runs.
+void setExitCode(x86::reg32 threadId, x86::reg32 code);
+bool exitCode(x86::reg32 threadId, x86::reg32* code);
+
 }
 
 }

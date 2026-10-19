@@ -18,6 +18,8 @@ LSTATUS RegCreateKeyExA(WinApplication* app, x86::CPU& cpu,
                         LPDWORD lpdwDisposition);
 LSTATUS RegFlushKey(WinApplication* app, x86::CPU& cpu,
                     HKEY hKey);
+LSTATUS RegOpenKeyA(WinApplication* app, x86::CPU& cpu,
+                    HKEY hKey, LPCSTR lpSubKey, PHKEY phkResult);
 LSTATUS RegOpenKeyExA(WinApplication* app, x86::CPU& cpu,
                       HKEY hKey, LPCSTR lpSubKey, DWORD ulOptions, REGSAM samDesired, PHKEY phkResult);
 LSTATUS RegQueryValueExA(WinApplication* app, x86::CPU& cpu,

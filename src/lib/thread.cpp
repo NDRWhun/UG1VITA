@@ -6,6 +6,7 @@
 #include <platform/sync.h>
 #include <platform/time.h>
 #include <algorithm>
+#include <map>
 #include <memory>
 
 namespace win32
@@ -349,6 +350,7 @@ int Thread::run(void* data)
     int result = 0;
     if (!shared->m_stop.load())
         result = shared->m_app->runThread(shared->m_cpu, shared->m_entryPoint, { shared->m_parameter });
+    scheduler::setExitCode(shared->m_threadId, x86::reg32(result));
     unregisterCurrentThread();
     shared->m_finished.store(true);
     return result;
@@ -500,6 +502,25 @@ bool anySuspended()
 bool mustPark(const ThreadControl* control)
 {
     return control && control->suspendCount.load() > 0;
+}
+
+// Guest thread id -> exit code, under s_tableMutex. Ids are never reused.
+static std::map<x86::reg32, x86::reg32> s_exitCodes;
+
+void setExitCode(x86::reg32 threadId, x86::reg32 code)
+{
+    pf::LwLockGuard guard(s_tableMutex);
+    s_exitCodes.insert(std::make_pair(threadId, code));
+}
+
+bool exitCode(x86::reg32 threadId, x86::reg32* code)
+{
+    pf::LwLockGuard guard(s_tableMutex);
+    const auto it = s_exitCodes.find(threadId);
+    if (it == s_exitCodes.end())
+        return false;
+    *code = it->second;
+    return true;
 }
 
 void park(ThreadControl* control, const x86::CPU& cpu)

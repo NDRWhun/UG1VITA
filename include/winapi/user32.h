@@ -24,13 +24,6 @@ struct WNDCLASSA
     x86::reg32  lpczClassName;
 };
 
-typedef x86::reg32 PFNCALLBACK;
-typedef HANDLE HDDEDATA;
-typedef HANDLE HCONV;
-typedef HANDLE HSZ;
-struct CONVCONTEXT;
-typedef CONVCONTEXT* PCONVCONTEXT;
-
 BOOL AdjustWindowRect(WinApplication* app, x86::CPU& cpu,
                       LPRECT lpRect, DWORD  dwStyle, BOOL   bMenu);
 HDC BeginPaint(WinApplication* app, x86::CPU& cpu,
@@ -47,19 +40,6 @@ HWND CreateWindowExA(WinApplication* app, x86::CPU& cpu,
                      DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
                      int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu,
                      HINSTANCE hInstance, LPVOID lpParam);
-HDDEDATA DdeClientTransaction(WinApplication* app, x86::CPU& cpu,
-                              LPBYTE pData, DWORD cbData, HCONV hConv, HSZ hszItem,
-                              UINT wFmt, UINT wType, DWORD dwTimeout, LPDWORD pdwResult);
-HCONV DdeConnect(WinApplication* app, x86::CPU& cpu, DWORD idInst,
-                 HSZ hszService, HSZ hszTopic, PCONVCONTEXT pCC);
-HSZ DdeCreateStringHandleA(WinApplication* app, x86::CPU& cpu,
-                           DWORD idInst, LPCSTR psz, int iCodePage);
-UINT DdeGetLastError(WinApplication* app, x86::CPU& cpu, DWORD idInst);
-UINT DdeInitializeA(WinApplication* app, x86::CPU& cpu, LPDWORD pidInst,
-                    PFNCALLBACK pfnCallback, DWORD afCmd, DWORD ulRes);
-DWORD DdeQueryStringA(WinApplication* app, x86::CPU& cpu, DWORD idInst,
-                      HSZ hsz, LPSTR psz, DWORD cchMax, int iCodePage);
-BOOL DdeUninitialize(WinApplication* app, x86::CPU& cpu, DWORD idInst);
 LRESULT DefWindowProcA(WinApplication* app, x86::CPU& cpu,
                        HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 BOOL DestroyWindow(WinApplication* app, x86::CPU& cpu,
@@ -130,7 +110,36 @@ BOOL UnhookWindowsHookEx(WinApplication* app, x86::CPU& cpu,
                          HHOOK hhk);
 void keybd_event(WinApplication* app, x86::CPU& cpu,
                  BYTE bVk, BYTE bScan, DWORD dwFlags, ULONG_PTR dwExtraInfo);
-void wsprintfA(WinApplication* app, x86::CPU& cpu);
+// cdecl with variable arguments: reads them from the guest stack itself.
+int wsprintfA(WinApplication* app, x86::CPU& cpu);
+int wvsprintfA(WinApplication* app, x86::CPU& cpu,
+               LPSTR lpOutput, LPCSTR lpFmt, x86::reg32 arglist);
+
+struct WNDCLASSEXA;
+LONG SetWindowLongA(WinApplication* app, x86::CPU& cpu,
+                    HWND hWnd, int nIndex, LONG dwNewLong);
+HWND GetForegroundWindow(WinApplication* app, x86::CPU& cpu);
+BOOL AdjustWindowRectEx(WinApplication* app, x86::CPU& cpu,
+                        LPRECT lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle);
+HWND SetFocus(WinApplication* app, x86::CPU& cpu,
+              HWND hWnd);
+HWND SetCapture(WinApplication* app, x86::CPU& cpu,
+                HWND hWnd);
+BOOL ReleaseCapture(WinApplication* app, x86::CPU& cpu);
+BOOL PeekMessageA(WinApplication* app, x86::CPU& cpu,
+                  LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg);
+BOOL GetWindowRect(WinApplication* app, x86::CPU& cpu,
+                   HWND hWnd, LPRECT lpRect);
+ATOM RegisterClassExA(WinApplication* app, x86::CPU& cpu,
+                      const WNDCLASSEXA* lpwcx);
+BOOL SetRect(WinApplication* app, x86::CPU& cpu,
+             LPRECT lprc, int xLeft, int yTop, int xRight, int yBottom);
+BOOL UnregisterClassA(WinApplication* app, x86::CPU& cpu,
+                      LPCSTR lpClassName, HINSTANCE hInstance);
+// Resolved at run time by the CRT's error box (LoadLibraryA("user32.dll")).
+HWND GetActiveWindow(WinApplication* app, x86::CPU& cpu);
+HWND GetLastActivePopup(WinApplication* app, x86::CPU& cpu,
+                        HWND hWnd);
 LRESULT SendMessageA(WinApplication* app, x86::CPU& cpu,
                      HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 LRESULT DefMDIChildProcA(WinApplication* app, x86::CPU& cpu,

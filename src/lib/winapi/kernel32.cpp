@@ -1,4 +1,10 @@
 #include <winapi/kernel32.h>
+#include <winapi/support.h>
+#include <winapi/user32.h>
+#include <winapi/wrapper.h>
+#include <platform/sync.h>
+#include <sys/time.h>
+#include <iterator>
 #include <x86.h>
 #include <lib/memmap.h>
 #include <lib/mutex.h>
@@ -53,6 +59,8 @@ struct OSVERSIONINFOEXA
 // Pseudo handles of the calling process and thread; they need no closing.
 static const HANDLE CurrentProcessHandle = 0xffffffff;
 static const HANDLE CurrentThreadHandle = 0xfffffffe;
+// The executable's module handle: its image base (Speed.exe has no relocations, so it always loads there).
+static const HMODULE ExecutableHandle = 0x400000;
 
 static const DWORD WAIT_FAILED = 0xffffffff;
 static const DWORD MEM_COMMIT = 0x1000;
@@ -91,6 +99,23 @@ static DWORD returnPath(char* buffer, DWORD size, const std::string& path)
     if (!copyString(buffer, size, path.c_str()))
         return DWORD(path.size() + 1);
     return DWORD(path.size());
+}
+
+// No serial ports: CreateFileA refuses COMn, so no handle is a communications device (ERROR_INVALID_HANDLE).
+static BOOL noCommDevice(WinApplication* app, x86::CPU& cpu, const char* api)
+{
+    offline(app, cpu, api);
+    setLastError(app, cpu, error::InvalidHandle);
+    return 0;
+}
+
+// COM1..COM9 and LPT1..LPT9, with or without the \\.\ device prefix.
+static bool isPortName(const char* name)
+{
+    if (strncmp(name, "\\\\.\\", 4) == 0)
+        name += 4;
+    return (strncasecmp(name, "COM", 3) == 0 || strncasecmp(name, "LPT", 3) == 0) && name[3] >= '1'
+        && name[3] <= '9' && (name[4] == 0 || name[4] == ':');
 }
 
 BOOL CloseHandle(WinApplication* app, x86::CPU& cpu,
@@ -181,20 +206,30 @@ HANDLE CreateFileA(WinApplication* app, x86::CPU& cpu,
                    LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
                    DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 {
-    RC_USE(cpu);
     RC_USE(dwShareMode);
     RC_USE(lpSecurityAttributes);
     RC_USE(hTemplateFile);
+    if (!lpFileName)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return HANDLE(-1);
+    }
+    // Serial and parallel ports (the network library's serial play) do not exist.
+    if (isPortName(lpFileName))
+    {
+        offline(app, cpu, "CreateFileA(COM port)");
+        setLastError(app, cpu, error::FileNotFound);
+        return HANDLE(-1);
+    }
     win32::File* file = new win32::File(lpFileName, dwDesiredAccess, dwFlagsAndAttributes, dwCreationDisposition);
     if (*file)
     {
+        setLastError(app, cpu, error::Success);
         return app->allocateResource(file);
     }
-    else
-    {
-        delete file;
-        return HANDLE(-1);
-    }
+    delete file;
+    setLastError(app, cpu, error::FileNotFound);
+    return HANDLE(-1);
 }
 
 HANDLE CreateFileMappingA(WinApplication* app, x86::CPU& cpu,
@@ -314,12 +349,9 @@ void EnterCriticalSection(WinApplication* app, x86::CPU& cpu,
 BOOL EscapeCommFunction(WinApplication* app, x86::CPU& cpu,
                         HANDLE hFile, DWORD dwFunc)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hFile);
     RC_USE(dwFunc);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "EscapeCommFunction");
 }
 
 void ExitProcess(WinApplication* app, x86::CPU& cpu,
@@ -331,11 +363,11 @@ void ExitProcess(WinApplication* app, x86::CPU& cpu,
     cpu.terminate = true;
 }
 
+// Ends the calling guest thread: its code stops at the next check of cpu.terminate.
 void ExitThread(WinApplication* app, x86::CPU& cpu,
                 DWORD dwExitCode)
 {
-    RC_USE(app);
-    RC_USE(dwExitCode);
+    scheduler::setExitCode(threadField(app, cpu, teb::ThreadId), dwExitCode);
     cpu.terminate = true;
 }
 
@@ -388,11 +420,14 @@ BOOL FreeEnvironmentStringsA(WinApplication* app, x86::CPU& cpu,
     return 1;
 }
 
+// The port's libraries stay loaded (they are imports of the executable): a valid handle is released at once.
 BOOL FreeLibrary(WinApplication* app, x86::CPU& cpu,
                  HMODULE hLibModule)
 {
-    RC_USE(cpu);
-    return app->freeResource(hLibModule) ? 1 : 0;
+    if (hLibModule == ExecutableHandle || dynamic_cast<win32::LibraryHandle*>(app->getResource(hLibModule)))
+        return 1;
+    setLastError(app, cpu, error::InvalidHandle);
+    return 0;
 }
 
 // Windows-1252.
@@ -429,34 +464,25 @@ BOOL GetCPInfo(WinApplication* app, x86::CPU& cpu,
 BOOL GetCommModemStatus(WinApplication* app, x86::CPU& cpu,
                         HANDLE hFile, LPDWORD lpModemStat)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hFile);
     RC_USE(lpModemStat);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "GetCommModemStatus");
 }
 
 BOOL GetCommProperties(WinApplication* app, x86::CPU& cpu,
                        HANDLE hFile, LPCOMMPROP lpCommProp)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hFile);
     RC_USE(lpCommProp);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "GetCommProperties");
 }
 
 BOOL GetCommState(WinApplication* app, x86::CPU& cpu,
                   HANDLE hFile, LPDCB lpDCB)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hFile);
     RC_USE(lpDCB);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "GetCommState");
 }
 
 x86::reg32 GetCommandLineA(WinApplication* app, x86::CPU& cpu)
@@ -657,11 +683,13 @@ DWORD GetLogicalDrives(WinApplication* app, x86::CPU& cpu)
 DWORD GetModuleFileNameA(WinApplication* app, x86::CPU& cpu,
                          HMODULE hModule, LPSTR lpFilename, DWORD nSize)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    // Only the executable (handle 0, or 1 from GetModuleHandleA) has a file name.
-    if (hModule > 1 || !lpFilename || nSize == 0)
+    // Only the executable (handle 0 or its image base) has a file name.
+    if ((hModule != 0 && hModule != ExecutableHandle) || !lpFilename || nSize == 0)
+    {
+        setLastError(app, cpu, hModule != 0 && hModule != ExecutableHandle ? error::InvalidHandle
+                                                                           : error::InsufficientBuffer);
         return 0;
+    }
     // A buffer too small gets nSize - 1 characters and the terminator, and the result is nSize.
     const DWORD length = DWORD(std::min<size_t>(s_modulePath.size(), nSize - 1));
     memcpy(lpFilename, s_modulePath.c_str(), length);
@@ -680,13 +708,68 @@ DWORD GetModuleFileNameW(WinApplication* app, x86::CPU& cpu,
     return 0;
 }
 
+// ---- Modules --------------------------------------------------------------------------------------------------
+
+// The libraries the game resolves at run time (docs/re/cpu_threads.md section 4). They are imported by Speed.exe,
+// so they count as loaded for GetModuleHandleA. Names not listed resolve to NULL, which every caller checks:
+// d3d9 Direct3DShaderValidatorCreate9 and DebugSetMute, kernel32 GetDiskFreeSpaceExA (only the unused EA file
+// cache calls it), user32 GetProcessWindowStation / GetUserObjectInformationA (the CRT then skips its
+// interactive-station test). d3d9d.dll and mscoree.dll are not present.
+static Library s_kernel32Library("kernel32.dll");
+static Library s_user32Library("user32.dll");
+static Library s_d3d9Library("d3d9.dll");
+
+static std::map<Library*, HMODULE> s_moduleHandles;
+static pf::LwMutex s_moduleMutex("modules");
+
+void registerModules(WinApplication* app)
+{
+    s_kernel32Library
+        .registerSymbol("IsProcessorFeaturePresent",
+                        &Wrapper<decltype(&IsProcessorFeaturePresent), &IsProcessorFeaturePresent>::stdcall)
+        .registerSymbol("InitializeCriticalSectionAndSpinCount",
+                        &Wrapper<decltype(&InitializeCriticalSectionAndSpinCount),
+                                 &InitializeCriticalSectionAndSpinCount>::stdcall);
+    s_user32Library
+        .registerSymbol("MessageBoxA", &Wrapper<decltype(&user32::MessageBoxA), &user32::MessageBoxA>::stdcall)
+        .registerSymbol("GetActiveWindow",
+                        &Wrapper<decltype(&user32::GetActiveWindow), &user32::GetActiveWindow>::stdcall)
+        .registerSymbol("GetLastActivePopup",
+                        &Wrapper<decltype(&user32::GetLastActivePopup), &user32::GetLastActivePopup>::stdcall);
+    s_kernel32Library.registerSymbols(app);
+    s_user32Library.registerSymbols(app);
+    s_d3d9Library.registerSymbols(app);
+}
+
+// One handle per library for the process's lifetime.
+static HMODULE moduleHandle(WinApplication* app, LPCSTR name)
+{
+    Library* library = Library::findLibrary(name);
+    if (!library)
+        return 0;
+    pf::LwLockGuard guard(s_moduleMutex);
+    HMODULE& handle = s_moduleHandles[library];
+    if (!handle)
+        handle = app->allocateResource(new LibraryHandle(name));
+    return handle;
+}
+
+static bool isExecutableName(LPCSTR name)
+{
+    const char* base = strrchr(name, '\\');
+    base = base ? base + 1 : name;
+    return strcasecmp(base, "speed.exe") == 0 || strcasecmp(base, "speed") == 0;
+}
+
 HMODULE GetModuleHandleA(WinApplication* app, x86::CPU& cpu,
                          LPCSTR lpModuleName)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    // Only the executable has a module handle; libraries are loaded with LoadLibraryA.
-    return lpModuleName ? 0 : 1;
+    if (!lpModuleName || isExecutableName(lpModuleName))
+        return ExecutableHandle;
+    const HMODULE handle = moduleHandle(app, lpModuleName);
+    if (!handle)
+        setLastError(app, cpu, 126);    // ERROR_MOD_NOT_FOUND
+    return handle;
 }
 
 UINT GetOEMCP(WinApplication* app, x86::CPU& cpu)
@@ -700,25 +783,38 @@ BOOL GetOverlappedResult(WinApplication* app, x86::CPU& cpu,
                          HANDLE hFile, LPOVERLAPPED lpOverlapped,
                          LPDWORD lpNumberOfBytesTransferred, BOOL bWait)
 {
-    RC_USE(app);
-    RC_USE(cpu);
+    // Only the serial code issues overlapped I/O, and it never gets a port; file I/O is synchronous.
     RC_USE(hFile);
     RC_USE(lpOverlapped);
     RC_USE(lpNumberOfBytesTransferred);
     RC_USE(bWait);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "GetOverlappedResult");
 }
 
+// The executable exports nothing; ordinals are not resolved.
 FARPROC GetProcAddress(WinApplication* app, x86::CPU& cpu,
                        HMODULE hModule, LPCSTR lpProcName)
 {
-    RC_USE(cpu);
+    static const DWORD ERROR_PROC_NOT_FOUND = 127;
+    const x86::reg32 nameAddress = app->getMemory<x86::reg32>(cpu.esp + 8);
     win32::LibraryHandle* libraryHandle = dynamic_cast<win32::LibraryHandle*>(app->getResource(hModule));
-    RC_ASSERT(libraryHandle);
-    const x86::reg32 address = libraryHandle->getLibrary()->find(lpProcName);
+    if (!libraryHandle && hModule != ExecutableHandle)
+    {
+        setLastError(app, cpu, error::InvalidHandle);
+        return 0;
+    }
+    if (nameAddress < 0x10000)
+    {
+        pf::logInfo("GetProcAddress: ordinal %u not resolved (from 0x%08x)", nameAddress, callerAddress(app, cpu));
+        setLastError(app, cpu, ERROR_PROC_NOT_FOUND);
+        return 0;
+    }
+    const x86::reg32 address = libraryHandle ? libraryHandle->getLibrary()->find(lpProcName) : 0;
     if (!address)
-        pf::logInfo("GetProcAddress: no %s", lpProcName);
+    {
+        pf::logInfo("GetProcAddress: %s not provided, NULL (from 0x%08x)", lpProcName, callerAddress(app, cpu));
+        setLastError(app, cpu, ERROR_PROC_NOT_FOUND);
+    }
     return address;
 }
 
@@ -882,13 +978,18 @@ void LeaveCriticalSection(WinApplication* app, x86::CPU& cpu,
 HMODULE LoadLibraryA(WinApplication* app, x86::CPU& cpu,
                      LPCSTR lpLibFileName)
 {
-    RC_USE(cpu);
-    win32::LibraryHandle* lib = new win32::LibraryHandle(lpLibFileName);
-    if (*lib)
-        return app->allocateResource(lib);
-    pf::logInfo("LoadLibraryA: %s is not available", lpLibFileName);
-    delete lib;
-    return 0;
+    if (!lpLibFileName)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    const HMODULE handle = moduleHandle(app, lpLibFileName);
+    if (!handle)
+    {
+        pf::logInfo("LoadLibraryA: %s is not available (from 0x%08x)", lpLibFileName, callerAddress(app, cpu));
+        setLastError(app, cpu, 126);    // ERROR_MOD_NOT_FOUND
+    }
+    return handle;
 }
 
 x86::reg32 MapViewOfFile(WinApplication* app, x86::CPU& cpu,
@@ -995,12 +1096,9 @@ BOOL PulseEvent(WinApplication* app, x86::CPU& cpu, HANDLE hEvent)
 BOOL PurgeComm(WinApplication* app, x86::CPU& cpu,
                HANDLE hFile, DWORD dwFlags)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hFile);
     RC_USE(dwFlags);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "PurgeComm");
 }
 
 // There is no console: no input records are read.
@@ -1108,23 +1206,17 @@ void RtlUnwind(WinApplication* app, x86::CPU& cpu,
 BOOL SetCommState(WinApplication* app, x86::CPU& cpu,
                   HANDLE hFile, LPDCB lpDCB)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hFile);
     RC_USE(lpDCB);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "SetCommState");
 }
 
 BOOL SetCommTimeouts(WinApplication* app, x86::CPU& cpu,
                      HANDLE hFile, LPCOMMTIMEOUTS lpCommTimeouts)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hFile);
     RC_USE(lpCommTimeouts);
-    RC_ASSERT(false);
-    return 0;
+    return noCommDevice(app, cpu, "SetCommTimeouts");
 }
 
 BOOL SetConsoleCtrlHandler(WinApplication* app, x86::CPU& cpu,
@@ -2477,6 +2569,410 @@ int GetTimeFormatA(WinApplication* app, x86::CPU& cpu,
         snprintf(text, sizeof(text), "%u:%02u:%02u %s", t.wHour % 12 ? t.wHour % 12 : 12, t.wMinute, t.wSecond,
                  t.wHour < 12 ? "AM" : "PM");
     return formatResult(text, lpTimeStr, cchTime);
+}
+
+// ---- Imports of Speed.exe added for this game ------------------------------------------------------------------
+
+// Guest code is always mapped: a code pointer is bad only when null or outside the guest address space.
+BOOL IsBadCodePtr(WinApplication* app, x86::CPU& cpu, x86::reg32 lpfn)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    return lpfn == 0 || !MemMap::isGuestRange(lpfn, 1) ? 1 : 0;
+}
+
+// The code pages the shims convert: ANSI 1252 and the OEM pages 437 and 850 (both read as Latin-1 here).
+BOOL IsValidCodePage(WinApplication* app, x86::CPU& cpu, UINT CodePage)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    return CodePage == 1252 || CodePage == 437 || CodePage == 850 ? 1 : 0;
+}
+
+// The one installed locale: English (United States), 0x0409.
+static const DWORD LocaleEnglishUs = 0x0409;
+
+static DWORD resolveLocale(DWORD locale)
+{
+    // LOCALE_SYSTEM_DEFAULT, LOCALE_USER_DEFAULT and LOCALE_NEUTRAL stand for the installed locale.
+    return locale == 0x0800 || locale == 0x0400 || locale == 0 ? LocaleEnglishUs : locale & 0xffff;
+}
+
+BOOL IsValidLocale(WinApplication* app, x86::CPU& cpu, DWORD Locale, DWORD dwFlags)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    RC_USE(dwFlags);
+    return resolveLocale(Locale) == LocaleEnglishUs ? 1 : 0;
+}
+
+// Calls the callback once with the locale id as 8 hex digits, as Windows passes it.
+BOOL EnumSystemLocalesA(WinApplication* app, x86::CPU& cpu, x86::reg32 lpLocaleEnumProc, DWORD dwFlags)
+{
+    RC_USE(dwFlags);
+    if (!lpLocaleEnumProc)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    MemMap text(16);
+    snprintf(&app->getMemory<char>(text.getBlockStart()), 16, "%08X", unsigned(LocaleEnglishUs));
+    // BOOL CALLBACK (LPSTR), stdcall.
+    cpu.esp -= 8;
+    app->getMemory<x86::reg32>(cpu.esp + 0) = lpLocaleEnumProc;
+    app->getMemory<x86::reg32>(cpu.esp + 4) = text.getBlockStart();
+    app->dynamic_call(lpLocaleEnumProc, cpu);
+    return 1;
+}
+
+// There is no console: no input events are waiting.
+BOOL GetNumberOfConsoleInputEvents(WinApplication* app, x86::CPU& cpu, HANDLE hConsoleInput,
+                                   LPDWORD lpNumberOfEvents)
+{
+    RC_USE(hConsoleInput);
+    if (!lpNumberOfEvents)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    *lpNumberOfEvents = 0;
+    return 1;
+}
+
+DWORD GetUserDefaultLCID(WinApplication* app, x86::CPU& cpu)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    return LocaleEnglishUs;
+}
+
+// UTC in 100 ns units since 1601.
+void GetSystemTimeAsFileTime(WinApplication* app, x86::CPU& cpu, LPFILETIME lpSystemTimeAsFileTime)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    if (!lpSystemTimeAsFileTime)
+        return;
+    struct timeval now;
+    gettimeofday(&now, nullptr);
+    const x86::reg64 ticks = (x86::reg64(now.tv_sec) + 11644473600ull) * 10000000ull + x86::reg64(now.tv_usec) * 10;
+    lpSystemTimeAsFileTime->dwLowDateTime = DWORD(ticks);
+    lpSystemTimeAsFileTime->dwHighDateTime = DWORD(ticks >> 32);
+}
+
+// No process list on the Vita: the snapshot fails (INVALID_HANDLE_VALUE). The game's single-instance check then
+// reports no other instance (docs/re/boot.md section 1).
+HANDLE CreateToolhelp32Snapshot(WinApplication* app, x86::CPU& cpu, DWORD dwFlags, DWORD th32ProcessID)
+{
+    RC_USE(dwFlags);
+    RC_USE(th32ProcessID);
+    setLastError(app, cpu, error::NotSupported);
+    return HANDLE(-1);
+}
+
+BOOL Process32First(WinApplication* app, x86::CPU& cpu, HANDLE hSnapshot, x86::reg32 lppe)
+{
+    RC_USE(hSnapshot);
+    RC_USE(lppe);
+    setLastError(app, cpu, error::InvalidHandle);
+    return 0;
+}
+
+BOOL Process32Next(WinApplication* app, x86::CPU& cpu, HANDLE hSnapshot, x86::reg32 lppe)
+{
+    RC_USE(hSnapshot);
+    RC_USE(lppe);
+    setLastError(app, cpu, error::InvalidHandle);
+    return 0;
+}
+
+// There are no short (8.3) names: an existing path is its own long name.
+DWORD GetLongPathNameA(WinApplication* app, x86::CPU& cpu, LPCSTR lpszShortPath, LPSTR lpszLongPath,
+                       DWORD cchBuffer)
+{
+    if (!lpszShortPath)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    struct stat status;
+    if (stat(File::hostPath(lpszShortPath).c_str(), &status) != 0)
+    {
+        setLastError(app, cpu, error::FileNotFound);
+        return 0;
+    }
+    const std::string path = lpszShortPath;
+    if (lpszLongPath == lpszShortPath)
+        return cchBuffer > path.size() ? DWORD(path.size()) : DWORD(path.size() + 1);
+    return returnPath(lpszLongPath, cchBuffer, path);
+}
+
+// The process runs on one CPU as far as the guest knows (GetSystemInfo); masks are kept, not applied. The game
+// changes them only around its MHz measurement, which the reported CPU vendor skips (docs/re/cpu_threads.md 1.1).
+static DWORD s_processAffinity = 1;
+static DWORD s_priorityClass = 0x20;   // NORMAL_PRIORITY_CLASS
+
+BOOL SetProcessAffinityMask(WinApplication* app, x86::CPU& cpu, HANDLE hProcess, DWORD dwProcessAffinityMask)
+{
+    if (hProcess != CurrentProcessHandle || (dwProcessAffinityMask & ~DWORD(1)) || !dwProcessAffinityMask)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    s_processAffinity = dwProcessAffinityMask;
+    return 1;
+}
+
+BOOL GetProcessAffinityMask(WinApplication* app, x86::CPU& cpu, HANDLE hProcess, LPDWORD lpProcessAffinityMask,
+                            LPDWORD lpSystemAffinityMask)
+{
+    if (hProcess != CurrentProcessHandle || !lpProcessAffinityMask || !lpSystemAffinityMask)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    *lpProcessAffinityMask = s_processAffinity;
+    *lpSystemAffinityMask = 1;
+    return 1;
+}
+
+// IDLE, BELOW_NORMAL, NORMAL, ABOVE_NORMAL, HIGH or REALTIME; the class is kept and reported, thread priorities
+// alone decide scheduling.
+BOOL SetPriorityClass(WinApplication* app, x86::CPU& cpu, HANDLE hProcess, DWORD dwPriorityClass)
+{
+    static const DWORD classes[] = { 0x40, 0x4000, 0x20, 0x8000, 0x80, 0x100 };
+    if (hProcess != CurrentProcessHandle || std::find(std::begin(classes), std::end(classes), dwPriorityClass)
+                                            == std::end(classes))
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    s_priorityClass = dwPriorityClass;
+    return 1;
+}
+
+DWORD GetPriorityClass(WinApplication* app, x86::CPU& cpu, HANDLE hProcess)
+{
+    if (hProcess != CurrentProcessHandle)
+    {
+        setLastError(app, cpu, error::InvalidHandle);
+        return 0;
+    }
+    return s_priorityClass;
+}
+
+// QueryPerformanceCounter counts microseconds of the process clock.
+BOOL QueryPerformanceFrequency(WinApplication* app, x86::CPU& cpu, x86::reg64* lpFrequency)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    if (!lpFrequency)
+        return 0;
+    const x86::reg64 frequency = 1000000;
+    memcpy(lpFrequency, &frequency, sizeof(frequency));
+    return 1;
+}
+
+// The CPU profile of cpuid (cpu.cpp): x87 without the FDIV erratum, cmpxchg8b and rdtsc; no MMX, SSE, SSE2 or
+// 3DNow!, so every SIMD path of the game stays off (docs/re/cpu_threads.md section 1).
+BOOL IsProcessorFeaturePresent(WinApplication* app, x86::CPU& cpu, DWORD ProcessorFeature)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    enum { PF_COMPARE_EXCHANGE_DOUBLE = 2, PF_RDTSC_INSTRUCTION_AVAILABLE = 8 };
+    return ProcessorFeature == PF_COMPARE_EXCHANGE_DOUBLE || ProcessorFeature == PF_RDTSC_INSTRUCTION_AVAILABLE ? 1 : 0;
+}
+
+// Case-insensitive comparison of the "C" locale: negative, 0 or positive.
+int lstrcmpiA(WinApplication* app, x86::CPU& cpu, LPCSTR lpString1, LPCSTR lpString2)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    if (!lpString1 || !lpString2)
+        return lpString1 ? 1 : lpString2 ? -1 : 0;
+    return compareStrings(NORM_IGNORECASE, reinterpret_cast<const x86::reg8*>(lpString1), -1,
+                          reinterpret_cast<const x86::reg8*>(lpString2), -1) - CSTR_EQUAL;
+}
+
+// Names below U+0100 only (the code page of every guest path); others fail with ERROR_FILE_NOT_FOUND.
+HANDLE CreateFileW(WinApplication* app, x86::CPU& cpu,
+                   LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+                   LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
+                   DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
+{
+    if (!lpFileName)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return HANDLE(-1);
+    }
+    std::string name;
+    for (const WCHAR* c = lpFileName; *c; ++c)
+    {
+        if (*c >= 0x100)
+        {
+            setLastError(app, cpu, error::FileNotFound);
+            return HANDLE(-1);
+        }
+        name += char(*c);
+    }
+    return CreateFileA(app, cpu, name.c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes,
+                       dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+}
+
+// Local memory is the guest heap, as for GlobalAlloc (FormatMessageA allocates with it). NULL on success.
+x86::reg32 LocalFree(WinApplication* app, x86::CPU& cpu, x86::reg32 hMem)
+{
+    if (!hMem || heap::release(hMem))
+        return 0;
+    setLastError(app, cpu, error::InvalidHandle);
+    return hMem;
+}
+
+// System messages (FORMAT_MESSAGE_FROM_SYSTEM) of the error codes the shims set, in English, optionally in a
+// buffer the call allocates; message strings and modules with inserts are not supported.
+DWORD FormatMessageA(WinApplication* app, x86::CPU& cpu, DWORD dwFlags, x86::reg32 lpSource, DWORD dwMessageId,
+                     DWORD dwLanguageId, x86::reg32 lpBuffer, DWORD nSize, x86::reg32 Arguments)
+{
+    RC_USE(dwLanguageId);
+    RC_USE(Arguments);
+    enum
+    {
+        FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100,
+        FORMAT_MESSAGE_IGNORE_INSERTS = 0x200,
+        FORMAT_MESSAGE_FROM_STRING = 0x400,
+        FORMAT_MESSAGE_FROM_HMODULE = 0x800,
+        FORMAT_MESSAGE_FROM_SYSTEM = 0x1000,
+    };
+    if ((dwFlags & (FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_FROM_HMODULE)) || !(dwFlags & FORMAT_MESSAGE_FROM_SYSTEM))
+        unsupported(app, cpu, "FormatMessageA", "flags 0x%x, source 0x%08x, message 0x%x", unsigned(dwFlags),
+                    lpSource, unsigned(dwMessageId));
+    static const struct { DWORD code; const char* text; } messages[] =
+    {
+        { error::Success,            "The operation completed successfully." },
+        { error::FileNotFound,       "The system cannot find the file specified." },
+        { error::PathNotFound,       "The system cannot find the path specified." },
+        { error::AccessDenied,       "Access is denied." },
+        { error::InvalidHandle,      "The handle is invalid." },
+        { error::NoMoreFiles,        "There are no more files." },
+        { error::NotSupported,       "The request is not supported." },
+        { error::InvalidParameter,   "The parameter is incorrect." },
+        { error::CallNotImplemented, "This function is not supported on this system." },
+        { error::InsufficientBuffer, "The data area passed to a system call is too small." },
+        { error::AlreadyExists,      "Cannot create a file when that file already exists." },
+        { 10091,                     "WSAStartup cannot function at this time because the underlying system it uses to provide network services is currently unavailable." },
+        { 10093,                     "Either the application has not called WSAStartup, or WSAStartup failed." },
+    };
+    const char* found = nullptr;
+    for (const auto& message : messages)
+    {
+        if (message.code == dwMessageId)
+            found = message.text;
+    }
+    if (!found)
+    {
+        setLastError(app, cpu, 317);    // ERROR_MR_MID_NOT_FOUND
+        return 0;
+    }
+    const std::string text = std::string(found) + "\r\n";
+    const DWORD length = DWORD(text.size());
+    x86::reg32 target = lpBuffer;
+    if (dwFlags & FORMAT_MESSAGE_ALLOCATE_BUFFER)
+    {
+        if (!lpBuffer)
+        {
+            setLastError(app, cpu, error::InvalidParameter);
+            return 0;
+        }
+        target = heap::allocate(std::max(length + 1, nSize), false);
+        app->getMemory<x86::reg32>(lpBuffer) = target;
+    }
+    else if (!lpBuffer || nSize <= length)
+    {
+        setLastError(app, cpu, error::InsufficientBuffer);
+        return 0;
+    }
+    memcpy(&app->getMemory<char>(target), text.c_str(), length + 1);
+    return length;
+}
+
+// STILL_ACTIVE (259) until the thread returned or called ExitThread.
+BOOL GetExitCodeThread(WinApplication* app, x86::CPU& cpu, HANDLE hThread, LPDWORD lpExitCode)
+{
+    static const DWORD STILL_ACTIVE = 259;
+    if (!lpExitCode)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    if (hThread == CurrentThreadHandle)
+    {
+        *lpExitCode = STILL_ACTIVE;
+        return 1;
+    }
+    win32::Thread* thread = dynamic_cast<win32::Thread*>(app->getResource(hThread));
+    if (!thread)
+    {
+        setLastError(app, cpu, error::InvalidHandle);
+        return 0;
+    }
+    x86::reg32 code;
+    *lpExitCode = scheduler::exitCode(thread->threadId(), &code) ? code : STILL_ACTIVE;
+    return 1;
+}
+
+LONG InterlockedExchange(WinApplication* app, x86::CPU& cpu, LPLONG Target, LONG Value)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    return __atomic_exchange_n(Target, Value, __ATOMIC_SEQ_CST);
+}
+
+BOOL WaitCommEvent(WinApplication* app, x86::CPU& cpu, HANDLE hFile, LPDWORD lpEvtMask, LPOVERLAPPED lpOverlapped)
+{
+    RC_USE(hFile);
+    RC_USE(lpEvtMask);
+    RC_USE(lpOverlapped);
+    return noCommDevice(app, cpu, "WaitCommEvent");
+}
+
+BOOL SetCommMask(WinApplication* app, x86::CPU& cpu, HANDLE hFile, DWORD dwEvtMask)
+{
+    RC_USE(hFile);
+    RC_USE(dwEvtMask);
+    return noCommDevice(app, cpu, "SetCommMask");
+}
+
+BOOL SetCommConfig(WinApplication* app, x86::CPU& cpu, HANDLE hCommDev, x86::reg32 lpCC, DWORD dwSize)
+{
+    RC_USE(hCommDev);
+    RC_USE(lpCC);
+    RC_USE(dwSize);
+    return noCommDevice(app, cpu, "SetCommConfig");
+}
+
+BOOL GetCommConfig(WinApplication* app, x86::CPU& cpu, HANDLE hCommDev, x86::reg32 lpCC, LPDWORD lpdwSize)
+{
+    RC_USE(hCommDev);
+    RC_USE(lpCC);
+    RC_USE(lpdwSize);
+    return noCommDevice(app, cpu, "GetCommConfig");
+}
+
+BOOL SetupComm(WinApplication* app, x86::CPU& cpu, HANDLE hFile, DWORD dwInQueue, DWORD dwOutQueue)
+{
+    RC_USE(hFile);
+    RC_USE(dwInQueue);
+    RC_USE(dwOutQueue);
+    return noCommDevice(app, cpu, "SetupComm");
+}
+
+// The spin count does not matter: a section is a host mutex.
+BOOL InitializeCriticalSectionAndSpinCount(WinApplication* app, x86::CPU& cpu,
+                                           LPCRITICAL_SECTION lpCriticalSection, DWORD dwSpinCount)
+{
+    RC_USE(dwSpinCount);
+    InitializeCriticalSection(app, cpu, lpCriticalSection);
+    return 1;
 }
 
 }}

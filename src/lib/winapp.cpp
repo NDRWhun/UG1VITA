@@ -11,6 +11,7 @@
 
 #include <winapi/com.h>
 #include <winapi/ddraw.h>
+#include <winapi/kernel32.h>
 #include <platform/log.h>
 #include <platform/perf.h>
 #include <platform/sync.h>
@@ -148,6 +149,7 @@ WinApplication::WinApplication(const char* appName, x86::reg32 baseAddress, cons
     m_appNameW = new MemMap(4096);
     m_env = new MemMap(4096);
     ddraw::s_dDrawRegistry->registerSymbols(this);
+    kernel32::registerModules(this);
     Event::init();
     Timer::init();
     com::InitialiseComMemory(this);

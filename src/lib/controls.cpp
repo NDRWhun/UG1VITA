@@ -9,14 +9,17 @@
 namespace win32 { namespace controls
 {
 
+// The Vita pad is presented as the EMS USB2 PlayStation 2 adapter (VID 0B43, PID 0003): the game has a built-in
+// binding table for that product (docs/re/input.md sections 5 and 7), so no binding file is needed.
 const char* const JoystickName       = "Vita Gamepad";
-const x86::reg32  JoystickDeviceType = 0x0404;
+const x86::reg32  JoystickDeviceType = 0x0204;      // DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_GAMEPAD
+const GUID        JoystickProduct    = { 0x00030B43, 0x0000, 0x0000, { 0, 0, 'P', 'I', 'D', 'V', 'I', 'D' } };
 
 // ---- Layout (docs/re/input.md section 7) ----
 
-// Joystick buttons by DirectInput index; the game numbers them from 1 (index 0 is its "button 1"). Its default
-// joystick bindings: 1 fire, 2 secondary fire, 3 thrust, 4 brakes, 5 special, 6 fire mode, 7 roll, 8 camera cycle,
-// 9 / 10 right / left brake; in menus 1 accept, 2 back, 10 start. Select is a tap: see the Mapper.
+// Joystick buttons by DirectInput index, in the adapter's PlayStation order. The game's EMS table: 0 camera / back,
+// 1 look back, 2 throttle / select, 3 brake / customise, 4 / 5 shift down / up, 6 nitrous, 7 handbrake, 9 pause,
+// 12-15 steer and menu up, right, down, left. Select is a tap (button 8, respot): see the Mapper.
 struct ButtonMapping
 {
     Input input;
@@ -25,22 +28,26 @@ struct ButtonMapping
 
 static const ButtonMapping s_buttons[] =
 {
-    { Cross,     0 },
+    { Triangle,  0 },
     { Circle,    1 },
-    { R,         2 },
-    { L,         3 },
-    { Triangle,  4 },
-    { FrontTop,  5 },
-    { Square,    6 },
-    { RearRight, 8 },
-    { RearLeft,  9 },
+    { Cross,     2 },
+    { Square,    3 },
+    { RearLeft,  4 },
+    { RearRight, 5 },
+    { L,         6 },
+    { R,         7 },
+    { Start,     9 },
+    { DpadUp,    12 },
+    { DpadRight, 13 },
+    { DpadDown,  14 },
+    { DpadLeft,  15 },
 };
 
-// Button that a short press of Select (no chord) reports: camera cycle.
-static const int s_selectTapButton = 7;
-static const int s_buttonCount = 10;
+// Button that a short press of Select (no chord) reports: respot.
+static const int s_selectTapButton = 8;
+static const int s_buttonCount = 16;
 
-// Keys held while an input is held. The d-pad steers through the game's second keyboard layout and moves menus.
+// Keys held while an input is held: the d-pad moves the cursor of a text field (WM_KEYDOWN Left / Right).
 struct KeyMapping
 {
     Input    input;
@@ -51,11 +58,8 @@ static constexpr uint32_t keys(Key key) { return uint32_t(1) << key; }
 
 static const KeyMapping s_keys[] =
 {
-    { DpadUp,    keys(KeyUp)     },
-    { DpadDown,  keys(KeyDown)   },
     { DpadLeft,  keys(KeyLeft)   },
     { DpadRight, keys(KeyRight)  },
-    { Start,     keys(KeyEscape) },     // pause, back
 };
 
 // Select + input. An input pressed while Select is held uses this table until it is released.
@@ -69,13 +73,7 @@ struct Chord
 
 static const Chord s_chords[] =
 {
-    { Cross,     keys(KeyEnter),                        -1, false },    // sliders, binding capture
-    { Circle,    keys(KeyLeftShift) | keys(KeyDelete),  -1, false },    // remove a binding or passcode
-    { DpadUp,    keys(KeyF1),                           -1, false },    // camera 1
-    { DpadLeft,  keys(KeyF2),                           -1, false },    // camera 0
-    { DpadRight, keys(KeyF3),                           -1, false },    // camera 2
-    { Square,    0,                                      5, false },    // fire mode, as the front touch strip
-    { Triangle,  0,                                     -1, true  },    // text entry
+    { Triangle,  0, -1, true  },    // text entry
 };
 
 // How long a Select tap holds its button, enough for one game frame at 10 fps.
@@ -148,9 +146,10 @@ bool characterKey(char c, KeyCode* key, bool* shift)
 
 // ---- Joystick ----
 
+// The adapter's four axes: X, Y (left stick), Z (combined pedal, held centred) and Rz (right stick Y).
 bool axisPresent(Axis axis)
 {
-    return axis == AxisX || axis == AxisY || axis == AxisRx || axis == AxisRy;
+    return axis == AxisX || axis == AxisY || axis == AxisZ || axis == AxisRz;
 }
 
 x86::reg32 presentAxisCount()
@@ -317,8 +316,16 @@ State Mapper::update(const PadSample& pad, uint64_t nowUs)
 
     state.axes[AxisX] = pad.sticks[0];
     state.axes[AxisY] = pad.sticks[1];
-    state.axes[AxisRx] = pad.sticks[2];
-    state.axes[AxisRy] = pad.sticks[3];
+    state.axes[AxisZ] = 0.0f;
+    state.axes[AxisRz] = pad.sticks[3];
+
+    // Hat 0 follows the d-pad: hundredths of a degree clockwise from up, -1 when centred.
+    const bool up = normal & bit(DpadUp), down = normal & bit(DpadDown);
+    const bool left = normal & bit(DpadLeft), right = normal & bit(DpadRight);
+    const int dy = (down ? 1 : 0) - (up ? 1 : 0);
+    const int dx = (right ? 1 : 0) - (left ? 1 : 0);
+    static const int s_angles[3][3] = { { 31500, 0, 4500 }, { 27000, -1, 9000 }, { 22500, 18000, 13500 } };
+    state.pov = s_angles[dy + 1][dx + 1];
     return state;
 }
 

@@ -345,6 +345,51 @@ int GetTimeFormatA(WinApplication* app, x86::CPU& cpu,
                    DWORD Locale, DWORD dwFlags, const SYSTEMTIME* lpTime, LPCSTR lpFormat, LPSTR lpTimeStr,
                    int cchTime);
 
+// ---- Imports of Speed.exe added for this game ----
+
+BOOL IsBadCodePtr(WinApplication* app, x86::CPU& cpu, x86::reg32 lpfn);
+BOOL IsValidCodePage(WinApplication* app, x86::CPU& cpu, UINT CodePage);
+BOOL IsValidLocale(WinApplication* app, x86::CPU& cpu, DWORD Locale, DWORD dwFlags);
+BOOL EnumSystemLocalesA(WinApplication* app, x86::CPU& cpu, x86::reg32 lpLocaleEnumProc, DWORD dwFlags);
+BOOL GetNumberOfConsoleInputEvents(WinApplication* app, x86::CPU& cpu, HANDLE hConsoleInput,
+                                   LPDWORD lpNumberOfEvents);
+DWORD GetUserDefaultLCID(WinApplication* app, x86::CPU& cpu);
+void GetSystemTimeAsFileTime(WinApplication* app, x86::CPU& cpu, LPFILETIME lpSystemTimeAsFileTime);
+HANDLE CreateToolhelp32Snapshot(WinApplication* app, x86::CPU& cpu, DWORD dwFlags, DWORD th32ProcessID);
+BOOL Process32First(WinApplication* app, x86::CPU& cpu, HANDLE hSnapshot, x86::reg32 lppe);
+BOOL Process32Next(WinApplication* app, x86::CPU& cpu, HANDLE hSnapshot, x86::reg32 lppe);
+DWORD GetLongPathNameA(WinApplication* app, x86::CPU& cpu, LPCSTR lpszShortPath, LPSTR lpszLongPath,
+                       DWORD cchBuffer);
+BOOL SetProcessAffinityMask(WinApplication* app, x86::CPU& cpu, HANDLE hProcess, DWORD dwProcessAffinityMask);
+BOOL GetProcessAffinityMask(WinApplication* app, x86::CPU& cpu, HANDLE hProcess, LPDWORD lpProcessAffinityMask,
+                            LPDWORD lpSystemAffinityMask);
+BOOL SetPriorityClass(WinApplication* app, x86::CPU& cpu, HANDLE hProcess, DWORD dwPriorityClass);
+DWORD GetPriorityClass(WinApplication* app, x86::CPU& cpu, HANDLE hProcess);
+BOOL QueryPerformanceFrequency(WinApplication* app, x86::CPU& cpu, x86::reg64* lpFrequency);
+BOOL IsProcessorFeaturePresent(WinApplication* app, x86::CPU& cpu, DWORD ProcessorFeature);
+int lstrcmpiA(WinApplication* app, x86::CPU& cpu, LPCSTR lpString1, LPCSTR lpString2);
+HANDLE CreateFileW(WinApplication* app, x86::CPU& cpu,
+                   LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+                   LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
+                   DWORD dwFlagsAndAttributes, HANDLE hTemplateFile);
+x86::reg32 LocalFree(WinApplication* app, x86::CPU& cpu, x86::reg32 hMem);
+DWORD FormatMessageA(WinApplication* app, x86::CPU& cpu, DWORD dwFlags, x86::reg32 lpSource, DWORD dwMessageId,
+                     DWORD dwLanguageId, x86::reg32 lpBuffer, DWORD nSize, x86::reg32 Arguments);
+BOOL GetExitCodeThread(WinApplication* app, x86::CPU& cpu, HANDLE hThread, LPDWORD lpExitCode);
+LONG InterlockedExchange(WinApplication* app, x86::CPU& cpu, LPLONG Target, LONG Value);
+BOOL WaitCommEvent(WinApplication* app, x86::CPU& cpu, HANDLE hFile, LPDWORD lpEvtMask, LPOVERLAPPED lpOverlapped);
+BOOL SetCommMask(WinApplication* app, x86::CPU& cpu, HANDLE hFile, DWORD dwEvtMask);
+BOOL SetCommConfig(WinApplication* app, x86::CPU& cpu, HANDLE hCommDev, x86::reg32 lpCC, DWORD dwSize);
+BOOL GetCommConfig(WinApplication* app, x86::CPU& cpu, HANDLE hCommDev, x86::reg32 lpCC, LPDWORD lpdwSize);
+BOOL SetupComm(WinApplication* app, x86::CPU& cpu, HANDLE hFile, DWORD dwInQueue, DWORD dwOutQueue);
+
+// Resolved at run time through GetProcAddress (the CRT's locks).
+BOOL InitializeCriticalSectionAndSpinCount(WinApplication* app, x86::CPU& cpu,
+                                           LPCRITICAL_SECTION lpCriticalSection, DWORD dwSpinCount);
+
+// Registers the libraries LoadLibraryA / GetModuleHandleA / GetProcAddress resolve (kernel32, user32, d3d9).
+void registerModules(WinApplication* app);
+
 // Resource section of the executable (FindResourceA): its guest address and the image base its RVAs refer to.
 void setResourceSection(x86::reg32 imageBase, x86::reg32 address);
 // Guest path of the executable (GetModuleFileNameA).
