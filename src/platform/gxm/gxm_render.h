@@ -116,6 +116,8 @@ private:
     struct ScenePlan
     {
         bool        depthUsed;      // cleared or tested by a draw
+        bool        skipped;        // only colour clears: drawn at the start of scene carriedTo instead
+        uint32_t    carriedTo;
     };
     void planFrame(const render::Frame& frame);
     struct Pending

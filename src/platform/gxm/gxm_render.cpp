@@ -894,6 +894,62 @@ void FrameRenderer::planFrame(const render::Frame& frame)
         for (uint32_t n = 0; n < scene.drawCount && scene.target.depth && !used; ++n)
             used = frame.draws[scene.firstDraw + n].state.depthEnable != 0;
         m_plan[i].depthUsed = used;
+        m_plan[i].skipped = false;
+        m_plan[i].carriedTo = i;
+    }
+
+    // A scene of colour clears alone (the game clears the back buffer right after Present) moves to the start of
+    // the next scene on its target when nothing in between samples that target and its depth clear is dead.
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const render::Scene& scene = frame.scenes[i];
+        bool clears = scene.drawCount != 0;
+        for (uint32_t n = 0; n < scene.drawCount && clears; ++n)
+        {
+            const render::DrawState& s = frame.draws[scene.firstDraw + n].state;
+            clears = s.vertexProgram == render::VpClear && !s.depthEnable;
+        }
+        if (!clears)
+            continue;
+        uint32_t next = i + 1;
+        while (next < frame.sceneCount && (frame.scenes[next].target.color != scene.target.color
+                                           || frame.scenes[next].target.face != scene.target.face))
+            ++next;
+        if (next == frame.sceneCount)
+            continue;
+        bool sampled = false;
+        for (uint32_t k = i + 1; k < next && scene.target.color && !sampled; ++k)
+        {
+            const render::Scene& between = frame.scenes[k];
+            for (uint32_t n = 0; n < between.drawCount && !sampled; ++n)
+                for (const render::TextureStorage* t : frame.draws[between.firstDraw + n].state.textures)
+                    sampled = sampled || t == scene.target.color;
+        }
+        if (sampled)
+            continue;
+        if (scene.target.depth && scene.depthCleared)
+        {
+            bool dead = true;
+            for (uint32_t k = i + 1; k < frame.sceneCount; ++k)
+            {
+                if (frame.scenes[k].target.depth == scene.target.depth && m_plan[k].depthUsed)
+                {
+                    dead = frame.scenes[k].depthCleared;
+                    break;
+                }
+            }
+            if (!dead)
+                continue;
+        }
+        m_plan[i].skipped = true;
+        m_plan[i].carriedTo = next;
+        m_plan[i].depthUsed = false;
+    }
+    // A carried scene that is itself carried passes its clears on.
+    for (uint32_t i = frame.sceneCount; i-- > 0;)
+    {
+        if (m_plan[i].skipped && m_plan[m_plan[i].carriedTo].skipped)
+            m_plan[i].carriedTo = m_plan[m_plan[i].carriedTo].carriedTo;
     }
 }
 
@@ -904,6 +960,8 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
     const bool lastWritesDone = !presentScene(frame);
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
+        if (m_plan[i].skipped)
+            continue;
         const render::Scene& scene = frame.scenes[i];
         const SceGxmColorSurface* color = display;
         SceGxmSyncObject* sync = nullptr;
@@ -950,6 +1008,12 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         sceGxmSetTwoSidedEnable(m_context, SCE_GXM_TWO_SIDED_DISABLED);
         m_lastValid = false;
         m_lastViewport = 0xffff;
+        for (uint32_t c = 0; c < i; ++c)
+        {
+            if (m_plan[c].skipped && m_plan[c].carriedTo == i)
+                for (uint32_t n = 0; n < frame.scenes[c].drawCount; ++n)
+                    draw(frame, frame.draws[frame.scenes[c].firstDraw + n]);
+        }
         for (uint32_t n = 0; n < scene.drawCount; ++n)
             draw(frame, frame.draws[scene.firstDraw + n]);
         const bool last = i + 1 == frame.sceneCount;
