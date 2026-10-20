@@ -885,9 +885,23 @@ void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
     sceGxmDraw(m_context, primitiveType(s.primitive), SCE_GXM_INDEX_FORMAT_U16, d.indices ? d.indices : m_sequence, count);
 }
 
+void FrameRenderer::planFrame(const render::Frame& frame)
+{
+    m_plan.resize(frame.sceneCount);
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const render::Scene& scene = frame.scenes[i];
+        bool used = scene.target.depth && scene.depthCleared;
+        for (uint32_t n = 0; n < scene.drawCount && scene.target.depth && !used; ++n)
+            used = frame.draws[scene.firstDraw + n].state.depthEnable != 0;
+        m_plan[i].depthUsed = used;
+    }
+}
+
 void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync)
 {
     Slot& slot = m_slots[frame.index % Slots];
+    planFrame(frame);
     const bool lastWritesDone = !presentScene(frame);
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
@@ -908,8 +922,9 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         {
             sync = displaySync;
         }
+        // Scenes whose draws never test depth (filter passes, the HUD) neither load nor store it.
         SceGxmDepthStencilSurface depth;
-        const Depth* d = static_cast<const Depth*>(scene.target.depth);
+        const Depth* d = m_plan[i].depthUsed ? static_cast<const Depth*>(scene.target.depth) : nullptr;
         if (d)
         {
             depth = d->surface;
@@ -917,11 +932,11 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
                 sceGxmDepthStencilSurfaceSetBackgroundDepth(&depth, scene.clearDepth);
             sceGxmDepthStencilSurfaceSetForceLoadMode(&depth, scene.depthCleared ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED
                                                                                  : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
-            // Stored only when a later scene of the frame continues with this depth.
+            // Stored only when the next scene of the frame using this depth continues with it.
             bool store = false;
-            for (uint32_t j = i + 1; j < frame.sceneCount && !store; ++j)
+            for (uint32_t j = i + 1; j < frame.sceneCount; ++j)
             {
-                if (frame.scenes[j].target.depth == scene.target.depth)
+                if (frame.scenes[j].target.depth == scene.target.depth && m_plan[j].depthUsed)
                 {
                     store = !frame.scenes[j].depthCleared;
                     break;

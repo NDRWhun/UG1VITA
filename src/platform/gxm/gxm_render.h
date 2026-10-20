@@ -112,6 +112,12 @@ private:
         uint32_t                        vblanks = 2;
         Texture*                        offscreen = nullptr;    // back buffer when not the display size
     };
+    // Per scene of the frame being drawn (render thread).
+    struct ScenePlan
+    {
+        bool        depthUsed;      // cleared or tested by a draw
+    };
+    void planFrame(const render::Frame& frame);
     struct Pending
     {
         int         kind;           // 0 texture, 1 depth, 2 buffer
@@ -170,6 +176,7 @@ private:
     bool                    m_lastValid = false;
     uint32_t                m_lastVertexConstants = 0, m_lastFragmentConstants = 0;
     uint16_t                m_lastViewport = 0xffff;
+    std::vector<ScenePlan>  m_plan;
 };
 
 }}
