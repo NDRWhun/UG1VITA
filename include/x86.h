@@ -36,6 +36,12 @@ typedef int64_t sreg64;
 struct CPU;
 struct FPU;
 
+// Odd parity of a byte (PF is its inverse). __builtin_parity is a libgcc call on ARM.
+inline bool parity8(reg8 value)
+{
+    return (0x6996u >> ((value ^ (value >> 4)) & 15)) & 1;
+}
+
 // The x87 depth after the indirect call at site is not the one the recompiled code expects (the callee returned a
 // float or not, against the analysis): logs the site once and sets the expected depth.
 __attribute__((cold)) void fpuCallMismatch(CPU& cpu, reg32 expected, uint32_t site);

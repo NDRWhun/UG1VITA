@@ -116,6 +116,17 @@ def ftest_value(kind, a, b):
     return 'x86::reg8(%s)' % ' | '.join(terms)
 
 
+# Odd parity of ah & MASK as one comparison: the set bits are C0, C2 and C3 (unordered sets all three).
+FTEST_ODD = {0x01: '!(%(a)s >= %(b)s)', 0x04: '__builtin_isunordered(%(a)s, %(b)s)',
+             0x40: '!__builtin_islessgreater(%(a)s, %(b)s)', 0x05: '(%(a)s < %(b)s)', 0x41: '(%(a)s <= %(b)s)',
+             0x44: '(%(a)s == %(b)s)', 0x45: '!(%(a)s > %(b)s)'}
+
+
+def ftest_odd(kind, a, b):
+    """Odd parity of ftest_value (PF clear)."""
+    return FTEST_ODD[int(kind[5:], 16)] % {'a': a, 'b': b}
+
+
 def lazy_flags(kind, bits, v):
     """Flag expressions of a lazy producer; v maps its operand names to C++ expressions."""
     t, s = T(bits), S(bits)
@@ -136,7 +147,7 @@ def lazy_flags(kind, bits, v):
         r = '%s(%s)' % (t, v['r'])
         # pf: even parity of the low byte.
         return {'cf': 'false', 'of': 'false', 'zf': '(%s == 0)' % r, 'sf': sign(r),
-                'pf': '!__builtin_parity(x86::reg8(%s))' % r}
+                'pf': '!x86::parity8(x86::reg8(%s))' % r}
     if kind in ('inc', 'dec'):
         r = '%s(%s)' % (t, v['r'])
         edge = (1 << (bits - 1)) if kind == 'inc' else mask(bits - 1)
@@ -152,7 +163,7 @@ def lazy_flags(kind, bits, v):
     if kind.startswith('ftest'):
         r = ftest_value(kind, v['fa'], v['fb'])
         return {'cf': 'false', 'of': 'false', 'sf': 'false', 'zf': '(%s == 0)' % r,
-                'pf': '!__builtin_parity(%s)' % r}
+                'pf': '!%s' % ftest_odd(kind, v['fa'], v['fb'])}
     raise AssertionError(kind)
 
 
@@ -186,7 +197,7 @@ def lazy_condition(kind, bits, v, cc):
     if kind.startswith('ftest'):
         r = ftest_value(kind, v['fa'], v['fb'])
         direct = {'e': '(%s == 0)' % r, 'ne': '(%s != 0)' % r, 'be': '(%s == 0)' % r, 'a': '(%s != 0)' % r,
-                  'p': '!__builtin_parity(%s)' % r, 'np': '__builtin_parity(%s)' % r}
+                  'p': '!%s' % ftest_odd(kind, v['fa'], v['fb']), 'np': ftest_odd(kind, v['fa'], v['fb'])}
         return direct.get(cc)
     return None
 
