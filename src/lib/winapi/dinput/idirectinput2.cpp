@@ -1,5 +1,6 @@
 #include <winapi/dinput/idirectinput2.h>
 #include <winapi/dinput/idirectinputdevice.h>
+#include <winapi/support.h>
 #include <winapi/wrapper.h>
 #include <lib/controls.h>
 #include <lib/gamepad.h>
@@ -56,7 +57,7 @@ HRESULT IDirectInput2::CreateDevice(WinApplication* app, x86::CPU& cpu,
     }
     app->allocateResource(input);
     *lplpDirectInputDevice = Packed<IDirectInputDevice>(com::ComAlloc(app));
-    new (&app->getMemory<IDirectInputDevice>(*lplpDirectInputDevice)) IDirectInputDevice(input);
+    new (&app->getMemory<IDirectInputDevice>(*lplpDirectInputDevice)) IDirectInputDevice(input, false);
     return 0;
 }
 
@@ -77,8 +78,7 @@ HRESULT IDirectInput2::EnumDevices(WinApplication* app, x86::CPU& cpu,
             device->dwDevType = controls::JoystickDeviceType;
             device->guidInstance = s_joystickGUID;
             device->guidInstance.Data3 = deviceIndex;
-            device->guidProduct = s_joystickGUID;
-            device->guidProduct.Data3 = 0x1f1f;
+            device->guidProduct = controls::JoystickProduct;
             strcpy(device->tszInstanceName, controls::JoystickName);
             strcpy(device->tszProductName, controls::JoystickName);
             device->guidFFDriver = s_driverGUID;
@@ -96,27 +96,31 @@ HRESULT IDirectInput2::EnumDevices(WinApplication* app, x86::CPU& cpu,
     return 0;
 }
 
+// The system keyboard and mouse and the pads are attached; other devices are not registered.
 HRESULT IDirectInput2::GetDeviceStatus(WinApplication* app, x86::CPU& cpu,
                                        REFGUID rguidInstance)
 {
     RC_USE(app);
     RC_USE(cpu);
-    RC_USE(rguidInstance);
-    RC_ASSERT(false);
-    return 1;
+    static const HRESULT DIERR_DEVICENOTREG = 0x80040154;
+    if (!rguidInstance)
+        return 0x80070057;
+    if (*rguidInstance == s_GUID_SysKeyboard || *rguidInstance == s_GUID_SysMouse)
+        return 0;
+    static const GUID s_joystickGUID = { 0x4251809a, 0x67be, 0, "VITAPAD" };
+    GUID pad = s_joystickGUID;
+    pad.Data3 = rguidInstance->Data3;
+    return *rguidInstance == pad && rguidInstance->Data3 < Gamepad::getCount() ? 0 : DIERR_DEVICENOTREG;
 }
 
 HRESULT IDirectInput2::RunControlPanel(WinApplication* app, x86::CPU& cpu,
                                        HWND hwndOwner, DWORD dwFlags)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hwndOwner);
-    RC_USE(dwFlags);
-    RC_ASSERT(false);
-    return 1;
+    unsupported(app, cpu, "IDirectInput2::RunControlPanel", "flags 0x%x", unsigned(dwFlags));
 }
 
+// DirectInputCreateA initialised the object already.
 HRESULT IDirectInput2::Initialize(WinApplication* app, x86::CPU& cpu,
                                   HINSTANCE hinst, DWORD dwVersion)
 {
@@ -124,10 +128,10 @@ HRESULT IDirectInput2::Initialize(WinApplication* app, x86::CPU& cpu,
     RC_USE(cpu);
     RC_USE(hinst);
     RC_USE(dwVersion);
-    RC_ASSERT(false);
-    return 1;
+    return 0;
 }
 
+// Finds HID devices by name; the pad is not a HID device (DIERR_DEVICENOTREG).
 HRESULT IDirectInput2::FindDevice(WinApplication* app, x86::CPU& cpu,
                                   REFGUID rguidClass, LPCSTR ptszName, LPGUID pguidInstance)
 {
@@ -136,8 +140,7 @@ HRESULT IDirectInput2::FindDevice(WinApplication* app, x86::CPU& cpu,
     RC_USE(rguidClass);
     RC_USE(ptszName);
     RC_USE(pguidInstance);
-    RC_ASSERT(false);
-    return 1;
+    return 0x80040154;
 }
 
 x86::reg32 IDirectInput2::init(WinApplication *app, x86::reg32 memblockIndex, x86::reg8* memBlock)

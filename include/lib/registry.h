@@ -29,7 +29,8 @@ enum ValueType
 
 struct Key;
 
-// Reads the file (a missing file is an empty registry); later changes are written back to it.
+// Reads the file (a missing file is an empty registry), then adds the install's values the file lacks (registry.cpp);
+// later changes are written back to it.
 void load(const char* path);
 // Root key of a predefined handle (HKEY_*), or nullptr.
 Key* root(x86::reg32 handle);

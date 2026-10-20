@@ -33,7 +33,7 @@ public:
         return it == m_methods.end() ? 0 : it->second.first;
     }
 
-    // By file name, ignoring case and any directory in front of it.
+    // By file name, ignoring case and any directory in front of it; ".dll" is implied without an extension.
     static Library* findLibrary(std::string name);
     void registerSymbols(WinApplication* app);
 

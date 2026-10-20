@@ -19,10 +19,12 @@ const uint64_t TypingIntervalUs = 20000;
 // The longest text typed outside a known field (the pilot name holds 19 characters).
 const uint32_t TextLength = 20;
 
+// A key message, or a WM_CHAR when character is set.
 struct TypedKey
 {
     controls::KeyCode   key;
     bool                down;
+    char                character;
 };
 
 // The text field the game edits (editText).
@@ -82,31 +84,33 @@ void postKeys(uint32_t held)
 
 void queueKey(const controls::KeyCode& key)
 {
-    s_typing.push_back(TypedKey{ key, true });
-    s_typing.push_back(TypedKey{ key, false });
+    s_typing.push_back(TypedKey{ key, true, 0 });
+    s_typing.push_back(TypedKey{ key, false, 0 });
 }
 
-// Types confirmed text as key messages (capitals with Shift), at most maxLength characters, and ends it with Enter.
+void queueChar(char character)
+{
+    s_typing.push_back(TypedKey{ controls::KeyCode{ 0, 0, false }, false, character });
+}
+
+// Types confirmed text as one WM_CHAR per character (the game's line editor reads only WM_CHAR), at most maxLength
+// characters, and ends it with a carriage return, which commits the field.
 void queueText(const char* text, uint32_t maxLength, bool lettersOnly)
 {
     uint32_t typed = 0;
     for (const char* c = text; *c && typed < maxLength; ++c)
     {
-        controls::KeyCode key;
-        bool shift;
-        if (!controls::characterKey(*c, &key, &shift) || (lettersOnly && *c >= '0' && *c <= '9'))
+        const bool letter = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z');
+        const bool allowed = x86::reg8(*c) >= 0x20 && x86::reg8(*c) < 0x7f && (!lettersOnly || letter || *c == ' ');
+        if (!allowed)
         {
             pf::logInfo("input: '%c' cannot be typed", *c);
             continue;
         }
-        if (shift)
-            s_typing.push_back(TypedKey{ controls::shiftKey(), true });
-        queueKey(key);
-        if (shift)
-            s_typing.push_back(TypedKey{ controls::shiftKey(), false });
+        queueChar(*c);
         ++typed;
     }
-    queueKey(controls::keyCode(controls::KeyEnter));
+    queueChar('\r');
 }
 
 void openIme(bool forField)
@@ -141,8 +145,15 @@ void typeNext(uint64_t now)
         return;
     const TypedKey typed = s_typing.front();
     s_typing.pop_front();
-    s_typedDown[typed.key.dik()] = typed.down;
-    postKey(typed.key, typed.down);
+    if (typed.character)
+    {
+        Window::pushChar(x86::reg8(typed.character));
+    }
+    else
+    {
+        s_typedDown[typed.key.dik()] = typed.down;
+        postKey(typed.key, typed.down);
+    }
     s_typedUs = now;
 }
 
@@ -171,6 +182,7 @@ void pump()
     {
         state.buttons = 0;
         state.keys = 0;
+        state.pov = -1;
         memset(state.axes, 0, sizeof(state.axes));
     }
     postKeys(state.keys);
@@ -196,6 +208,12 @@ x86::reg32 Input::getAxesCount() const
 x86::reg32 Keyboard::getDeviceType() const
 {
     return 0x0403;
+}
+
+// DI8DEVTYPE_KEYBOARD, DI8DEVTYPEKEYBOARD_PCENH.
+x86::reg32 Keyboard::getDeviceType8() const
+{
+    return 0x0413;
 }
 
 x86::reg32 Keyboard::getButtonCount() const
@@ -224,6 +242,12 @@ void Keyboard::getState(x86::reg8 (&keys)[256])
 x86::reg32 Mouse::getDeviceType() const
 {
     return 0x0202;
+}
+
+// DI8DEVTYPE_MOUSE, DI8DEVTYPEMOUSE_TRADITIONAL.
+x86::reg32 Mouse::getDeviceType8() const
+{
+    return 0x0212;
 }
 
 x86::reg32 Mouse::getButtonCount() const
@@ -268,8 +292,15 @@ x86::reg32 Gamepad::getDeviceType() const
     return controls::JoystickDeviceType;
 }
 
-// Each stick is shaped as a whole with the properties of its first axis; absent axes read centred.
-void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount])
+// DI8DEVTYPE_GAMEPAD, DI8DEVTYPEGAMEPAD_STANDARD.
+x86::reg32 Gamepad::getDeviceType8() const
+{
+    return 0x0215;
+}
+
+// The left stick is shaped as a whole with the properties of lX, the right stick's Rz on its own; absent axes and
+// lZ read centred.
+void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov)
 {
     controls::State state;
     {
@@ -278,13 +309,14 @@ void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCo
         state = s_state;
     }
     float shaped[controls::AxisCount] = {};
-    const controls::Axis sticks[2][2] = { { controls::AxisX, controls::AxisY }, { controls::AxisRx, controls::AxisRy } };
-    for (const auto& stick : sticks)
-    {
-        const AxisProperties& properties = m_axisProperties[stick[0]];
-        controls::shapeStick(state.axes[stick[0]], state.axes[stick[1]], properties.deadZone, properties.saturation,
-                             &shaped[stick[0]], &shaped[stick[1]]);
-    }
+    const AxisProperties& left = m_axisProperties[controls::AxisX];
+    controls::shapeStick(state.axes[controls::AxisX], state.axes[controls::AxisY], left.deadZone, left.saturation,
+                         &shaped[controls::AxisX], &shaped[controls::AxisY]);
+    const AxisProperties& right = m_axisProperties[controls::AxisRz];
+    float unused;
+    controls::shapeStick(state.axes[controls::AxisRz], 0.0f, right.deadZone, right.saturation,
+                         &shaped[controls::AxisRz], &unused);
+    *pov = state.pov;
     for (int axis = 0; axis < controls::AxisCount; ++axis)
     {
         const AxisProperties& properties = m_axisProperties[axis];

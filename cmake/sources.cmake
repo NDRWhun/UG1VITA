@@ -39,7 +39,9 @@ set(NFSU_LIB_SOURCES
   src/lib/cpu.cpp
   src/lib/event.cpp
   src/lib/file.cpp
+  src/lib/fpucontrol.cpp
   src/lib/gamepad.cpp
+  src/lib/gamethreads.cpp
   src/lib/heap.cpp
   src/lib/jump.cpp
   src/lib/library.cpp
@@ -60,17 +62,26 @@ set(NFSU_WINAPI_SOURCES
   src/lib/winapi/com.cpp
   src/lib/winapi/ddraw.cpp
   src/lib/winapi/dinput.cpp
+  src/lib/winapi/dinput8.cpp
   src/lib/winapi/dsound.cpp
   src/lib/winapi/gdi32.cpp
   src/lib/winapi/iforce2.cpp
+  src/lib/winapi/imports.cpp
   src/lib/winapi/kernel32.cpp
+  src/lib/winapi/netapi32.cpp
   src/lib/winapi/ole32.cpp
+  src/lib/winapi/shell32.cpp
+  src/lib/winapi/shfolder.cpp
+  src/lib/winapi/support.cpp
+  src/lib/winapi/tapi32.cpp
   src/lib/winapi/user32.cpp
   src/lib/winapi/winmm.cpp
+  src/lib/winapi/ws2_32.cpp
   src/lib/winapi/ddraw/idirectdraw2.cpp
   src/lib/winapi/ddraw/idirectdrawpalette.cpp
   src/lib/winapi/ddraw/idirectdrawsurface.cpp
   src/lib/winapi/dinput/idirectinput2.cpp
+  src/lib/winapi/dinput/idirectinput8.cpp
   src/lib/winapi/dinput/idirectinputdevice.cpp
   src/lib/winapi/dsound/idirectsound.cpp
   src/lib/winapi/dsound/idirectsound3dlistener.cpp

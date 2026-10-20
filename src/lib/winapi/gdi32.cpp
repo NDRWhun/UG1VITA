@@ -96,12 +96,22 @@ BOOL TextOutA(WinApplication* app, x86::CPU& cpu, HDC hdc, int x, int y, LPCSTR 
     return 1;
 }
 
+// Stock objects WHITE_BRUSH (0) .. DC_PEN (19) are pseudo handles; nothing draws with them.
+static const HGDIOBJ StockObjectBase = 0xfffc0000;
+
 HGDIOBJ GetStockObject(WinApplication* app, x86::CPU& cpu, int i)
 {
     RC_USE(app);
     RC_USE(cpu);
-    RC_USE(i);
-    return 0xffffffff;
+    return i >= 0 && i <= 19 ? StockObjectBase + HGDIOBJ(i) : 0;
+}
+
+// The port creates no GDI objects; deleting a stock object succeeds and does nothing, as on Windows.
+BOOL DeleteObject(WinApplication* app, x86::CPU& cpu, HGDIOBJ ho)
+{
+    RC_USE(app);
+    RC_USE(cpu);
+    return ho >= StockObjectBase && ho <= StockObjectBase + 19 ? 1 : 0;
 }
 
 }}

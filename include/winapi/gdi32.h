@@ -11,6 +11,7 @@ namespace win32 { namespace gdi32
 
 int GetDeviceCaps(WinApplication* app, x86::CPU& cpu, HDC hdc, int index);
 HGDIOBJ GetStockObject(WinApplication* app, x86::CPU& cpu, int i);
+BOOL DeleteObject(WinApplication* app, x86::CPU& cpu, HGDIOBJ ho);
 struct TEXTMETRICA;
 BOOL GetTextMetricsA(WinApplication* app, x86::CPU& cpu, HDC hdc, TEXTMETRICA* lptm);
 HGDIOBJ SelectObject(WinApplication* app, x86::CPU& cpu, HDC hdc, HGDIOBJ h);

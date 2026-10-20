@@ -1,9 +1,12 @@
 #include <winapi/dinput/idirectinputdevice.h>
+#include <winapi/support.h>
 #include <winapi/wrapper.h>
 #include <lib/controls.h>
 #include <lib/gamepad.h>
+#include <lib/memmap.h>
 #include <cstddef>
 #include <cstdio>
+#include <vector>
 
 
 namespace win32 { namespace dinput
@@ -11,6 +14,7 @@ namespace win32 { namespace dinput
 
 
 x86::reg32 IDirectInputDevice::s_iDirectInputDeviceVtable = 0;
+x86::reg32 IDirectInputDevice::s_iDirectInputDevice8Vtable = 0;
 
 static const HRESULT DI_OK                = 0;
 static const HRESULT DIERR_UNSUPPORTED    = 0x80004001;
@@ -186,17 +190,41 @@ static bool isAxisProperty(x86::reg32 property)
 }
 
 DEFINE_GUID(IID_IDirectInputDevice2A,	0x5944E682,0xC92E,0x11CF,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00);
+DEFINE_GUID(IID_IDirectInputDevice8A,	0x54D41080,0xDC15,0x4833,0xA4,0x1B,0x74,0x8F,0x73,0xA3,0x81,0x79);
 
 static const GUID s_sysKeyboard = { 0x6F1D2B61, 0xD5A0, 0x11CF, { 0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 } };
 static const GUID s_sysMouse    = { 0x6F1D2B60, 0xD5A0, 0x11CF, { 0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 } };
 // Joystick instance and product, as IDirectInput2::EnumDevices reports them.
 static const GUID s_joystick    = { 0x4251809a, 0x67be, 0, "VITAPAD" };
 
-IDirectInputDevice::IDirectInputDevice(Input* input)
-    :   IUnknown(IID_IDirectInputDevice2A)
+// Object type GUIDs: GUID_XAxis .. GUID_Slider and GUID_Button are A36D02xx-C9F3-11CF, GUID_Key 55728220-D33C-11CF.
+static const x86::reg32 s_axisGuids[controls::AxisCount] =
+    { 0xA36D02E0, 0xA36D02E1, 0xA36D02E2, 0xA36D02F4, 0xA36D02F5, 0xA36D02E3, 0xA36D02E4, 0xA36D02E4 };
+static const x86::reg32 s_buttonGuid = 0xA36D02F0;
+static const x86::reg32 s_keyGuid = 0x55728220;
+
+static GUID objectGuid(x86::reg32 data1)
 {
-    m_vtable = s_iDirectInputDeviceVtable;
+    return GUID{ data1, x86::reg16(data1 == s_keyGuid ? 0xD33C : 0xC9F3), 0x11CF,
+                 { 0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 } };
+}
+
+IDirectInputDevice::IDirectInputDevice(Input* input, bool version8)
+    :   IUnknown(version8 ? IID_IDirectInputDevice8A : IID_IDirectInputDevice2A)
+{
+    m_vtable = version8 ? s_iDirectInputDevice8Vtable : s_iDirectInputDeviceVtable;
     m_resource = input;
+}
+
+bool IDirectInputDevice::isVersion8() const
+{
+    return m_interface == IID_IDirectInputDevice8A;
+}
+
+x86::reg32 IDirectInputDevice::deviceType() const
+{
+    const Input* input = static_cast<const Input*>(m_resource);
+    return isVersion8() ? input->getDeviceType8() : input->getDeviceType();
 }
 
 // The game passes the DirectX 5 size (0x2C); a smaller structure gets its fields only.
@@ -213,24 +241,111 @@ HRESULT IDirectInputDevice::GetCapabilities(WinApplication* app, x86::CPU& cpu,
     caps.dwSize = lpDIDevCaps->dwSize;
     // Not DIDC_FORCEFEEDBACK: the game then leaves force feedback off.
     caps.dwFlags = DIDC_ATTACHED | (dynamic_cast<const Gamepad*>(input) ? DIDC_POLLEDDATAFORMAT : 0);
-    caps.dwDevType = input->getDeviceType();
+    caps.dwDevType = deviceType();
     caps.dwAxes = input->getAxesCount();
     caps.dwButtons = input->getButtonCount();
-    caps.dwPOVs = 0;
+    caps.dwPOVs = dynamic_cast<const Gamepad*>(input) ? 1 : 0;
     memcpy(lpDIDevCaps, &caps, caps.dwSize);
     return DI_OK;
 }
 
+// Objects in data format order: joystick axes then buttons (DIJOYSTATE offsets), mouse axes then buttons
+// (DIMOUSESTATE), keyboard keys 1-255 (offset = key code). The instance number in dwType is the axis slot, button or
+// key, as GetObjectInfo and the properties address them. No object is a force feedback actuator.
 HRESULT IDirectInputDevice::EnumObjects(WinApplication* app, x86::CPU& cpu,
                                         LPDIENUMDEVICEOBJECTSCALLBACK lpCallback, x86::reg32 pvRef, DWORD dwFlags)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(lpCallback);
-    RC_USE(pvRef);
-    RC_USE(dwFlags);
-    RC_ASSERT(false);
-    return 1;
+    static const DWORD DIDFT_RELAXIS = 0x01;
+    static const DWORD DIDFT_TYPEMASK = 0x1f;
+    static const DWORD DIDFT_FFACTUATOR = 0x01000000;
+    static const DWORD DIDOI_ASPECTPOSITION = 0x100;
+    if (!lpCallback)
+        return DIERR_INVALIDPARAM;
+    if (dwFlags & DIDFT_FFACTUATOR)
+        return DI_OK;
+    struct Object
+    {
+        x86::reg32  guid;
+        DWORD       offset;
+        DWORD       type;
+        DWORD       flags;
+        char        name[32];
+    };
+    std::vector<Object> objects;
+    const Input* input = static_cast<const Input*>(m_resource);
+    if (dynamic_cast<const Gamepad*>(input))
+    {
+        static const char* const names[controls::AxisCount] =
+            { "X Axis", "Y Axis", "Z Axis", "X Rotation", "Y Rotation", "Z Rotation", "Slider", "Slider" };
+        for (int axis = 0; axis < controls::AxisCount; ++axis)
+        {
+            if (!controls::axisPresent(controls::Axis(axis)))
+                continue;
+            Object object = { s_axisGuids[axis], DWORD(axis * sizeof(LONG)), DIDFT_ABSAXIS | (DWORD(axis) << 8),
+                              DIDOI_ASPECTPOSITION, {} };
+            snprintf(object.name, sizeof(object.name), "%s", names[axis]);
+            objects.push_back(object);
+        }
+        Object hat = { 0xA36D02F2, DWORD(offsetof(DIJOYSTATE, rgdwPOV)), 0x10, 0, "Hat Switch" };   // DIDFT_POV
+        objects.push_back(hat);
+        for (x86::reg32 button = 0; button < controls::joystickButtonCount(); ++button)
+        {
+            Object object = { s_buttonGuid, DWORD(offsetof(DIJOYSTATE, rgbButtons) + button),
+                              DIDFT_PSHBUTTON | (button << 8), 0, {} };
+            snprintf(object.name, sizeof(object.name), "Button %u", unsigned(button + 1));
+            objects.push_back(object);
+        }
+    }
+    else if (dynamic_cast<const Mouse*>(input))
+    {
+        static const char* const names[3] = { "X Axis", "Y Axis", "Wheel" };
+        for (DWORD axis = 0; axis < 3; ++axis)
+        {
+            Object object = { s_axisGuids[axis], DWORD(axis * sizeof(LONG)), DIDFT_RELAXIS | (axis << 8), 0, {} };
+            snprintf(object.name, sizeof(object.name), "%s", names[axis]);
+            objects.push_back(object);
+        }
+        for (DWORD button = 0; button < input->getButtonCount(); ++button)
+        {
+            Object object = { s_buttonGuid, 12 + button, DIDFT_PSHBUTTON | (button << 8), 0, {} };
+            snprintf(object.name, sizeof(object.name), "Button %u", unsigned(button));
+            objects.push_back(object);
+        }
+    }
+    else
+    {
+        for (DWORD key = 1; key < 256; ++key)
+        {
+            Object object = { s_keyGuid, key, DIDFT_PSHBUTTON | (key << 8), 0, {} };
+            snprintf(object.name, sizeof(object.name), "Key 0x%02x", unsigned(key));
+            objects.push_back(object);
+        }
+    }
+    MemMap memory(sizeof(DIDEVICEOBJECTINSTANCE));
+    const x86::reg32 instance = memory.getBlockStart();
+    DIDEVICEOBJECTINSTANCE* info = &app->getMemory<DIDEVICEOBJECTINSTANCE>(instance);
+    const DWORD wanted = dwFlags & DIDFT_TYPEMASK;
+    for (const Object& object : objects)
+    {
+        if (wanted && !(object.type & wanted))
+            continue;
+        memset(info, 0, sizeof(*info));
+        info->dwSize = sizeof(*info);
+        info->guidType = objectGuid(object.guid);
+        info->dwOfs = object.offset;
+        info->dwType = object.type;
+        info->dwFlags = object.flags;
+        snprintf(info->tszName, sizeof(info->tszName), "%s", object.name);
+        // BOOL CALLBACK (LPCDIDEVICEOBJECTINSTANCE, LPVOID), stdcall.
+        cpu.esp -= 12;
+        app->getMemory<x86::reg32>(cpu.esp + 0) = lpCallback;
+        app->getMemory<x86::reg32>(cpu.esp + 4) = instance;
+        app->getMemory<x86::reg32>(cpu.esp + 8) = pvRef;
+        app->dynamic_call(lpCallback, cpu);
+        if (!cpu.eax)
+            break;
+    }
+    return DI_OK;
 }
 
 // Joystick axis range, dead zone and saturation; the device-wide form reports the first axis.
@@ -316,7 +431,8 @@ HRESULT IDirectInputDevice::Unacquire(WinApplication* app, x86::CPU& cpu)
     return 0;
 }
 
-// Joystick: DIJOYSTATE (no hat: the d-pad is the arrow keys). Keyboard: 256 key bytes. Mouse: no motion or buttons.
+// Joystick: DIJOYSTATE (the DIJOYSTATE2 extension reads zero), hat 0 from the d-pad. Keyboard: 256 key bytes.
+// Mouse: no motion or buttons.
 HRESULT IDirectInputDevice::GetDeviceState(WinApplication* app, x86::CPU& cpu,
                                            DWORD cbData, LPVOID lpvData)
 {
@@ -330,7 +446,8 @@ HRESULT IDirectInputDevice::GetDeviceState(WinApplication* app, x86::CPU& cpu,
             return DIERR_INVALIDPARAM;
         x86::reg32 buttons;
         x86::sreg32 axes[controls::AxisCount];
-        gamepad->getState(&buttons, axes);
+        int hat;
+        gamepad->getState(&buttons, axes, &hat);
         memset(lpvData, 0, cbData);
         DIJOYSTATE* state = reinterpret_cast<DIJOYSTATE*>(lpvData);
         state->lX = axes[controls::AxisX];
@@ -343,6 +460,7 @@ HRESULT IDirectInputDevice::GetDeviceState(WinApplication* app, x86::CPU& cpu,
         state->rglSlider[1] = axes[controls::AxisSlider1];
         for (DWORD& pov : state->rgdwPOV)
             pov = 0xffffffff;
+        state->rgdwPOV[0] = hat < 0 ? 0xffffffff : DWORD(hat);
         for (x86::reg32 button = 0; button < controls::joystickButtonCount(); ++button)
             state->rgbButtons[button] = (buttons & (x86::reg32(1) << button)) ? 0x80 : 0x00;
         return DI_OK;
@@ -374,13 +492,23 @@ HRESULT IDirectInputDevice::GetDeviceData(WinApplication* app, x86::CPU& cpu,
     return DI_OK;
 }
 
+// GetDeviceState writes the standard layouts: c_dfDIJoystick / c_dfDIJoystick2 (80 / 272 bytes), c_dfDIMouse /
+// c_dfDIMouse2 (16 / 20) and c_dfDIKeyboard (256), which are the game's formats. Another layout would need the
+// object list mapped and traps.
 HRESULT IDirectInputDevice::SetDataFormat(WinApplication* app, x86::CPU& cpu,
                                           LPCDIDATAFORMAT lpdf)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(lpdf);
-    return 0;
+    if (!lpdf || lpdf->dwSize != sizeof(DIDATAFORMAT) || lpdf->dwObjSize != sizeof(DIOBJECTDATAFORMAT))
+        return DIERR_INVALIDPARAM;
+    const Input* input = static_cast<const Input*>(m_resource);
+    const DWORD size = lpdf->dwDataSize;
+    const bool standard = dynamic_cast<const Gamepad*>(input) ? size == sizeof(DIJOYSTATE) || size == 272
+                        : dynamic_cast<const Mouse*>(input) ? size == 16 || size == 20
+                        : size == 256;
+    if (!standard)
+        unsupported(app, cpu, "IDirectInputDevice::SetDataFormat", "custom data format of %u bytes, %u objects",
+                    unsigned(size), unsigned(lpdf->dwNumObjs));
+    return DI_OK;
 }
 
 HRESULT IDirectInputDevice::SetEventNotification(WinApplication* app, x86::CPU& cpu,
@@ -407,9 +535,13 @@ HRESULT IDirectInputDevice::GetObjectInfo(WinApplication* app, x86::CPU& cpu,
 {
     RC_USE(app);
     RC_USE(cpu);
-    RC_ASSERT(pdidoi->dwSize == sizeof(DIDEVICEOBJECTINSTANCE));
-    memset(pdidoi, 0, pdidoi->dwSize);
-    pdidoi->dwSize = sizeof(DIDEVICEOBJECTINSTANCE);
+    // The DirectX 3 size ends after tszName.
+    static const DWORD s_dx3Size = offsetof(DIDEVICEOBJECTINSTANCE, dwFFMaxForce);
+    if (!pdidoi || (pdidoi->dwSize != sizeof(DIDEVICEOBJECTINSTANCE) && pdidoi->dwSize != s_dx3Size))
+        return DIERR_INVALIDPARAM;
+    const DWORD size = pdidoi->dwSize;
+    memset(pdidoi, 0, size);
+    pdidoi->dwSize = size;
     if (!dynamic_cast<Gamepad*>(m_resource))
         return DI_OK;
     const int axis = findAxis(dwObj, dwHow);
@@ -447,14 +579,13 @@ HRESULT IDirectInputDevice::GetDeviceInfo(WinApplication* app, x86::CPU& cpu,
     DIDEVICEINSTANCE info;
     memset(&info, 0, sizeof(info));
     info.dwSize = pdidi->dwSize;
-    info.dwDevType = input->getDeviceType();
+    info.dwDevType = deviceType();
     const char* name;
     if (const Gamepad* gamepad = dynamic_cast<const Gamepad*>(input))
     {
         info.guidInstance = s_joystick;
         info.guidInstance.Data3 = x86::reg16(gamepad->index());
-        info.guidProduct = s_joystick;
-        info.guidProduct.Data3 = 0x1f1f;
+        info.guidProduct = controls::JoystickProduct;
         name = controls::JoystickName;
     }
     else if (dynamic_cast<const Keyboard*>(input))
@@ -478,26 +609,19 @@ HRESULT IDirectInputDevice::GetDeviceInfo(WinApplication* app, x86::CPU& cpu,
 HRESULT IDirectInputDevice::RunControlPanel(WinApplication* app, x86::CPU& cpu,
                                             HWND hwndOwner, DWORD dwFlags)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hwndOwner);
-    RC_USE(dwFlags);
-    RC_ASSERT(false);
-    return 1;
+    unsupported(app, cpu, "IDirectInputDevice::RunControlPanel", "flags 0x%x", unsigned(dwFlags));
 }
 
 HRESULT IDirectInputDevice::Initialize(WinApplication* app, x86::CPU& cpu,
                                        HINSTANCE hinst, DWORD dwVersion, REFGUID rguid)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(hinst);
-    RC_USE(dwVersion);
     RC_USE(rguid);
-    RC_ASSERT(false);
-    return 1;
+    unsupported(app, cpu, "IDirectInputDevice::Initialize", "version 0x%x", unsigned(dwVersion));
 }
 
+// The devices have no force feedback actuators (EnumObjects, GetCapabilities), so no effect can be made.
 HRESULT IDirectInputDevice::CreateEffect(WinApplication* app, x86::CPU& cpu,
                                          REFGUID rguid, LPCDIEFFECT lpeff, Packed<IUnknown>* ppdeff, LPUNKNOWN punkOuter)
 {
@@ -505,10 +629,10 @@ HRESULT IDirectInputDevice::CreateEffect(WinApplication* app, x86::CPU& cpu,
     RC_USE(cpu);
     RC_USE(rguid);
     RC_USE(lpeff);
-    RC_USE(ppdeff);
     RC_USE(punkOuter);
-    RC_ASSERT(false);
-    return 1;
+    if (ppdeff)
+        *ppdeff = Packed<IUnknown>(0);
+    return DIERR_UNSUPPORTED;
 }
 
 HRESULT IDirectInputDevice::EnumEffects(WinApplication* app, x86::CPU& cpu,
@@ -530,8 +654,7 @@ HRESULT IDirectInputDevice::GetEffectInfo(WinApplication* app, x86::CPU& cpu,
     RC_USE(cpu);
     RC_USE(pdei);
     RC_USE(rguid);
-    RC_ASSERT(false);
-    return 1;
+    return DIERR_UNSUPPORTED;
 }
 
 HRESULT IDirectInputDevice::GetForceFeedbackState(WinApplication* app, x86::CPU& cpu,
@@ -555,23 +678,19 @@ HRESULT IDirectInputDevice::SendForceFeedbackCommand(WinApplication* app, x86::C
 HRESULT IDirectInputDevice::EnumCreatedEffectObjects(WinApplication* app, x86::CPU& cpu,
                                                      LPDIENUMCREATEDEFFECTOBJECTSCALLBACK lpCallback, LPVOID pvRef, DWORD fl)
 {
+    // No effects were created: nothing to enumerate.
     RC_USE(app);
     RC_USE(cpu);
     RC_USE(lpCallback);
     RC_USE(pvRef);
     RC_USE(fl);
-    RC_ASSERT(false);
-    return 1;
+    return DI_OK;
 }
 
 HRESULT IDirectInputDevice::Escape(WinApplication* app, x86::CPU& cpu,
                                    LPDIEFFESCAPE pesc)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(pesc);
-    RC_ASSERT(false);
-    return 1;
+    unsupported(app, cpu, "IDirectInputDevice::Escape", "command 0x%x", pesc ? unsigned(pesc->dwCommand) : 0u);
 }
 
 HRESULT IDirectInputDevice::Poll(WinApplication* app, x86::CPU& cpu)
@@ -586,14 +705,51 @@ HRESULT IDirectInputDevice::Poll(WinApplication* app, x86::CPU& cpu)
 HRESULT IDirectInputDevice::SendDeviceData(WinApplication* app, x86::CPU& cpu,
                                            DWORD cbObjectData, LPCDIDEVICEOBJECTDATA rgdod, LPDWORD pdwInOut, DWORD fl)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(cbObjectData);
     RC_USE(rgdod);
     RC_USE(pdwInOut);
-    RC_USE(fl);
-    RC_ASSERT(false);
-    return 1;
+    unsupported(app, cpu, "IDirectInputDevice::SendDeviceData", "%u-byte objects, flags 0x%x",
+                unsigned(cbObjectData), unsigned(fl));
+}
+
+HRESULT IDirectInputDevice::EnumEffectsInFile(WinApplication* app, x86::CPU& cpu,
+                                              LPCSTR lpszFileName, x86::reg32 pec, LPVOID pvRef, DWORD dwFlags)
+{
+    RC_USE(pec);
+    RC_USE(pvRef);
+    RC_USE(dwFlags);
+    unsupported(app, cpu, "IDirectInputDevice8::EnumEffectsInFile", "%s", lpszFileName ? lpszFileName : "");
+}
+
+HRESULT IDirectInputDevice::WriteEffectToFile(WinApplication* app, x86::CPU& cpu,
+                                              LPCSTR lpszFileName, DWORD dwEntries, x86::reg32 rgDiFileEft,
+                                              DWORD dwFlags)
+{
+    RC_USE(dwEntries);
+    RC_USE(rgDiFileEft);
+    RC_USE(dwFlags);
+    unsupported(app, cpu, "IDirectInputDevice8::WriteEffectToFile", "%s", lpszFileName ? lpszFileName : "");
+}
+
+HRESULT IDirectInputDevice::BuildActionMap(WinApplication* app, x86::CPU& cpu,
+                                           x86::reg32 lpdiaf, LPCSTR lpszUserName, DWORD dwFlags)
+{
+    RC_USE(lpdiaf);
+    RC_USE(lpszUserName);
+    unsupported(app, cpu, "IDirectInputDevice8::BuildActionMap", "flags 0x%x", unsigned(dwFlags));
+}
+
+HRESULT IDirectInputDevice::SetActionMap(WinApplication* app, x86::CPU& cpu,
+                                         x86::reg32 lpdiaf, LPCSTR lpszUserName, DWORD dwFlags)
+{
+    RC_USE(lpdiaf);
+    RC_USE(lpszUserName);
+    unsupported(app, cpu, "IDirectInputDevice8::SetActionMap", "flags 0x%x", unsigned(dwFlags));
+}
+
+HRESULT IDirectInputDevice::GetImageInfo(WinApplication* app, x86::CPU& cpu,
+                                         x86::reg32 lpdiDevImageInfoHeader)
+{
+    unsupported(app, cpu, "IDirectInputDevice8::GetImageInfo", "header 0x%08x", lpdiDevImageInfoHeader);
 }
 
 x86::reg32 IDirectInputDevice::init(WinApplication *app, x86::reg32 memblockIndex, x86::reg8* memBlock)
@@ -652,7 +808,20 @@ x86::reg32 IDirectInputDevice::init(WinApplication *app, x86::reg32 memblockInde
     vtable[24] = 0x40005d;    // IDirectInputDevice_Escape
     vtable[25] = 0x40005e;    // IDirectInputDevice_Poll
     vtable[26] = 0x40005f;    // IDirectInputDevice_SendDeviceData
-    return 27 * sizeof(x86::reg32);
+
+    // IDirectInputDevice8A: the same 27 methods, then EnumEffectsInFile .. GetImageInfo.
+    app->registerMethod(0x400110, {"IDirectInputDevice8::EnumEffectsInFile", &Wrapper<decltype(&IDirectInputDevice::EnumEffectsInFile), &IDirectInputDevice::EnumEffectsInFile>::stdcall});
+    app->registerMethod(0x400111, {"IDirectInputDevice8::WriteEffectToFile", &Wrapper<decltype(&IDirectInputDevice::WriteEffectToFile), &IDirectInputDevice::WriteEffectToFile>::stdcall});
+    app->registerMethod(0x400112, {"IDirectInputDevice8::BuildActionMap", &Wrapper<decltype(&IDirectInputDevice::BuildActionMap), &IDirectInputDevice::BuildActionMap>::stdcall});
+    app->registerMethod(0x400113, {"IDirectInputDevice8::SetActionMap", &Wrapper<decltype(&IDirectInputDevice::SetActionMap), &IDirectInputDevice::SetActionMap>::stdcall});
+    app->registerMethod(0x400114, {"IDirectInputDevice8::GetImageInfo", &Wrapper<decltype(&IDirectInputDevice::GetImageInfo), &IDirectInputDevice::GetImageInfo>::stdcall});
+    x86::reg32* vtable8 = vtable + 27;
+    s_iDirectInputDevice8Vtable = memblockIndex + 27 * sizeof(x86::reg32);
+    for (int i = 0; i < 27; ++i)
+        vtable8[i] = vtable[i];
+    for (int i = 0; i < 5; ++i)
+        vtable8[27 + i] = 0x400110 + x86::reg32(i);
+    return (27 + 32) * sizeof(x86::reg32);
 }
 
 }}

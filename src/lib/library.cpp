@@ -41,6 +41,9 @@ Library* Library::findLibrary(std::string name)
     if (separator != std::string::npos)
         name.erase(0, separator + 1);
     std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    // LoadLibrary and GetModuleHandle add ".dll" to a name without an extension ("KERNEL32").
+    if (name.find('.') == std::string::npos)
+        name += ".dll";
     for (Library* l = s_libraries; l; l = l->m_next)
     {
         if (l->m_name == name)

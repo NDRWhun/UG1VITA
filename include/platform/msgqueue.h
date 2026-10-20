@@ -27,6 +27,8 @@ public:
 
     void push(const Message& message);
     bool wait(Message& out, uint32_t timeoutMs); // false on timeout
+    // The first message, without waiting; it stays queued unless remove is set. False when the queue is empty.
+    bool peek(Message& out, bool remove);
 
 private:
     Mutex               m_mutex;

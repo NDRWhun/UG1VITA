@@ -1,4 +1,5 @@
 #include <lib/registry.h>
+#include <lib/guest.h>
 #include <platform/log.h>
 #include <platform/sync.h>
 #include <cstdio>
@@ -130,7 +131,30 @@ void store(Key* key, const std::string& name, x86::reg32 type, const void* data,
 
 }
 
+static void loadFile(const char* path);
+
+// Values a retail install provides that the game reads (docs/re/boot.md section 5, cpu_threads.md section 1.3);
+// the file's own values win. Not seeded on purpose: "CD Drive" (a failed open would then retry on a CD and run the
+// insert-disc loop) and "Install Dir" (it only feeds the unused file cache); the cache sizes and
+// StreamingInstall, whose defaults the game handles. ~MHz matches the 500 MHz time stamp counter, so the EA
+// library does not measure the clock with a one-second busy wait.
+static void seedDefaults()
+{
+    static const char language[] = "English US";
+    Key* game = find(root(HKEY_LOCAL_MACHINE), "Software\\EA Games\\Need For Speed Underground", true);
+    setDefault(game, "Language", REG_SZ, language, sizeof(language));
+    const x86::reg32 mhz = x86::TimestampMhz;
+    Key* cpu = find(root(HKEY_LOCAL_MACHINE), "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", true);
+    setDefault(cpu, "~MHz", REG_DWORD, &mhz, sizeof(mhz));
+}
+
 void load(const char* path)
+{
+    loadFile(path);
+    seedDefaults();
+}
+
+static void loadFile(const char* path)
 {
     pf::LwLockGuard guard(s_mutex);
     for (size_t i = 0; i < s_rootCount; ++i)

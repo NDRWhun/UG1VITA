@@ -2,14 +2,15 @@
 #define LIB_CONTROLS_H_
 
 #include <x86.h>
+#include <winapi/types.h>
 #include <cstdint>
 
 namespace win32
 {
 
-// Vita controls as the game sees them (docs/re/input.md section 7): one DirectInput joystick, "Vita Gamepad", whose
-// buttons follow the game's own joystick bindings, plus a synthesized keyboard for the keys those bindings lack.
-// The mapping tables are in controls.cpp.
+// Vita controls as the game sees them (docs/re/input.md section 7): one DirectInput 8 game controller presented as
+// the EMS USB2 PlayStation 2 adapter, whose buttons follow the game's built-in table for that product, plus key
+// messages for text fields. The mapping tables are in controls.cpp.
 namespace controls
 {
 
@@ -52,8 +53,8 @@ const KeyCode& keyCode(Key key);
 bool characterKey(char c, KeyCode* key, bool* shift);
 const KeyCode& shiftKey();
 
-// DIJOYSTATE axis slots (lX, lY, lZ, lRx, lRy, lRz, two sliders): the joystick has X, Y (left stick) and Rx, Ry
-// (right stick). The game's default bindings use only X and Y; with no Z axis its throttle binding stays idle.
+// DIJOYSTATE axis slots (lX, lY, lZ, lRx, lRy, lRz, two sliders): the joystick has X, Y (left stick), Z (the
+// adapter's combined pedal, held centred: the buttons drive throttle and brake) and Rz (right stick Y).
 enum Axis
 {
     AxisX, AxisY, AxisZ, AxisRx, AxisRy, AxisRz, AxisSlider0, AxisSlider1,
@@ -64,9 +65,10 @@ bool axisPresent(Axis axis);
 x86::reg32 presentAxisCount();
 x86::reg32 joystickButtonCount();
 
-// Product name and DIDEVTYPE_JOYSTICK | DIDEVTYPEJOYSTICK_GAMEPAD << 8.
+// Product name, DirectInput 7 device type and the product GUID (the EMS adapter's VID/PID GUID).
 extern const char* const JoystickName;
 extern const x86::reg32  JoystickDeviceType;
+extern const GUID        JoystickProduct;
 
 // One reading of the pad and touch panels.
 struct PadSample
@@ -83,6 +85,7 @@ struct State
     uint32_t    buttons;            // DirectInput button bits
     float       axes[AxisCount];    // -1..1, absent axes 0; not shaped yet (shapeStick)
     uint32_t    keys;               // bit per Key held
+    int         pov;                // hat 0 in hundredths of a degree, -1 centred
     bool        openIme;            // the on-screen keyboard chord was pressed
 };
 
