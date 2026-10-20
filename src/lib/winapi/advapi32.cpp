@@ -80,6 +80,14 @@ LSTATUS RegOpenKeyExA(WinApplication* app, x86::CPU& cpu,
     return open(app, hKey, lpSubKey, false, phkResult, nullptr);
 }
 
+// The Windows 3.1 form: opens (never creates) with full access.
+LSTATUS RegOpenKeyA(WinApplication* app, x86::CPU& cpu,
+                    HKEY hKey, LPCSTR lpSubKey, PHKEY phkResult)
+{
+    RC_USE(cpu);
+    return open(app, hKey, lpSubKey, false, phkResult, nullptr);
+}
+
 // A null name is the key's default value.
 LSTATUS RegQueryValueExA(WinApplication* app, x86::CPU& cpu,
                          HKEY hKey, LPCSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)

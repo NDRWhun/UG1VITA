@@ -38,4 +38,15 @@ bool MessageQueue::wait(Message& out, uint32_t timeoutMs)
     return true;
 }
 
+bool MessageQueue::peek(Message& out, bool remove)
+{
+    LockGuard guard(m_mutex);
+    if (m_queue.empty())
+        return false;
+    out = m_queue.front();
+    if (remove)
+        m_queue.pop_front();
+    return true;
+}
+
 }

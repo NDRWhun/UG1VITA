@@ -4,6 +4,7 @@
 #include <winapi/ddraw/idirectdrawpalette.h>
 #include <winapi/ddraw/idirectdrawsurface.h>
 #include <winapi/dinput/idirectinput2.h>
+#include <winapi/dinput/idirectinput8.h>
 #include <winapi/dinput/idirectinputdevice.h>
 #include <winapi/dsound/idirectsound.h>
 #include <winapi/dsound/idirectsoundbuffer.h>
@@ -58,6 +59,7 @@ bool InitialiseComMemory(WinApplication* app)
     blockOffset += ddraw::IDirectDrawSurface::init(app, s_memory->getBlockStart() + blockOffset, blockStart + blockOffset);
     blockOffset += dinput::IDirectInput2::init(app, s_memory->getBlockStart() + blockOffset, blockStart + blockOffset);
     blockOffset += dinput::IDirectInputDevice::init(app, s_memory->getBlockStart() + blockOffset, blockStart + blockOffset);
+    blockOffset += dinput::IDirectInput8::init(app, s_memory->getBlockStart() + blockOffset, blockStart + blockOffset);
     blockOffset += dsound::IDirectSound::init(app, s_memory->getBlockStart() + blockOffset, blockStart + blockOffset);
     blockOffset += dsound::IDirectSoundBuffer::init(app, s_memory->getBlockStart() + blockOffset, blockStart + blockOffset);
     blockOffset += dsound::IDirectSound3DListener::init(app, s_memory->getBlockStart() + blockOffset, blockStart + blockOffset);

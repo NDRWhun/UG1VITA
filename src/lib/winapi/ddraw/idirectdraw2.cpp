@@ -213,11 +213,27 @@ HRESULT IDirectDraw2::GetCaps(WinApplication* app, x86::CPU& cpu, LPDDCAPS lpDDC
 {
     RC_USE(app);
     RC_USE(cpu);
-    RC_ASSERT(lpDDCaps->dwSize == sizeof(DDCAPS));
-    RC_ASSERT(lpDDHelCaps->dwSize == sizeof(DDCAPS));
-    memset(lpDDCaps, 0, lpDDCaps->dwSize);
-    memset(lpDDHelCaps, 0, lpDDHelCaps->dwSize);
-    lpDDCaps->dwSize = sizeof(DDCAPS);
+    // Speed.exe asks only for the driver caps (HEL NULL) to read the video memory size (docs/re/render.md 1.4).
+    // Either structure may be NULL; each is filled up to its own dwSize (DDCAPS of DirectX 1 to 7).
+    static const HRESULT DDERR_INVALIDPARAMS = 0x80070057;
+    static const DWORD VideoMemory = 128 * 1024 * 1024;     // the Vita's CDRAM
+    // DDCAPS sizes: DirectX 1 to 5 (0x13C), DirectX 6 and 7 (0x17C, the game's).
+    auto validSize = [](const DDCAPS* caps) { return caps->dwSize == 0x13C || caps->dwSize == 0x17C; };
+    if ((!lpDDCaps && !lpDDHelCaps) || (lpDDCaps && !validSize(lpDDCaps)) || (lpDDHelCaps && !validSize(lpDDHelCaps)))
+        return DDERR_INVALIDPARAMS;
+    for (LPDDCAPS caps : { lpDDCaps, lpDDHelCaps })
+    {
+        if (!caps)
+            continue;
+        const DWORD size = caps->dwSize;
+        memset(caps, 0, size);
+        caps->dwSize = size;
+        if (caps == lpDDCaps)
+        {
+            caps->dwVidMemTotal = VideoMemory;
+            caps->dwVidMemFree = VideoMemory;
+        }
+    }
     return 0;
 }
 

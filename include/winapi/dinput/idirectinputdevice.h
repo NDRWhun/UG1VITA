@@ -10,7 +10,8 @@ namespace win32 { namespace dinput
 class IDirectInputDevice : public com::IUnknown
 {
 public:
-    IDirectInputDevice(Input* input);
+    // version8: an IDirectInputDevice8A (DirectInput 8 device types and the five DirectInput 8 methods).
+    IDirectInputDevice(Input* input, bool version8);
 
     static x86::reg32 init(WinApplication* app, x86::reg32 memblockIndex, x86::reg8* memBlock);
 
@@ -55,7 +56,7 @@ private:
         WORD    wDesignatorIndex;
         WORD    wUsagePage;
         WORD    wUsage;
-        WORD    dwDimension;
+        DWORD   dwDimension;
         WORD    wExponent;
         WORD    wReportId;
     };
@@ -208,8 +209,24 @@ private:
     HRESULT SendDeviceData(WinApplication* app, x86::CPU& cpu,
                            DWORD cbObjectData, LPCDIDEVICEOBJECTDATA rgdod, LPDWORD pdwInOut, DWORD fl);
 
+    // DirectInput 8 methods (action maps, effect files, image info): not used by the game.
+    HRESULT EnumEffectsInFile(WinApplication* app, x86::CPU& cpu,
+                              LPCSTR lpszFileName, x86::reg32 pec, LPVOID pvRef, DWORD dwFlags);
+    HRESULT WriteEffectToFile(WinApplication* app, x86::CPU& cpu,
+                              LPCSTR lpszFileName, DWORD dwEntries, x86::reg32 rgDiFileEft, DWORD dwFlags);
+    HRESULT BuildActionMap(WinApplication* app, x86::CPU& cpu,
+                           x86::reg32 lpdiaf, LPCSTR lpszUserName, DWORD dwFlags);
+    HRESULT SetActionMap(WinApplication* app, x86::CPU& cpu,
+                         x86::reg32 lpdiaf, LPCSTR lpszUserName, DWORD dwFlags);
+    HRESULT GetImageInfo(WinApplication* app, x86::CPU& cpu,
+                         x86::reg32 lpdiDevImageInfoHeader);
+
+    bool isVersion8() const;
+    x86::reg32 deviceType() const;
+
 private:
     static x86::reg32 s_iDirectInputDeviceVtable;
+    static x86::reg32 s_iDirectInputDevice8Vtable;
 };
 
 }}

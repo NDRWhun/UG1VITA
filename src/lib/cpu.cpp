@@ -28,23 +28,34 @@ void CPU::rdtsc()
     edx_eax = pf::ticksUs() * TimestampMhz;
 }
 
+// The CPU the guest sees (docs/re/cpu_threads.md section 1): a family 5 x86 of an unknown vendor, "VitaRecomp86",
+// so the game's CPU class is the default one and it skips its REALTIME/affinity MHz measurement. Leaf 1 reports
+// fpu vme de pse tsc msr mce cx8 and no MMX, SSE or SSE2; there are no extended leaves (0x80000000 answers
+// 0x80000000, and 0x80000001, which the game reads without checking, is all zero), so 3DNow! is off too. Every
+// SIMD path of Speed.exe is gated on these bits. A basic leaf above the highest one returns leaf 1, as Intel CPUs do.
 void CPU::cpuid()
 {
-    // A Pentium: leaf 0 (vendor, highest leaf 1) and leaf 1 (features). Like Intel CPUs, any leaf above the
-    // highest one returns leaf 1 (the game sets only al before its check). MMX is not reported: only the sound
-    // mixer has an MMX path, and its x87 path is the one the port runs.
-    if (eax == 0)
+    const reg32 leaf = eax;
+    if (leaf == 0)
     {
         eax = 1;
-        ebx = 0x756e6547;
-        edx = 0x49656e69;
-        ecx = 0x6c65746e;
+        ebx = 0x61746956;   // "Vita"
+        edx = 0x6f636552;   // "Reco"
+        ecx = 0x3638706d;   // "mp86"
+        return;
+    }
+    if (leaf >= 0x80000000)
+    {
+        eax = leaf == 0x80000000 ? 0x80000000 : 0;
+        ebx = 0;
+        ecx = 0;
+        edx = 0;
         return;
     }
     eax = 0x0543;
     ebx = 0x0000;
     ecx = 0x0000;
-    edx = 0x000001bf;   // fpu vme de pse tsc msr cx8
+    edx = 0x000001bf;
 }
 
 // Environment layout (32-bit protected mode): control, status, tag, ip, cs/opcode, data offset, data selector; each
