@@ -1,4 +1,5 @@
 #include <lib/winapp.h>
+#include <lib/foreigncode.h>
 #include <lib/mutex.h>
 #include <lib/event.h>
 #include <lib/library.h>
@@ -93,6 +94,13 @@ static void freeThreadMemory()
 
 // The method table doubles while methods register; about 7,800 methods end in 16,384 slots.
 static const x86::reg32 s_initialMethodSlotBits = 10;
+
+static ForeignCodeResolver s_foreignCodeResolver = nullptr;
+
+void setForeignCodeResolver(ForeignCodeResolver resolver)
+{
+    s_foreignCodeResolver = resolver;
+}
 
 [[noreturn]] static void missingMethod(x86::reg32 address)
 {
@@ -294,7 +302,12 @@ MethodPtr WinApplication::findMethod(x86::reg32 address) const
         if (slot.address == address)
             return slot.method;
         if (slot.address == 0)
+        {
+            // Not cached: foreign code comes and goes with the data that holds it.
+            if (const MethodPtr foreign = s_foreignCodeResolver ? s_foreignCodeResolver(address) : nullptr)
+                return foreign;
             missingMethod(address);
+        }
     }
 }
 

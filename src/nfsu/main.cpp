@@ -1,3 +1,5 @@
+#include "bankcode.h"
+
 #include <lib/file.h>
 #include <lib/registry.h>
 #include <platform/config.h>
@@ -115,6 +117,7 @@ int main(int, char**)
     win32::registry::load(dataPath("registry.txt").c_str());
     win32::kernel32::setModulePath(s_guestExePath);
     win32::kernel32::setResourceSection(nfsu::layout::imageBase, nfsu::layout::resourceSection);
+    nfsu::bankcode::install();
     {
         nfsu::Application app(s_commandLine, imageSections(image));
         std::vector<uint8_t>().swap(image);
