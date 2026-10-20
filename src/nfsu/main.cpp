@@ -88,6 +88,22 @@ static std::vector<win32::Section> imageSections(const std::vector<uint8_t>& ima
     return sections;
 }
 
+// Default bindings of the EMS PS2 adapter, the device the Vita pad is presented as (src/lib/controls.cpp): race and menu
+// action per button index. Menus: Cross accepts, Circle goes back. Race: R accelerates, L brakes, Cross is nitrous,
+// Square the handbrake, Triangle the camera, Circle looks back, d-pad up/down and the rear touch halves shift.
+static void setPadBindings(nfsu::Application& app)
+{
+    static const x86::reg32 raceActions[16] = { 10, 9, 6, 5, 8, 7, 2, 1, 14, 12, 0, 0, 7, 4, 8, 3 };
+    static const x86::reg32 menuActions[16] = { 25, 23, 20, 24, 0, 0, 26, 0, 0, 20, 0, 0, 16, 19, 17, 18 };
+    const x86::reg32 race = 0x00704268;     // EMS entry 0x00704258: product GUID, 16 race, 16 menu actions
+    const x86::reg32 menu = 0x007042A8;
+    for (x86::reg32 i = 0; i < 16; ++i)
+    {
+        app.getMemory<x86::reg32>(race + 4 * i) = raceActions[i];
+        app.getMemory<x86::reg32>(menu + 4 * i) = menuActions[i];
+    }
+}
+
 int main(int, char**)
 {
     scePowerSetArmClockFrequency(444);
@@ -121,6 +137,7 @@ int main(int, char**)
     {
         nfsu::Application app(s_commandLine, imageSections(image));
         std::vector<uint8_t>().swap(image);
+        setPadBindings(app);
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))
             pf::fatal("%s (the game folder) is missing", s_guestGameFolder);
         app.execute();

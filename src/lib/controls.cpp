@@ -17,8 +17,9 @@ const GUID        JoystickProduct    = { 0x00030B43, 0x0000, 0x0000, { 0, 0, 'P'
 
 // ---- Layout (docs/re/input.md section 7) ----
 
-// Joystick buttons by DirectInput index. The game's EMS table: 0 throttle / select, 1 look back, 2 camera / back,
-// 3 brake / customise, 4 / 5 shift down / up, 6 nitrous, 7 handbrake, 9 pause,
+// Joystick buttons by DirectInput index, in the adapter's PlayStation order. src/nfsu/main.cpp rewrites the game's EMS
+// table for these indices (race and menu actions). The game's original EMS table: 0 camera / back, 1 look back,
+// 2 throttle / select, 3 brake / customise, 4 / 5 shift down / up, 6 nitrous, 7 handbrake, 9 pause,
 // 12-15 steer and menu up, right, down, left. Select is a tap (button 8, respot): see the Mapper.
 struct ButtonMapping
 {
@@ -28,9 +29,9 @@ struct ButtonMapping
 
 static const ButtonMapping s_buttons[] =
 {
-    { Cross,     0 },
+    { Triangle,  0 },
     { Circle,    1 },
-    { Triangle,  2 },
+    { Cross,     2 },
     { Square,    3 },
     { RearLeft,  4 },
     { RearRight, 5 },
