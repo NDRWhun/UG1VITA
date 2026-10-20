@@ -1,6 +1,7 @@
 // Native replacements of guest functions (tools/recompiler/generate.py NATIVE_OVERRIDES). Each one does what the
 // guest function does, including its ret: on entry cpu.esp points at the return address slot.
 
+#include "cull.h"
 #include "movie_yuv.h"
 
 #include <lib/winapp.h>
@@ -108,6 +109,17 @@ void sub_5ac443(win32::WinApplication* app, x86::CPU& cpu)
 void sub_5ac8e5(win32::WinApplication* app, x86::CPU& cpu)
 {
     win32::d3dx9::MatrixTranspose(app, cpu);
+}
+
+// Scenery culler and box against frustum test (cull.cpp).
+void sub_446620(win32::WinApplication* app, x86::CPU& cpu)
+{
+    cull::doCulling(app, cpu);
+}
+
+void sub_40db20(win32::WinApplication* app, x86::CPU& cpu)
+{
+    cull::getVisibleState(app, cpu);
 }
 
 }

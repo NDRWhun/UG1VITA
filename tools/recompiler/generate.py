@@ -59,6 +59,10 @@ NATIVE_OVERRIDES = [
     0x5abdaf,   # D3DXVec3Transform
     0x5ac443,   # D3DXVec4Transform
     0x5ac8e5,   # D3DXMatrixTranspose
+    # Scenery culling (src/nfsu/cull.cpp): the per-frame scenery culler, its visibility of each (view, section) is
+    # computed on worker threads; the box against frustum test is native for every caller.
+    0x446620,   # scenery culler: every view, every visible section
+    0x40db20,   # bounding box against the view frustum: 0 outside, 1 partial, 2 inside
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
