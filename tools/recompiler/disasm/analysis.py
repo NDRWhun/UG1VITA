@@ -551,7 +551,8 @@ class Function:
         if self.program.fpu_check and after is not None:
             lines.append('RC_ASSERT(cpu.fpu.count == fpu_count %s %d);' % ('+' if after >= 0 else '-', abs(after)))
         elif self.branch[i][0] == 'dyncall' and self.program.indirect_fpu_checked and d is not None:
-            # Indirect calls are assumed to keep the x87 depth; check it.
+            # Indirect calls keep the x87 depth or push the float result the analysis inferred; check it.
+            d += self.indirect_fpu_delta(i)
             lines.append('RC_ASSERT(cpu.fpu.count == fpu_count %s %d);' % ('+' if d >= 0 else '-', abs(d)))
         if after is not None:
             for j in range(1, after + 1):
@@ -570,10 +571,14 @@ class Function:
         if d is None:
             return None
         b = self.branch[i]
-        delta = self.program.fpu_deltas.get(b[1]) if b[0] == 'call' else self.program.indirect_fpu_delta
+        delta = self.program.fpu_deltas.get(b[1]) if b[0] == 'call' else self.indirect_fpu_delta(i)
         if delta is None or delta == fpustack.NEVER:
             return None
         return d + delta
+
+    def indirect_fpu_delta(self, i):
+        """Net x87 pushes of the callee of the indirect call at i."""
+        return self.fpu.sites.get(i, self.program.indirect_fpu_delta)
 
     def fpu_exit_depth(self, i):
         """x87 depth when control falls off the end after instruction i."""

@@ -82,7 +82,7 @@ static HRESULT readWaveFormat(LPCWAVEFORMATEX lpwfxFormat, AudioFormat* format)
 
 HRESULT IDirectSoundBuffer::readDescription(WinApplication* app, LPCDSBUFFERDESC lpcDSBufferDesc, AudioFormat* format, DWORD* bufferBytes)
 {
-    if (!lpcDSBufferDesc || lpcDSBufferDesc->dwSize != sizeof(DSBUFFERDESC))
+    if (!lpcDSBufferDesc || !lpcDSBufferDesc->validSize())
         return DSERR_INVALIDPARAM;
     if (lpcDSBufferDesc->dwFlags & DSBCAPS_PRIMARYBUFFER)
     {
