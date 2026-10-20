@@ -5,6 +5,7 @@
 #include <platform/config.h>
 #include <platform/gxm.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <algorithm>
 
 namespace win32 { namespace d3d9
@@ -35,6 +36,34 @@ enum : DWORD
 };
 
 const D3DMATRIX s_identity = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
+
+// Perf builds: game thread time spent in the Draw* methods, logged every 300 frames.
+uint64_t s_drawUs = 0;
+uint32_t s_drawCalls = 0, s_drawFrames = 0;
+
+struct DrawTimer
+{
+    uint32_t start;
+    DrawTimer() : start(pf::perf::enabled() ? pf::perf::now() : 0) {}
+    ~DrawTimer()
+    {
+        if (!pf::perf::enabled())
+            return;
+        s_drawUs += pf::perf::now() - start;
+        ++s_drawCalls;
+    }
+};
+
+void drawFrameDone()
+{
+    if (!pf::perf::enabled() || ++s_drawFrames < 300)
+        return;
+    pf::logInfo("d3d9: draws on the game thread: %u us/frame, %u draws/frame, %.2f us/draw",
+                uint32_t(s_drawUs / s_drawFrames), s_drawCalls / s_drawFrames,
+                s_drawCalls ? double(s_drawUs) / double(s_drawCalls) : 0.0);
+    s_drawUs = 0;
+    s_drawCalls = s_drawFrames = 0;
+}
 
 uint8_t address(DWORD mode)
 {
@@ -667,6 +696,7 @@ HRESULT Device::Present(WinApplication* app, x86::CPU& cpu, const RECT* source, 
     gpu().submitFrame(f, m_vblanks);
     m_frame = nullptr;
     m_sceneOpen = false;
+    drawFrameDone();
     return D3D_OK;
 }
 
@@ -1335,6 +1365,7 @@ HRESULT Device::SetNPatchMode(WinApplication* app, x86::CPU& cpu, float segments
 
 HRESULT Device::DrawPrimitive(WinApplication* app, x86::CPU& cpu, DWORD type, UINT start, UINT count)
 {
+    const DrawTimer timer;
     Buffer* vb = m_state.stream;
     VertexDeclaration* decl = m_state.declaration ? m_state.declaration
                             : m_state.fvf ? fvfDeclaration(m_state.fvf) : nullptr;
@@ -1350,6 +1381,7 @@ HRESULT Device::DrawPrimitive(WinApplication* app, x86::CPU& cpu, DWORD type, UI
 HRESULT Device::DrawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, DWORD type, LONG baseVertex, UINT minIndex,
                                      UINT vertices, UINT startIndex, UINT count)
 {
+    const DrawTimer timer;
     Buffer* vb = m_state.stream;
     Buffer* ib = m_state.indices;
     VertexDeclaration* decl = m_state.declaration ? m_state.declaration
@@ -1366,6 +1398,7 @@ HRESULT Device::DrawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, DWORD t
 HRESULT Device::DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, UINT count, const void* data,
                                 UINT stride)
 {
+    const DrawTimer timer;
     VertexDeclaration* decl = m_state.declaration ? m_state.declaration
                             : m_state.fvf ? fvfDeclaration(m_state.fvf) : nullptr;
     // A user-pointer draw unbinds stream 0.
@@ -1392,6 +1425,7 @@ HRESULT Device::DrawIndexedPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD
                                        UINT count, const void* indices, DWORD indexFormat, const void* data,
                                        UINT stride)
 {
+    const DrawTimer timer;
     VertexDeclaration* decl = m_state.declaration ? m_state.declaration
                             : m_state.fvf ? fvfDeclaration(m_state.fvf) : nullptr;
     hold(m_state.stream, static_cast<Buffer*>(nullptr));
