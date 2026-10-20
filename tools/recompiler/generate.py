@@ -66,6 +66,10 @@ NATIVE_OVERRIDES = [
     0x661f60,   # linear interpolation resampler
     0x65fad0,   # EA-XA decoder
     0x65b3f0,   # float -> 16-bit output module
+    # Scenery culling (src/nfsu/cull.cpp): the per-frame scenery culler, its visibility of each (view, section) is
+    # computed on worker threads; the box against frustum test is native for every caller.
+    0x446620,   # scenery culler: every view, every visible section
+    0x40db20,   # bounding box against the view frustum: 0 outside, 1 partial, 2 inside
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.

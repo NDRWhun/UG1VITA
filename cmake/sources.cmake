@@ -19,6 +19,7 @@ set(NFSU_PLATFORM_SOURCES
   src/platform/config.cpp
   src/platform/cores.cpp
   src/platform/filesystem.cpp
+  src/platform/jobs.cpp
   src/platform/ime.cpp
   src/platform/log.cpp
   src/platform/perf.cpp
@@ -91,6 +92,7 @@ set(NFSU_WINAPI_SOURCES
 set(NFSU_GAME_PORT_SOURCES
   src/nfsu/audio_mixer.cpp
   src/nfsu/bankcode.cpp
+  src/nfsu/cull.cpp
   src/nfsu/movie_yuv.cpp
   src/nfsu/native.cpp
 )
