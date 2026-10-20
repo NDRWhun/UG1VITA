@@ -1,6 +1,9 @@
 #include "movie_yuv.h"
 
 #include <cstring>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 namespace nfsu
 {
@@ -34,6 +37,20 @@ inline uint32_t load32(const uint8_t* base, uint32_t address)
 void convertRow(const uint8_t* y, const uint8_t* u, const uint8_t* v, uint8_t* dst, uint32_t pixels,
                 const uint8_t* tableY, const uint8_t* tableU, const uint8_t* tableV)
 {
+#if defined(__ARM_NEON)
+    // The same lanes as the MMX kernel: wrapping 16-bit adds (paddw), unsigned saturation to bytes (packuswb).
+    for (uint32_t i = 0; i < pixels / 2; ++i)
+    {
+        const int16x4_t chroma = vadd_s16(vld1_s16(reinterpret_cast<const int16_t*>(tableU + u[i] * 8)),
+                                          vld1_s16(reinterpret_cast<const int16_t*>(tableV + v[i] * 8)));
+        const int16x8_t luma = vcombine_s16(vld1_s16(reinterpret_cast<const int16_t*>(tableY + y[0] * 8)),
+                                            vld1_s16(reinterpret_cast<const int16_t*>(tableY + y[1] * 8)));
+        vst1_u8(dst, vqmovun_s16(vaddq_s16(luma, vcombine_s16(chroma, chroma))));
+        y += 2;
+        dst += 8;
+    }
+    return;
+#endif
     for (uint32_t i = 0; i < pixels / 2; ++i)
     {
         for (uint32_t lane = 0; lane < 4; ++lane)
