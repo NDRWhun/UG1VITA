@@ -73,7 +73,8 @@ endif()
 
 # Generated game code: large, optimise for size and compile time.
 add_library(nfsu_game OBJECT ${NFSU_GENERATED_SOURCES})
-target_compile_options(nfsu_game PRIVATE ${NFSU_COMMON_FLAGS} -O2 -Wno-unused-label -Wno-unused-variable -Wno-unused-parameter)
+# No SLP vectorisation: it packs guest stores into NEON stores through the stack (store forwarding stalls).
+target_compile_options(nfsu_game PRIVATE ${NFSU_COMMON_FLAGS} -O2 -fno-tree-slp-vectorize -Wno-unused-label -Wno-unused-variable -Wno-unused-parameter)
 # Start-up method registration (nfsu.cpp, runs once) gains nothing from -O2 and compiles much faster at -Og.
 set(NFSU_LIGHT_SOURCES ${NFSU_GENERATED_SOURCES})
 list(FILTER NFSU_LIGHT_SOURCES INCLUDE REGEX "/nfsu\\.cpp$")
