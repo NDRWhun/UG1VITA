@@ -37,11 +37,7 @@ option(NFSU_ASSERT_SOFT      "Log failed assertions instead of trapping" OFF)
 include(cmake/shaders.cmake)
 include(cmake/sources.cmake)
 
-set(NFSU_SHADER_SOURCES "")
-nfsu_add_shader(NFSU_SHADER_SOURCES blit_v  sce_vp_psp2)
-nfsu_add_shader(NFSU_SHADER_SOURCES blit_f  sce_fp_psp2)
-nfsu_add_shader(NFSU_SHADER_SOURCES clear_v sce_vp_psp2)
-nfsu_add_shader(NFSU_SHADER_SOURCES clear_f sce_fp_psp2)
+nfsu_add_shaders(NFSU_SHADER_SOURCES)
 
 set(NFSU_COMMON_FLAGS
   -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard

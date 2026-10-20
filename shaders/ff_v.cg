@@ -1,0 +1,34 @@
+// Fixed function: transformed (or, with SCREEN, pre-transformed) position, stage 0 texture transform, and the
+// non-texture factors of the stage 0 colour and alpha operations as the vertex colour.
+
+void main(
+#ifdef SCREEN
+    float4 aPosition,
+    uniform float4 uScreen,
+#else
+    float3 aPosition,
+    uniform float4 uWvp[4],
+#endif
+    float4 aColor,
+    float4 aTex0,
+    uniform float4 uTexMatrix[4],
+    uniform float4 uTexPad,
+    uniform float4 uDiffuseMask,
+    uniform float4 uFactorMask,
+    uniform float4 uFactor,
+    float4 out vPosition : POSITION,
+    float4 out vColor : COLOR0,
+    float3 out vTex0 : TEXCOORD0)
+{
+#ifdef SCREEN
+    // Window coordinates and 1/w back to clip space, so the attributes keep their perspective.
+    float w = 1.0 / aPosition.w;
+    vPosition = float4((aPosition.x * uScreen.x + uScreen.z) * w, (aPosition.y * uScreen.y + uScreen.w) * w,
+                       aPosition.z * w, w);
+#else
+    vPosition = aPosition.x * uWvp[0] + aPosition.y * uWvp[1] + aPosition.z * uWvp[2] + uWvp[3];
+#endif
+    float4 t = aTex0 + uTexPad;
+    vTex0 = (t.x * uTexMatrix[0] + t.y * uTexMatrix[1] + t.z * uTexMatrix[2] + t.w * uTexMatrix[3]).xyz;
+    vColor = lerp(float4(1.0), aColor.zyxw, uDiffuseMask) * lerp(float4(1.0), uFactor, uFactorMask);
+}

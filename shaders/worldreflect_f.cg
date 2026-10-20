@@ -1,0 +1,19 @@
+// worldreflect effect: texture * colour * 2 plus the reflection weighted by both alphas; opaque.
+
+float4 main(
+    float4 vColor : COLOR0,
+    float2 vTex0 : TEXCOORD0,
+    float3 vTex1 : TEXCOORD1,
+    uniform sampler2D uTex0,
+    uniform sampler2D uTex1,
+    uniform float4 uAlphaTest) : COLOR
+{
+    float4 t = tex2D(uTex0, vTex0);
+    float4 r = tex2Dproj(uTex1, vTex1);
+    float4 c = float4(t.rgb * vColor.rgb * 2.0 + vColor.a * t.a * r.rgb, 1.0);
+#ifdef ATEST
+    if (uAlphaTest.x < uAlphaTest.y)
+        discard;
+#endif
+    return c;
+}

@@ -1,0 +1,24 @@
+// worldheadlight effect: (headlight * depth fade * headlight colour + colour) * texture * 2.
+
+float4 main(
+    float4 vColor : COLOR0,
+    float2 vTex0 : TEXCOORD0,
+    float4 vTex1 : TEXCOORD1,
+    uniform sampler2D uTex0,
+    uniform sampler2D uTex1,
+    uniform sampler2D uTex2,
+    uniform float4 uHeadlightColor,
+    uniform float4 uAlphaTest) : COLOR
+{
+    float4 t = tex2D(uTex0, vTex0);
+    float4 h = tex2Dproj(uTex1, vTex1.xyz);
+    float4 k = tex2D(uTex2, float2(vTex1.w, 0.0));
+    float4 c;
+    c.rgb = (h.rgb * k.rgb * uHeadlightColor.rgb + vColor.rgb) * t.rgb * 2.0;
+    c.a = t.a * vColor.a * 2.0;
+#ifdef ATEST
+    if (uAlphaTest.x * saturate(c.a) < uAlphaTest.y)
+        discard;
+#endif
+    return c;
+}

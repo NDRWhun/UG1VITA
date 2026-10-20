@@ -1,6 +1,24 @@
 # Hand-written runtime sources. The generated game code is globbed separately.
 
+# Direct3D frame model and texture layouts (platform neutral), and the host's software rasteriser.
+set(NFSU_RENDER_SOURCES
+  src/platform/render.cpp
+  src/platform/texture.cpp
+)
+set(NFSU_RENDER_HOST_SOURCES
+  src/platform/host/raster.cpp
+)
+# Direct3D 9 and D3DX layer.
+set(NFSU_D3D9_SOURCES
+  src/lib/winapi/d3d9.cpp
+  src/lib/winapi/d3d9_device.cpp
+  src/lib/winapi/d3d9_resources.cpp
+  src/lib/winapi/d3d9_state.cpp
+  src/lib/winapi/d3dx9.cpp
+)
+
 set(NFSU_PLATFORM_SOURCES
+  ${NFSU_RENDER_SOURCES}
   src/platform/config.cpp
   src/platform/cores.cpp
   src/platform/ime.cpp
@@ -13,6 +31,7 @@ set(NFSU_PLATFORM_SOURCES
   src/platform/mmx_selftest.cpp
   src/platform/fpu_selftest.cpp
   src/platform/gxm/gxm_device.cpp
+  src/platform/gxm/gxm_render.cpp
 )
 
 set(NFSU_LIB_SOURCES
@@ -39,6 +58,7 @@ set(NFSU_LIB_SOURCES
 )
 
 set(NFSU_WINAPI_SOURCES
+  ${NFSU_D3D9_SOURCES}
   src/lib/winapi/advapi32.cpp
   src/lib/winapi/com.cpp
   src/lib/winapi/ddraw.cpp

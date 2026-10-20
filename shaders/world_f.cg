@@ -1,0 +1,15 @@
+// world and worldbone effects: texture * colour * 2.
+
+float4 main(
+    float4 vColor : COLOR0,
+    float2 vTex0 : TEXCOORD0,
+    uniform sampler2D uTex0,
+    uniform float4 uAlphaTest) : COLOR
+{
+    float4 c = tex2D(uTex0, vTex0) * vColor * 2.0;
+#ifdef ATEST
+    if (uAlphaTest.x * saturate(c.a) < uAlphaTest.y)
+        discard;
+#endif
+    return c;
+}

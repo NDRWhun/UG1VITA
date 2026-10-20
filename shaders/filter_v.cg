@@ -1,0 +1,20 @@
+// filter effect: positions already in clip space, four texture coordinates.
+
+void main(
+    float3 aPosition,
+    float2 aTex0,
+    float2 aTex1,
+    float2 aTex2,
+    float2 aTex3,
+    float4 out vPosition : POSITION,
+    float2 out vTex0 : TEXCOORD0,
+    float2 out vTex1 : TEXCOORD1,
+    float2 out vTex2 : TEXCOORD2,
+    float2 out vTex3 : TEXCOORD3)
+{
+    vPosition = float4(aPosition, 1.0);
+    vTex0 = aTex0;
+    vTex1 = aTex1;
+    vTex2 = aTex2;
+    vTex3 = aTex3;
+}

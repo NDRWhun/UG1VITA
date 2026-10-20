@@ -1,0 +1,47 @@
+// worldbone effect: three-bone skinning (16 matrices), harmonic diffuse lighting scaled by the view angle.
+
+float4 bone(float4 p, int i, uniform float4 m[64])
+{
+    return p.x * m[i] + p.y * m[i + 1] + p.z * m[i + 2] + p.w * m[i + 3];
+}
+
+void main(
+    float3 aPosition,
+    float3 aNormal,
+    float2 aTex0,
+    float3 aWeight,
+    float3 aIndex,
+    uniform float4 uWvp[4],
+    uniform float4 uLocalEyePos,
+    uniform float4 uHarmonic[10],
+    uniform float4 uDiffuseMin,
+    uniform float4 uDiffuseRange,
+    uniform float4 uBones[64],
+    float4 out vPosition : POSITION,
+    float4 out vColor : COLOR0,
+    float2 out vTex0 : TEXCOORD0)
+{
+    float4 position = float4(aPosition, 1.0);
+    int i0 = int(aIndex.x + 0.5) * 4;
+    int i1 = int(aIndex.y + 0.5) * 4;
+    int i2 = int(aIndex.z + 0.5) * 4;
+    float4 p = bone(position, i0, uBones) * aWeight.x + bone(position, i1, uBones) * aWeight.y
+             + bone(position, i2, uBones) * aWeight.z;
+
+    // The normal goes through the first matrix only.
+    float3 n = aNormal.x * uBones[i0].xyz + aNormal.y * uBones[i0 + 1].xyz + aNormal.z * uBones[i0 + 2].xyz;
+
+    float3 view = uLocalEyePos.xyz - p.xyz;
+    view *= rsqrt(dot(view, view));
+    float4 scale = uDiffuseMin + dot(view, n) * uDiffuseRange;
+
+    float4 c = uHarmonic[0] + uHarmonic[1] * (n.x * n.x) + uHarmonic[2] * (n.y * n.y) + uHarmonic[3] * (n.z * n.z)
+             + uHarmonic[4] * (n.x * n.y) + uHarmonic[5] * (n.z * n.x) + uHarmonic[6] * (n.y * n.z)
+             + uHarmonic[7] * n.x + uHarmonic[8] * n.y + uHarmonic[9] * n.z;
+    c *= scale;
+    c.w = scale.w;
+    vColor = saturate(c);
+
+    vPosition = p.x * uWvp[0] + p.y * uWvp[1] + p.z * uWvp[2] + p.w * uWvp[3];
+    vTex0 = aTex0;
+}
