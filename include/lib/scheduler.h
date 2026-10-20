@@ -32,9 +32,18 @@ Level levelOf(int windowsPriority);
 // Host thread priority for a Windows thread priority.
 int hostPriorityOf(int windowsPriority);
 
-// Core role of the guest threads started at an entry point; others get pf::cores::Helper. Before guest code runs.
-void setThreadRole(x86::reg32 entryPoint, pf::cores::Role role);
+// Core role and log name of the guest threads started at an entry point; others get pf::cores::Helper. Before
+// guest code runs.
+void setThreadRole(x86::reg32 entryPoint, pf::cores::Role role, const char* name = nullptr);
 pf::cores::Role threadRole(x86::reg32 entryPoint);
+const char* threadName(x86::reg32 entryPoint);
+// A start routine that calls the real entry point stored in its parameter block at entryOffset, with the
+// parameter stored at parameterOffset (the CRT's _beginthreadex thunk). Before guest code runs.
+void setStartThunk(x86::reg32 thunk, x86::reg32 entryOffset, x86::reg32 parameterOffset);
+// The entry point a CreateThread start routine and parameter lead to.
+x86::reg32 resolveEntry(WinApplication* app, x86::reg32 startAddress, x86::reg32 parameter);
+// The threads of Speed.exe (roles, names, the CRT thunk).
+void configureGameThreads();
 
 // Control of the calling host thread; one that is not a guest thread gets a normal-level control on first use.
 ThreadControl* currentControl();

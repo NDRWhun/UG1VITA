@@ -150,6 +150,7 @@ WinApplication::WinApplication(const char* appName, x86::reg32 baseAddress, cons
     m_env = new MemMap(4096);
     ddraw::s_dDrawRegistry->registerSymbols(this);
     kernel32::registerModules(this);
+    scheduler::configureGameThreads();
     Event::init();
     Timer::init();
     com::InitialiseComMemory(this);

@@ -66,9 +66,17 @@ struct RoleEntry
 {
     x86::reg32      entryPoint;
     pf::cores::Role role;
+    const char*     name;
+};
+struct StartThunk
+{
+    x86::reg32      thunk;
+    x86::reg32      entryOffset;        // of the real entry point in the parameter block
+    x86::reg32      parameterOffset;    // of the real entry point's parameter
 };
 // Written before guest code runs, read-only afterwards.
 static std::vector<RoleEntry> s_roles;
+static std::vector<StartThunk> s_startThunks;
 
 // Under s_tableMutex.
 static ThreadControl* findGuestControl(x86::reg32 guestId)
@@ -152,7 +160,9 @@ Thread::Thread(WinApplication *app, x86::reg32 method, x86::reg32 parameter, x86
 {
     reapFinished();
     const bool suspended = (flags & 0x4) != 0;  // CREATE_SUSPENDED
-    const pf::cores::Role role = scheduler::threadRole(method);
+    const x86::reg32 entry = scheduler::resolveEntry(app, method, parameter);
+    const pf::cores::Role role = scheduler::threadRole(entry);
+    const char* const name = scheduler::threadName(entry);
     m_shared->m_semaphore = new pf::Semaphore("thread_start",suspended ? 0 : 1);
     m_shared->m_thread = new pf::Thread("guest",&run, m_shared, pf::Thread::PriorityNormal, s_hostStackSize,
                                         pf::cores::mask(role));
@@ -171,8 +181,8 @@ Thread::Thread(WinApplication *app, x86::reg32 method, x86::reg32 parameter, x86
             s_suspended.fetch_add(1);
         }
     }
-    pf::logInfo("thread 0x%x: entry 0x%08x, %s core %d%s", m_shared->m_threadId, method, pf::cores::name(role),
-                pf::cores::core(role), suspended ? ", suspended" : "");
+    pf::logInfo("thread 0x%x (%s): entry 0x%08x, %s core %d%s", m_shared->m_threadId, name ? name : "unnamed",
+                entry, pf::cores::name(role), pf::cores::core(role), suspended ? ", suspended" : "");
     m_shared->m_refCount.fetch_add(1);
     {
         pf::LwLockGuard guard(s_liveMutex);
@@ -382,9 +392,9 @@ int hostPriorityOf(int windowsPriority)
     return pf::Thread::PriorityNormal - 8 * clamped;
 }
 
-void setThreadRole(x86::reg32 entryPoint, pf::cores::Role role)
+void setThreadRole(x86::reg32 entryPoint, pf::cores::Role role, const char* name)
 {
-    s_roles.push_back(RoleEntry{ entryPoint, role });
+    s_roles.push_back(RoleEntry{ entryPoint, role, name });
 }
 
 pf::cores::Role threadRole(x86::reg32 entryPoint)
@@ -395,6 +405,40 @@ pf::cores::Role threadRole(x86::reg32 entryPoint)
             return entry.role;
     }
     return pf::cores::Helper;
+}
+
+const char* threadName(x86::reg32 entryPoint)
+{
+    for (const RoleEntry& entry : s_roles)
+    {
+        if (entry.entryPoint == entryPoint)
+            return entry.name;
+    }
+    return nullptr;
+}
+
+void setStartThunk(x86::reg32 thunk, x86::reg32 entryOffset, x86::reg32 parameterOffset)
+{
+    s_startThunks.push_back(StartThunk{ thunk, entryOffset, parameterOffset });
+}
+
+// Follows thunks that start other thunks (a few levels at most).
+x86::reg32 resolveEntry(WinApplication* app, x86::reg32 startAddress, x86::reg32 parameter)
+{
+    for (int level = 0; level < 4; ++level)
+    {
+        const StartThunk* found = nullptr;
+        for (const StartThunk& thunk : s_startThunks)
+        {
+            if (thunk.thunk == startAddress)
+                found = &thunk;
+        }
+        if (!found || !parameter)
+            break;
+        startAddress = app->getMemory<x86::reg32>(parameter + found->entryOffset);
+        parameter = app->getMemory<x86::reg32>(parameter + found->parameterOffset);
+    }
+    return startAddress;
 }
 
 ThreadControl* currentControl()

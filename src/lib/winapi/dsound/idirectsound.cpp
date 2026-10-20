@@ -1,7 +1,9 @@
 #include <winapi/dsound/idirectsound.h>
 #include <winapi/dsound/idirectsoundbuffer.h>
+#include <winapi/support.h>
 #include <winapi/wrapper.h>
 #include <lib/audio.h>
+#include <platform/log.h>
 
 
 namespace win32 { namespace dsound
@@ -82,6 +84,17 @@ HRESULT IDirectSound::CreateSoundBuffer(WinApplication* app, x86::CPU& cpu,
         return DSERR_INVALIDPARAM;
     if (pUnkOuter)
         return DSERR_NOAGGREGATION;
+    // Mixing is software only and buffers have no 3D control (no DS3D buffer object): the game's hardware 3D and
+    // EAX probe asks for LOCHARDWARE | CTRL3D and gives up quietly (docs/re/audio.md section 3).
+    if (lpcDSBufferDesc && lpcDSBufferDesc->dwSize == sizeof(DSBUFFERDESC)
+        && !(lpcDSBufferDesc->dwFlags & DSBCAPS_PRIMARYBUFFER)
+        && (lpcDSBufferDesc->dwFlags & (DSBCAPS_LOCHARDWARE | DSBCAPS_CTRL3D)))
+    {
+        pf::logInfo("CreateSoundBuffer: flags 0x%x need hardware or 3D buffers, not available",
+                    lpcDSBufferDesc->dwFlags);
+        *lplpDirectSoundBuffer = Packed<IDirectSoundBuffer>();
+        return (lpcDSBufferDesc->dwFlags & DSBCAPS_LOCHARDWARE) ? DSERR_INVALIDCALL : DSERR_CONTROLUNAVAIL;
+    }
     AudioFormat format;
     DWORD bufferBytes;
     const HRESULT result = IDirectSoundBuffer::readDescription(app, lpcDSBufferDesc, &format, &bufferBytes);
@@ -123,23 +136,25 @@ HRESULT IDirectSound::GetCaps(WinApplication* app, x86::CPU& cpu,
     lpDSCaps->dwFlags = DSCAPS_PRIMARYMONO | DSCAPS_PRIMARYSTEREO | DSCAPS_PRIMARY8BIT | DSCAPS_PRIMARY16BIT
                       | DSCAPS_SECONDARYMONO | DSCAPS_SECONDARYSTEREO | DSCAPS_SECONDARY8BIT | DSCAPS_SECONDARY16BIT
                       | DSCAPS_CONTINUOUSRATE | DSCAPS_CERTIFIED;
+    // A software-mixing device (not emulated: DSCAPS_EMULDRIVER clear) without hardware buffers. The game clamps
+    // the maximum rate to 44100 for its mixer.
     lpDSCaps->dwMinSecondarySampleRate = 100;
-    lpDSCaps->dwMaxSecondarySampleRate = 100000;
+    lpDSCaps->dwMaxSecondarySampleRate = 48000;
     lpDSCaps->dwPrimaryBuffers = 1;
-    lpDSCaps->dwMaxHwMixingAllBuffers = 65535;
-    lpDSCaps->dwMaxHwMixingStaticBuffers = 65535;
-    lpDSCaps->dwMaxHwMixingStreamingBuffers = 65535;
-    lpDSCaps->dwFreeHwMixingAllBuffers = 65535;
-    lpDSCaps->dwFreeHwMixingStaticBuffers = 65535;
-    lpDSCaps->dwFreeHwMixingStreamingBuffers = 65535;
+    lpDSCaps->dwMaxHwMixingAllBuffers = 0;
+    lpDSCaps->dwMaxHwMixingStaticBuffers = 0;
+    lpDSCaps->dwMaxHwMixingStreamingBuffers = 0;
+    lpDSCaps->dwFreeHwMixingAllBuffers = 0;
+    lpDSCaps->dwFreeHwMixingStaticBuffers = 0;
+    lpDSCaps->dwFreeHwMixingStreamingBuffers = 0;
     lpDSCaps->dwMaxHw3DAllBuffers = 0;
     lpDSCaps->dwMaxHw3DStaticBuffers = 0;
     lpDSCaps->dwMaxHw3DStreamingBuffers = 0;
     lpDSCaps->dwFreeHw3DAllBuffers = 0;
     lpDSCaps->dwFreeHw3DStaticBuffers = 0;
     lpDSCaps->dwFreeHw3DStreamingBuffers = 0;
-    lpDSCaps->dwTotalHwMemBytes = 1024*1024;
-    lpDSCaps->dwFreeHwMemBytes = 1024*1024;
+    lpDSCaps->dwTotalHwMemBytes = 0;
+    lpDSCaps->dwFreeHwMemBytes = 0;
     lpDSCaps->dwMaxContigFreeHwMemBytes = 0;
     lpDSCaps->dwUnlockTransferRateHwBuffers = 0;
     lpDSCaps->dwPlayCpuOverheadSwBuffers = 0;
@@ -151,12 +166,9 @@ HRESULT IDirectSound::GetCaps(WinApplication* app, x86::CPU& cpu,
 HRESULT IDirectSound::DuplicateSoundBuffer(WinApplication* app, x86::CPU& cpu,
                                            LPDIRECTSOUNDBUFFER lpDsbOriginal, LPLPDIRECTSOUNDBUFFER lplpDsbDuplicate)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(lpDsbOriginal);
     RC_USE(lplpDsbDuplicate);
-    RC_ASSERT(false);
-    return 1;
+    unsupported(app, cpu, "IDirectSound::DuplicateSoundBuffer", "buffer 0x%08x", ComGetIndex(app, this));
 }
 
 HRESULT IDirectSound::SetCooperativeLevel(WinApplication* app, x86::CPU& cpu,
@@ -170,42 +182,44 @@ HRESULT IDirectSound::SetCooperativeLevel(WinApplication* app, x86::CPU& cpu,
     return DS_OK;
 }
 
+// There is no sound card memory to compact.
 HRESULT IDirectSound::Compact(WinApplication* app, x86::CPU& cpu)
 {
     RC_USE(app);
     RC_USE(cpu);
-    RC_ASSERT(false);
-    return 1;
+    return DS_OK;
 }
 
+// The Vita speakers or headphones: DSSPEAKER_STEREO with a wide (20 degree) geometry.
 HRESULT IDirectSound::GetSpeakerConfig(WinApplication* app, x86::CPU& cpu,
                                        LPDWORD lpdwSpeakerConfig)
 {
     RC_USE(app);
     RC_USE(cpu);
-    RC_USE(lpdwSpeakerConfig);
-    RC_ASSERT(false);
-    return 1;
+    if (!lpdwSpeakerConfig)
+        return DSERR_INVALIDPARAM;
+    *lpdwSpeakerConfig = 0x00140004;
+    return DS_OK;
 }
 
+// The output stays stereo whatever the game asks for.
 HRESULT IDirectSound::SetSpeakerConfig(WinApplication* app, x86::CPU& cpu,
                                        DWORD dwSpeakerConfig)
 {
     RC_USE(app);
     RC_USE(cpu);
     RC_USE(dwSpeakerConfig);
-    RC_ASSERT(false);
-    return 1;
+    return DS_OK;
 }
 
+// DirectSoundCreate initialised the object already.
 HRESULT IDirectSound::Initialize(WinApplication* app, x86::CPU& cpu,
                                  const GUID* lpcGuid)
 {
     RC_USE(app);
     RC_USE(cpu);
     RC_USE(lpcGuid);
-    RC_ASSERT(false);
-    return 1;
+    return DSERR_ALREADYINITIALIZED;
 }
 
 x86::reg32 IDirectSound::init(WinApplication *app, x86::reg32 memblockIndex, x86::reg8* memBlock)

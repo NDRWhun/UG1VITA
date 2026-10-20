@@ -1349,10 +1349,11 @@ BOOL SetThreadPriority(WinApplication* app, x86::CPU& cpu,
 LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(WinApplication* app, x86::CPU& cpu,
                                                          LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter)
 {
+    // Kept and returned as Windows does; no guest exception reaches a filter on the port (they trap).
     RC_USE(app);
     RC_USE(cpu);
-    RC_USE(lpTopLevelExceptionFilter);
-    return 0;
+    static std::atomic<x86::reg32> s_filter{0};
+    return s_filter.exchange(lpTopLevelExceptionFilter);
 }
 
 // Without the execution lock. Long and infinite sleeps wake up in slices to see a terminating thread.
@@ -1445,9 +1446,8 @@ BOOL TlsSetValue(WinApplication* app, x86::CPU& cpu,
 LONG UnhandledExceptionFilter(WinApplication* app, x86::CPU& cpu,
                               struct _EXCEPTION_POINTERS *ExceptionInfo)
 {
-    RC_USE(app);
     RC_USE(ExceptionInfo);
-    x86::guestTrap(cpu.ip, "unhandled guest exception");
+    unsupported(app, cpu, "UnhandledExceptionFilter", "unhandled guest exception");
 }
 BOOL UnmapViewOfFile(WinApplication* app, x86::CPU& cpu,
     Packed<const void> lpBaseAddress)
@@ -2154,12 +2154,9 @@ void RaiseException(WinApplication* app, x86::CPU& cpu,
                     DWORD dwExceptionCode, DWORD dwExceptionFlags, DWORD nNumberOfArguments,
                     const x86::reg32* lpArguments)
 {
-    RC_USE(app);
-    RC_USE(dwExceptionFlags);
-    RC_USE(nNumberOfArguments);
     RC_USE(lpArguments);
-    pf::logError("RaiseException 0x%08x", dwExceptionCode);
-    x86::guestTrap(cpu.ip, "RaiseException");
+    unsupported(app, cpu, "RaiseException", "code 0x%08x, flags 0x%x, %u arguments", dwExceptionCode,
+                dwExceptionFlags, nNumberOfArguments);
 }
 
 // The counter is in microseconds (QueryPerformanceFrequency would report 1 MHz).
