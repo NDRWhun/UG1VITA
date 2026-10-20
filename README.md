@@ -47,7 +47,7 @@
 You need your own copy of Need for Speed Underground for PC, version 1.4: its `Speed.exe` must have the SHA-256
 `c0fad450912952f53809a54690d235aa8b4e25b9f46650693c7cbee1b4c074b7` (other versions are refused).
 
-- The game folder (with `Speed.exe`) goes to `ux0:data/NFSUG1VITA/NFSU/`.
+- The contents of the game folder (`Speed.exe` and the data folders) go directly to `ux0:data/NFSUG1VITA/`.
 - Performance baseline: the ARM clock overclocked to 500 MHz with PSVshell.
 - CapUnlocker is optional: with it, some guest threads move to core 3.
 
