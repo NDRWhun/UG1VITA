@@ -115,6 +115,36 @@ static void setPadBindings()
     }
 }
 
+// Text fields (docs/re/input.md section 6). Every edit of the game's line editor sets its active flag [0x007363A8],
+// buffer [0x0073639C] and length limit [0x007363AC]; the edit ends when the flag is cleared. The front end's
+// keyboard screen (the profile name) edits 0x00777B74 and flags itself in [0x00735BA4]; it ignores Back when its
+// cancel message [0x00777B64] is -1, and Escape would then leave the profile screen waiting. Accepted characters:
+// letters and digits, "_@.-" unless [0x0070108E], the list of 0x004115F0 when [0x007363B3] is 1.
+static void pollTextField()
+{
+    static bool s_editing = false;
+    if (!guestDword(0x007363A8))
+    {
+        if (s_editing)
+            win32::Gamepad::endTextEdit();
+        s_editing = false;
+        return;
+    }
+    const x86::reg32 buffer = guestDword(0x0073639C);
+    const x86::reg32 maxLength = guestDword(0x007363AC);
+    char text[256];
+    size_t length = 0;
+    for (; buffer && length < maxLength && length + 1 < sizeof(text) && win32::g_guestBase[buffer + length]; ++length)
+        text[length] = char(win32::g_guestBase[buffer + length]);
+    text[length] = 0;
+    const bool keyboard = buffer == 0x00777B74 && guestDword(0x00735BA4) != 0;
+    const char* extra = win32::g_guestBase[0x007363B3] == 1 ? " .,_@-`=[]\\;'/<>?:\"{}|+()*&%#!~"
+                      : win32::g_guestBase[0x0070108E] == 0 ? "_@.-" : "";
+    win32::Gamepad::editText(keyboard ? "Profile name" : "Text", text, maxLength, extra,
+                             !keyboard || guestDword(0x00777B64) != 0xFFFFFFFF);
+    s_editing = true;
+}
+
 // The game builds each device's action mask from both tables of its slot (0x004071B8), whatever map is active, and
 // loads the slot tables from the profile (0x0041CDA0; 0x004064D0 then puts the generic menu actions on buttons
 // 0-4). The keyboard instead gets one map at a time: 0x004057C0 picks the race map ([0x007041C4] = 0) only while
@@ -124,6 +154,7 @@ static void setPadBindings()
 // change stay hidden until released, as the keyboard's map change releases its keys.
 static void padPollHook(x86::reg32* buttons, int* pov)
 {
+    pollTextField();
     const x86::reg32 slots = 0x0078DAA8, slotSize = 0x270, slotCount = 6;
     const bool driving = win32::g_guestBase[0x007041C4] == 0;
     const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
