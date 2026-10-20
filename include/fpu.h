@@ -378,6 +378,13 @@ namespace x86
         return std::numeric_limits<T>::min();
     }
 
+    // fild qword: the exact sum of the two halves rounded once, as the soft-float __aeabi_l2d gives it, but in VFP
+    // instructions. Needs FPSCR round-to-nearest.
+    inline double int64ToDouble(sreg64 value)
+    {
+        return double(sreg32(uint64_t(value) >> 32)) * 0x1p32 + double(reg32(value));
+    }
+
     // Compares roundIntegral with libm on edge cases and a pseudo-random sweep; logs mismatches.
     void fpuSelfTest();
 

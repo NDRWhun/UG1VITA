@@ -233,8 +233,8 @@ def cg_div(ctx, src):
                  'const x86::reg16 d = %s;' % ctx.val(src)]
         lines += ctx.set_reg('ax', 'x86::reg16(n / d)') + ctx.set_reg('dx', 'x86::reg16(n % d)')
     else:
-        lines = ['const x86::reg64 n = %s;' % ctx.edx_eax(), 'const x86::reg32 d = %s;' % ctx.val(src)]
-        lines += ctx.set_reg('eax', 'x86::reg32(n / d)') + ctx.set_reg('edx', 'x86::reg32(n % d)')
+        lines = ['const rc::Division v = rc::divideUnsigned(%s, %s, %s);' % (ctx.reg('edx'), ctx.reg('eax'), ctx.val(src))]
+        lines += ctx.set_reg('eax', 'v.quotient') + ctx.set_reg('edx', 'v.remainder')
     return block(lines)
 
 
@@ -248,8 +248,8 @@ def cg_idiv(ctx, src):
                  'const x86::sreg16 d = x86::sreg16(%s);' % ctx.val(src)]
         lines += ctx.set_reg('ax', 'x86::reg16(n / d)') + ctx.set_reg('dx', 'x86::reg16(n % d)')
     else:
-        lines = ['const x86::sreg64 n = x86::sreg64(%s);' % ctx.edx_eax(), 'const x86::sreg32 d = x86::sreg32(%s);' % ctx.val(src)]
-        lines += ctx.set_reg('eax', 'x86::reg32(n / d)') + ctx.set_reg('edx', 'x86::reg32(n % d)')
+        lines = ['const rc::Division v = rc::divideSigned(%s, %s, %s);' % (ctx.reg('edx'), ctx.reg('eax'), ctx.val(src))]
+        lines += ctx.set_reg('eax', 'v.quotient') + ctx.set_reg('edx', 'v.remainder')
     return block(lines)
 
 

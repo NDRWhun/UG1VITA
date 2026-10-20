@@ -48,6 +48,8 @@ def cg_fld(ctx, value):
 
 def cg_fild(ctx, value):
     bits = value.size * 8
+    if bits == 64:
+        return ctx.fpush('x86::Float(x86::int64ToDouble(%s(%s)))' % (S(bits), ctx.val(value)))
     return ctx.fpush('x86::Float(%s(%s))' % (S(bits), ctx.val(value)))
 
 
