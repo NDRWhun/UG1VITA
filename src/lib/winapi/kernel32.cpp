@@ -160,13 +160,24 @@ LONG CompareFileTime(WinApplication* app, x86::CPU& cpu,
 BOOL CreateDirectoryA(WinApplication* app, x86::CPU& cpu,
                       LPCSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes)
 {
-    RC_USE(app);
-    RC_USE(cpu);
     RC_USE(lpSecurityAttributes);
+    if (!lpPathName)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
     const std::string host = File::hostPath(lpPathName);
     if (mkdir(host.c_str(), 0777) != 0)
     {
+        // The game creates its save folder before every write: an existing folder is the usual answer.
+        struct stat status;
+        if (stat(host.c_str(), &status) == 0)
+        {
+            setLastError(app, cpu, error::AlreadyExists);
+            return 0;
+        }
         pf::logError("CreateDirectoryA %s failed (%s)", lpPathName, host.c_str());
+        setLastError(app, cpu, error::PathNotFound);
         return 0;
     }
     return 1;
@@ -237,16 +248,18 @@ HANDLE CreateFileMappingA(WinApplication* app, x86::CPU& cpu,
                           DWORD flProtect, DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow,
                           LPCSTR lpName)
 {
-    RC_USE(app);
-    RC_USE(cpu);
+    // Read-only mappings of a whole file (the EA file library's map flag); a view is a copy of the file.
     RC_USE(lpFileMappingAttributes);
     RC_USE(dwMaximumSizeHigh);
     RC_USE(dwMaximumSizeLow);
-    RC_USE(lpName);
-    RC_ASSERT(flProtect & 0x2);
+    if ((flProtect & 0xff) != 0x02 || lpName)    // PAGE_READONLY, unnamed
+        unsupported(app, cpu, "CreateFileMappingA", "protection 0x%x, name %s", flProtect, lpName ? lpName : "none");
     const File* source = dynamic_cast<File*>(app->getResource(hFile));
     if (!source)
+    {
+        setLastError(app, cpu, error::InvalidHandle);
         return 0;
+    }
     File* file = new File(*source);
     if (!*file)
     {
@@ -382,17 +395,17 @@ BOOL FindClose(WinApplication* app, x86::CPU& cpu,
 HANDLE FindFirstFileA(WinApplication* app, x86::CPU& cpu,
                       LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
 {
-    RC_USE(cpu);
+    if (!lpFileName || !lpFindFileData)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return HANDLE(-1);
+    }
     win32::FileEnumerator* enumerator = new win32::FileEnumerator(lpFileName);
     if (enumerator->findNext(lpFindFileData))
-    {
         return app->allocateResource(enumerator);
-    }
-    else
-    {
-        delete enumerator;
-        return -1;
-    }
+    delete enumerator;
+    setLastError(app, cpu, error::FileNotFound);
+    return HANDLE(-1);
 }
 
 BOOL FindNextFileA(WinApplication* app, x86::CPU& cpu,
@@ -542,17 +555,28 @@ BOOL GetDiskFreeSpaceA(WinApplication* app, x86::CPU& cpu,
                        LPCSTR lpRootPathName, LPDWORD lpSectorsPerCluster, LPDWORD lpBytesPerSector,
                        LPDWORD lpNumberOfFreeClusters, LPDWORD lpTotalNumberOfClusters)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(lpRootPathName);
-    if (lpSectorsPerCluster) *lpSectorsPerCluster = 1;
+    // The memory card holding the data folder, in 32 KB clusters (counts saturate at 4 G clusters).
+    if (lpRootPathName && GetDriveTypeA(app, cpu, lpRootPathName) != 3)
+    {
+        setLastError(app, cpu, error::PathNotFound);
+        return 0;
+    }
+    x86::reg64 total = 0, free = 0;
+    if (!File::diskSpace(&total, &free))
+    {
+        setLastError(app, cpu, error::NotSupported);
+        return 0;
+    }
+    static const x86::reg64 ClusterBytes = 32768;
+    auto clusters = [](x86::reg64 bytes) { return DWORD(std::min<x86::reg64>(bytes / ClusterBytes, 0xffffffffu)); };
+    if (lpSectorsPerCluster) *lpSectorsPerCluster = DWORD(ClusterBytes / 512);
     if (lpBytesPerSector) *lpBytesPerSector = 512;
-    if (lpNumberOfFreeClusters) *lpNumberOfFreeClusters = 512*1024;
-    if (lpTotalNumberOfClusters) *lpTotalNumberOfClusters = 1024*1024;
+    if (lpNumberOfFreeClusters) *lpNumberOfFreeClusters = clusters(free);
+    if (lpTotalNumberOfClusters) *lpTotalNumberOfClusters = clusters(total);
     return 1;
 }
 
-// Every drive letter is the data folder: a fixed disk. Without a root it is the current drive.
+// C: is a fixed disk (the data folder); no other drive exists. Without a root it is the current drive (C:).
 UINT GetDriveTypeA(WinApplication* app, x86::CPU& cpu,
                    LPCSTR lpRootPathName)
 {
@@ -561,7 +585,7 @@ UINT GetDriveTypeA(WinApplication* app, x86::CPU& cpu,
     if (!lpRootPathName)
         return 3;   // DRIVE_FIXED
     const char letter = char(toupper(x86::reg8(lpRootPathName[0])));
-    return letter >= 'A' && letter <= 'Z' && lpRootPathName[1] == ':' ? 3 : 1;   // DRIVE_NO_ROOT_DIR
+    return letter == 'C' && lpRootPathName[1] == ':' ? 3 : 1;   // DRIVE_NO_ROOT_DIR
 }
 x86::reg32 GetEnvironmentStrings(WinApplication* app, x86::CPU& cpu)
 {
@@ -659,25 +683,24 @@ void GetLocalTime(WinApplication* app, x86::CPU& cpu,
     win32::getSystemTime(lpSystemTime);
 }
 
+// One drive, C: (the data folder). There is no CD drive.
 DWORD GetLogicalDriveStringsA(WinApplication* app, x86::CPU& cpu,
                               DWORD nBufferLength, LPSTR lpBuffer)
 {
     RC_USE(app);
     RC_USE(cpu);
-    if (nBufferLength)
-    {
-        lpBuffer[0] = 'C';
-        lpBuffer[1] = 'D';
-        lpBuffer[2] = 0;
-    }
-    return 2;
+    static const char drives[] = "C:\\\0";     // and the final terminator
+    if (!lpBuffer || nBufferLength < sizeof(drives))
+        return sizeof(drives);
+    memcpy(lpBuffer, drives, sizeof(drives));
+    return sizeof(drives) - 1;
 }
 
 DWORD GetLogicalDrives(WinApplication* app, x86::CPU& cpu)
 {
     RC_USE(app);
     RC_USE(cpu);
-    return 0x2 | 0x4;
+    return 0x4;     // C:
 }
 
 DWORD GetModuleFileNameA(WinApplication* app, x86::CPU& cpu,
@@ -818,20 +841,26 @@ FARPROC GetProcAddress(WinApplication* app, x86::CPU& cpu,
     return address;
 }
 
+// STD_INPUT_HANDLE (-10), STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12): the host's standard streams, one
+// handle each, made again only after the game closes it; SetStdHandle replaces them.
+static HANDLE s_stdHandles[3] = { 0, 0, 0 };
+static bool s_stdHandleSet[3] = { false, false, false };
+
 HANDLE GetStdHandle(WinApplication* app, x86::CPU& cpu,
                     DWORD nStdHandle)
 {
-    RC_USE(cpu);
-    // STD_INPUT_HANDLE (-10), STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12): one handle each, made again only
-    // after the game closes it.
     static const char* const names[3] = { "stdin", "stdout", "stderr" };
-    static HANDLE handles[3] = { 0, 0, 0 };
     const x86::reg32 index = x86::reg32(-10) - nStdHandle;
     if (index >= 3)
+    {
+        setLastError(app, cpu, error::InvalidHandle);
         return HANDLE(-1);
-    if (!handles[index] || !dynamic_cast<win32::File*>(app->getResource(handles[index])))
-        handles[index] = app->allocateResource(new win32::File(int(index), names[index]));
-    return handles[index];
+    }
+    if (s_stdHandleSet[index])
+        return s_stdHandles[index];
+    if (!s_stdHandles[index] || !dynamic_cast<win32::File*>(app->getResource(s_stdHandles[index])))
+        s_stdHandles[index] = app->allocateResource(new win32::File(int(index), names[index]));
+    return s_stdHandles[index];
 }
 
 // A single Pentium (PROCESSOR_INTEL_PENTIUM); the game derives its clock measurement from the type.
@@ -1119,11 +1148,13 @@ BOOL ReadFile(WinApplication* app, x86::CPU& cpu,
               HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
               LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped)
 {
-    RC_USE(cpu);
-    RC_USE(lpOverlapped);
+    // Only the serial code passes an OVERLAPPED, and it never gets a port.
+    if (lpOverlapped)
+        unsupported(app, cpu, "ReadFile", "overlapped read of handle 0x%x", hFile);
     win32::File* f = dynamic_cast<win32::File*>(app->getResource(hFile));
     if (!f)
     {
+        setLastError(app, cpu, error::InvalidHandle);
         return 0;
     }
     else
@@ -1258,14 +1289,12 @@ BOOL SetEndOfFile(WinApplication* app, x86::CPU& cpu,
     return file ? file->truncate() : 0;
 }
 
+// The environment block is fixed before guest code runs (WinApplication::setEnvironment); only the CRT's _putenv
+// would change it, and the game does not call it.
 BOOL SetEnvironmentVariableA(WinApplication* app, x86::CPU& cpu,
                              LPCSTR lpName, LPCSTR lpValue)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(lpName);
-    RC_USE(lpValue);
-    return 0;
+    unsupported(app, cpu, "SetEnvironmentVariableA", "%s=%s", lpName ? lpName : "", lpValue ? lpValue : "(delete)");
 }
 
 BOOL SetEnvironmentVariableW(WinApplication* app, x86::CPU& cpu,
@@ -1277,12 +1306,13 @@ BOOL SetEnvironmentVariableW(WinApplication* app, x86::CPU& cpu,
     RC_USE(lpValue);
     return 0;
 }
+// Kept and returned; there are no critical-error or GP-fault dialogs to suppress.
 UINT SetErrorMode(WinApplication* app, x86::CPU& cpu, UINT uMode)
 {
     RC_USE(app);
     RC_USE(cpu);
-    RC_USE(uMode);
-    return 0;
+    static std::atomic<UINT> s_errorMode{0};
+    return s_errorMode.exchange(uMode);
 }
 
 BOOL SetEvent(WinApplication* app, x86::CPU& cpu,
@@ -1310,10 +1340,25 @@ BOOL SetFileAttributesA(WinApplication* app, x86::CPU& cpu,
 DWORD SetFilePointer(WinApplication* app, x86::CPU& cpu,
                      HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod)
 {
-    RC_USE(cpu);
+    // Files are below 4 GB: a high part may only extend the sign of the low one, and the new high part is 0.
     win32::File* file = dynamic_cast<win32::File*>(app->getResource(hFile));
-    RC_ASSERT(lpDistanceToMoveHigh == 0);
-    return file ? file->seek(dwMoveMethod, lDistanceToMove) : 0xffffffff;
+    if (!file || dwMoveMethod > 2)
+    {
+        setLastError(app, cpu, file ? error::InvalidParameter : error::InvalidHandle);
+        return 0xffffffff;
+    }
+    if (lpDistanceToMoveHigh)
+    {
+        if (*lpDistanceToMoveHigh != (lDistanceToMove < 0 ? -1 : 0))
+        {
+            setLastError(app, cpu, error::InvalidParameter);
+            return 0xffffffff;
+        }
+        *lpDistanceToMoveHigh = 0;
+    }
+    const x86::reg32 position = file->seek(dwMoveMethod, lDistanceToMove);
+    setLastError(app, cpu, position == 0xffffffff ? error::InvalidParameter : error::Success);
+    return position;
 }
 
 void SetLastError(WinApplication* app, x86::CPU& cpu,
@@ -1324,10 +1369,14 @@ void SetLastError(WinApplication* app, x86::CPU& cpu,
 BOOL SetStdHandle(WinApplication* app, x86::CPU& cpu,
                   DWORD nStdHandle, HANDLE hHandle)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(nStdHandle);
-    RC_USE(hHandle);
+    const x86::reg32 index = x86::reg32(-10) - nStdHandle;
+    if (index >= 3)
+    {
+        setLastError(app, cpu, error::InvalidHandle);
+        return 0;
+    }
+    s_stdHandles[index] = hHandle;
+    s_stdHandleSet[index] = true;
     return 1;
 }
 BOOL SetThreadPriority(WinApplication* app, x86::CPU& cpu,
@@ -1497,15 +1546,18 @@ BOOL VirtualFree(WinApplication* app, x86::CPU& cpu,
     return 1;
 }
 
+// Guest memory is always readable and writable and code is never fetched from it, so a protection change has
+// no effect; the previous protection reads as PAGE_READWRITE. The call fails outside guest memory.
 BOOL VirtualProtect(WinApplication* app, x86::CPU& cpu,
                     Packed<void> lpAddress, SIZE_T dwSize, DWORD flNewProtect, DWORD* lpflOldProtect)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(lpAddress);
-    RC_USE(dwSize);
     RC_USE(flNewProtect);
-    RC_USE(lpflOldProtect);
+    if (!lpflOldProtect || !lpAddress || !MemMap::isGuestRange(lpAddress, dwSize ? dwSize : 1))
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
+    *lpflOldProtect = 0x04;     // PAGE_READWRITE
     return 1;
 }
 
@@ -1617,11 +1669,12 @@ BOOL WriteFile(WinApplication* app, x86::CPU& cpu,
                HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
                LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped)
 {
-    RC_USE(cpu);
-    RC_ASSERT(lpOverlapped == nullptr);
+    if (lpOverlapped)
+        unsupported(app, cpu, "WriteFile", "overlapped write to handle 0x%x", hFile);
     win32::File* f = dynamic_cast<win32::File*>(app->getResource(hFile));
     if (!f)
     {
+        setLastError(app, cpu, error::InvalidHandle);
         return 0;
     }
     else
@@ -1890,12 +1943,26 @@ BOOL HeapFree(WinApplication* app, x86::CPU& cpu,
 x86::reg32 HeapReAlloc(WinApplication* app, x86::CPU& cpu,
                        HANDLE hHeap, DWORD dwFlags, x86::reg32 lpMem, SIZE_T dwBytes)
 {
-    RC_USE(cpu);
     RC_USE(hHeap);
+    static const DWORD HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
     const SIZE_T oldSize = heap::size(lpMem);
     if (oldSize == 0xffffffff)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
         return 0;
+    }
+    // Blocks never grow or shrink where they are; Windows may refuse an in-place request too (_expand then fails).
+    if (dwFlags & HEAP_REALLOC_IN_PLACE_ONLY)
+    {
+        setLastError(app, cpu, 8);  // ERROR_NOT_ENOUGH_MEMORY
+        return 0;
+    }
     const x86::reg32 address = heap::allocate(dwBytes, false);
+    if (!address)
+    {
+        setLastError(app, cpu, 8);  // ERROR_NOT_ENOUGH_MEMORY; the old block stays
+        return 0;
+    }
     memcpy(&app->getMemory<x86::reg8>(address), &app->getMemory<x86::reg8>(lpMem), std::min(oldSize, dwBytes));
     if ((dwFlags & HEAP_ZERO_MEMORY) && dwBytes > oldSize)
         memset(&app->getMemory<x86::reg8>(address + oldSize), 0, dwBytes - oldSize);
@@ -2275,10 +2342,10 @@ BOOL IsBadWritePtr(WinApplication* app, x86::CPU& cpu,
 
 // ---- Environment and locale (the "C" locale with code page 1252) ------------------------------------------------
 
+// No wide block, as on Windows 9x: the CRT then takes the ANSI block (GetEnvironmentStrings).
 x86::reg32 GetEnvironmentStringsW(WinApplication* app, x86::CPU& cpu)
 {
-    RC_USE(app);
-    RC_USE(cpu);
+    setLastError(app, cpu, error::CallNotImplemented);
     return 0;
 }
 
@@ -2533,39 +2600,134 @@ static SYSTEMTIME timeOrNow(const SYSTEMTIME* time)
     return now;
 }
 
+// Expands a date or time picture of the English (United States) locale: d dd ddd dddd, M MM MMM MMMM, y yy yyyy,
+// h hh H HH, m mm, s ss, t tt; text in single quotes is literal ('' is a quote); era (g) is left out.
+static std::string formatPicture(const SYSTEMTIME& t, const char* picture)
+{
+    static const char* const days[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    static const char* const months[12] = { "January", "February", "March", "April", "May", "June", "July",
+                                            "August", "September", "October", "November", "December" };
+    std::string out;
+    char number[16];
+    for (const char* p = picture; *p; )
+    {
+        const char c = *p;
+        if (c == '\'')
+        {
+            ++p;
+            if (*p == '\'')
+            {
+                out += '\'';
+                ++p;
+                continue;
+            }
+            while (*p && *p != '\'')
+                out += *p++;
+            if (*p)
+                ++p;
+            continue;
+        }
+        int count = 0;
+        while (p[count] == c)
+            ++count;
+        auto two = [&](unsigned value, bool pad)
+        {
+            snprintf(number, sizeof(number), pad ? "%02u" : "%u", value);
+            out += number;
+        };
+        switch (c)
+        {
+        case 'd':
+            if (count >= 3)
+                out += count == 3 ? std::string(days[t.wDayOfWeek % 7], 3) : days[t.wDayOfWeek % 7];
+            else
+                two(t.wDay, count == 2);
+            break;
+        case 'M':
+            if (count >= 3)
+                out += count == 3 ? std::string(months[(t.wMonth + 11) % 12], 3) : months[(t.wMonth + 11) % 12];
+            else
+                two(t.wMonth, count == 2);
+            break;
+        case 'y':
+            if (count >= 3)
+                two(t.wYear, false);
+            else
+                two(t.wYear % 100, count == 2);
+            break;
+        case 'h':
+            two(t.wHour % 12 ? t.wHour % 12 : 12, count >= 2);
+            break;
+        case 'H':
+            two(t.wHour, count >= 2);
+            break;
+        case 'm':
+            two(t.wMinute, count >= 2);
+            break;
+        case 's':
+            two(t.wSecond, count >= 2);
+            break;
+        case 't':
+            out += count >= 2 ? (t.wHour < 12 ? "AM" : "PM") : (t.wHour < 12 ? "A" : "P");
+            break;
+        case 'g':
+            break;
+        default:
+            out.append(size_t(count), c);
+            break;
+        }
+        p += count;
+    }
+    return out;
+}
+
+// DATE_SHORTDATE (1, "M/d/yyyy") or DATE_LONGDATE (2, "dddd, MMMM dd, yyyy") without a picture.
 int GetDateFormatA(WinApplication* app, x86::CPU& cpu,
                    DWORD Locale, DWORD dwFlags, const SYSTEMTIME* lpDate, LPCSTR lpFormat, LPSTR lpDateStr,
                    int cchDate)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(Locale);
-    RC_USE(dwFlags);
+    if (!IsValidLocale(app, cpu, Locale, 0) || cchDate < 0 || (lpFormat && (dwFlags & 3)))
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
     const SYSTEMTIME t = timeOrNow(lpDate);
-    char text[64];
-    if (lpFormat)
-        snprintf(text, sizeof(text), "%s", lpFormat);
-    else
-        snprintf(text, sizeof(text), "%u/%u/%u", t.wMonth, t.wDay, t.wYear);
-    return formatResult(text, lpDateStr, cchDate);
+    const char* picture = lpFormat ? lpFormat : (dwFlags & 2) ? "dddd, MMMM dd, yyyy" : "M/d/yyyy";
+    const int result = formatResult(formatPicture(t, picture), lpDateStr, cchDate);
+    if (!result)
+        setLastError(app, cpu, error::InsufficientBuffer);
+    return result;
 }
 
+// Without a picture: "h:mm:ss tt", less TIME_NOMINUTESORSECONDS (1), TIME_NOSECONDS (2), TIME_NOTIMEMARKER (4),
+// and with H for TIME_FORCE24HOURFORMAT (8).
 int GetTimeFormatA(WinApplication* app, x86::CPU& cpu,
                    DWORD Locale, DWORD dwFlags, const SYSTEMTIME* lpTime, LPCSTR lpFormat, LPSTR lpTimeStr,
                    int cchTime)
 {
-    RC_USE(app);
-    RC_USE(cpu);
-    RC_USE(Locale);
-    RC_USE(dwFlags);
+    if (!IsValidLocale(app, cpu, Locale, 0) || cchTime < 0)
+    {
+        setLastError(app, cpu, error::InvalidParameter);
+        return 0;
+    }
     const SYSTEMTIME t = timeOrNow(lpTime);
-    char text[64];
+    std::string picture;
     if (lpFormat)
-        snprintf(text, sizeof(text), "%s", lpFormat);
+    {
+        picture = lpFormat;
+    }
     else
-        snprintf(text, sizeof(text), "%u:%02u:%02u %s", t.wHour % 12 ? t.wHour % 12 : 12, t.wMinute, t.wSecond,
-                 t.wHour < 12 ? "AM" : "PM");
-    return formatResult(text, lpTimeStr, cchTime);
+    {
+        picture = (dwFlags & 8) ? "H" : "h";
+        if (!(dwFlags & 1))
+            picture += (dwFlags & 2) ? ":mm" : ":mm:ss";
+        if (!(dwFlags & 4) && !(dwFlags & 8))
+            picture += " tt";
+    }
+    const int result = formatResult(formatPicture(t, picture.c_str()), lpTimeStr, cchTime);
+    if (!result)
+        setLastError(app, cpu, error::InsufficientBuffer);
+    return result;
 }
 
 // ---- Imports of Speed.exe added for this game ------------------------------------------------------------------

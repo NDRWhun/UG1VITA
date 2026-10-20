@@ -2,6 +2,11 @@
 #include <platform/log.h>
 #include <platform/sync.h>
 #include <map>
+#ifdef NFSU_HOST
+#include <sys/statvfs.h>
+#else
+#include <psp2/io/devctl.h>
+#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -464,6 +469,28 @@ void File::setCdDirectory(const char* path)
     s_cdDirectory = path;
     if (s_cdDirectory.empty() || s_cdDirectory.back() != '/')
         s_cdDirectory.append("/");
+}
+
+bool File::diskSpace(x86::reg64* total, x86::reg64* free)
+{
+#ifdef NFSU_HOST
+    struct statvfs volume;
+    if (statvfs(s_dataDirectory.c_str(), &volume) != 0)
+        return false;
+    *total = x86::reg64(volume.f_blocks) * volume.f_frsize;
+    *free = x86::reg64(volume.f_bavail) * volume.f_frsize;
+    return true;
+#else
+    // The device of the data folder ("ux0:"), queried with devctl 0x3001.
+    SceIoDevInfo info;
+    memset(&info, 0, sizeof(info));
+    const std::string device = s_dataDirectory.substr(0, s_dataDirectory.find(':') + 1);
+    if (sceIoDevctl(device.c_str(), 0x3001, nullptr, 0, &info, sizeof(info)) < 0)
+        return false;
+    *total = x86::reg64(info.max_size);
+    *free = x86::reg64(info.free_size);
+    return true;
+#endif
 }
 
 std::string File::hostPath(const char* path)
