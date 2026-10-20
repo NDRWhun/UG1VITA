@@ -91,7 +91,8 @@ add_executable(NFSUG1VITA.elf src/nfsu/main.cpp $<TARGET_OBJECTS:nfsu_game> $<TA
 target_compile_options(NFSUG1VITA.elf PRIVATE ${NFSU_COMMON_FLAGS} -O2)
 target_compile_definitions(NFSUG1VITA.elf PRIVATE ${NFSU_RUNTIME_DEFINES})
 target_include_directories(NFSUG1VITA.elf PRIVATE ${NFSU_INCLUDES})
-target_link_options(NFSUG1VITA.elf PRIVATE -Wl,--gc-sections)
+# Nothing references the main thread's stack size; keep it from being collected so the loader sees it.
+target_link_options(NFSUG1VITA.elf PRIVATE -Wl,--gc-sections -Wl,--undefined=sceUserMainThreadStackSize)
 target_link_libraries(NFSUG1VITA.elf
   stdc++
   SceGxm_stub
