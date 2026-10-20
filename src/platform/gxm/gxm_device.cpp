@@ -726,12 +726,15 @@ void Device::Impl::blitPrograms()
     sceGxmSetUniformDataF(uniforms, blitGammaParam, 0, 1, &invGamma);
 }
 
-// A Direct3D frame: its scenes, then (for another back buffer size, or when nothing drew the back buffer) a scene
+// A Direct3D frame: its scenes, then (for a back buffer drawn offscreen, or when nothing drew the back buffer) a scene
 // that shows the offscreen back buffer in its window rectangle or black.
 void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
 {
     frameShown = true;
-    frames.drawFrame(frame, &displaySurface[backBuffer], displaySync[backBuffer]);
+    // A stretched back buffer without gamma can be drawn to the display directly.
+    const Rect box = Device::windowRect(frame.width, frame.height);
+    const bool stretched = box.x0 == 0 && box.y0 == 0 && box.x1 == DisplayWidth && box.y1 == DisplayHeight;
+    frames.drawFrame(frame, &displaySurface[backBuffer], displaySync[backBuffer], stretched && gammaBits.load() == 0x3f800000);
     if (frames.presentScene(frame))
     {
         const SceGxmTexture* offscreen = frames.offscreen(frame);

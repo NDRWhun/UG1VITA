@@ -649,8 +649,8 @@ SceGxmNotification* FrameRenderer::doneNotification(const render::Frame& frame)
 
 const SceGxmTexture* FrameRenderer::offscreen(const render::Frame& frame) const
 {
-    const Texture* t = m_slots[frame.index % Slots].offscreen;
-    return (frame.width == 960 && frame.height == 544) || !t ? nullptr : &t->texture;
+    const Slot& s = m_slots[frame.index % Slots];
+    return s.direct || !s.offscreen ? nullptr : &s.offscreen->texture;
 }
 
 bool FrameRenderer::presentScene(const render::Frame& frame) const
@@ -856,9 +856,11 @@ void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
     if (first || d.viewport != m_lastViewport)
     {
         // Direct3D window coordinates have pixel centres at integers: half a pixel to GXM's.
+        // A back buffer drawn to the display directly: its pixels scaled to the display's.
         const render::Viewport& v = frame.viewports[d.viewport];
-        sceGxmSetViewport(m_context, v.x + 0.5f * v.width + 0.5f, 0.5f * v.width, v.y + 0.5f * v.height + 0.5f,
-                          -0.5f * v.height, v.minZ, v.maxZ - v.minZ);
+        const float sx = m_viewScaleX, sy = m_viewScaleY;
+        sceGxmSetViewport(m_context, sx * (v.x + 0.5f * v.width + 0.5f), sx * 0.5f * v.width,
+                          sy * (v.y + 0.5f * v.height + 0.5f), sy * -0.5f * v.height, v.minZ, v.maxZ - v.minZ);
         m_lastViewport = d.viewport;
     }
     if (first || s.depthEnable != m_last.depthEnable || s.depthWrite != m_last.depthWrite || s.depthFunc != m_last.depthFunc)
@@ -884,7 +886,7 @@ void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
     sceGxmDraw(m_context, primitiveType(s.primitive), SCE_GXM_INDEX_FORMAT_U16, d.indices ? d.indices : m_sequence, count);
 }
 
-void FrameRenderer::planFrame(const render::Frame& frame)
+void FrameRenderer::planFrame(const render::Frame& frame, bool stretchDirect)
 {
     m_plan.resize(frame.sceneCount);
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
@@ -951,12 +953,30 @@ void FrameRenderer::planFrame(const render::Frame& frame)
         if (m_plan[i].skipped && m_plan[m_plan[i].carriedTo].skipped)
             m_plan[i].carriedTo = m_plan[m_plan[i].carriedTo].carriedTo;
     }
+
+    // A stretched back buffer whose scenes need no depth is drawn to the display at its resolution: no offscreen
+    // store and no scaling pass.
+    Slot& slot = m_slots[frame.index % Slots];
+    slot.direct = frame.width == 960 && frame.height == 544;
+    if (!slot.direct && stretchDirect)
+    {
+        bool any = false, depth = false;
+        for (uint32_t i = 0; i < frame.sceneCount; ++i)
+        {
+            if (frame.scenes[i].target.color || m_plan[i].skipped)
+                continue;
+            any = true;
+            depth = depth || m_plan[i].depthUsed;
+        }
+        slot.direct = any && !depth;
+    }
 }
 
-void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync)
+void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync,
+                              bool stretchDirect)
 {
     Slot& slot = m_slots[frame.index % Slots];
-    planFrame(frame);
+    planFrame(frame, stretchDirect);
     const bool lastWritesDone = !presentScene(frame);
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
@@ -966,12 +986,21 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         const SceGxmColorSurface* color = display;
         SceGxmSyncObject* sync = nullptr;
         uint32_t width = scene.width, height = scene.height;
+        m_viewScaleX = m_viewScaleY = 1.0f;
         if (scene.target.color)
         {
             const Texture* t = static_cast<const Texture*>(scene.target.color);
             color = &t->surfaces[scene.target.face < 6 ? scene.target.face : 0];
         }
-        else if (slot.offscreen && !(frame.width == 960 && frame.height == 544))
+        else if (slot.direct)
+        {
+            sync = displaySync;
+            width = 960;
+            height = 544;
+            m_viewScaleX = 960.0f / float(scene.width);
+            m_viewScaleY = 544.0f / float(scene.height);
+        }
+        else if (slot.offscreen)
         {
             color = &slot.offscreen->surfaces[0];
         }
