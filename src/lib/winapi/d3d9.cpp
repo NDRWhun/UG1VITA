@@ -2,6 +2,7 @@
 
 #include <winapi/d3d9.h>
 #include <winapi/d3d9_internal.h>
+#include <lib/fpucontrol.h>
 #include <platform/gxm.h>
 #include <platform/log.h>
 #include <cstdio>
@@ -633,9 +634,10 @@ HANDLE Direct3D::GetAdapterMonitor(WinApplication* app, x86::CPU& cpu, UINT adap
 HRESULT Direct3D::CreateDevice(WinApplication* app, x86::CPU& cpu, UINT adapter, DWORD type, HWND window,
                                DWORD flags, D3DPRESENT_PARAMETERS* params, x86::reg32* device)
 {
-    RC_USE(cpu);
     if (adapter != 0 || !params || !device)
         return D3DERR_INVALIDCALL;
+    // Without D3DCREATE_FPU_PRESERVE the x87 control word becomes 0x007F, as on Windows.
+    fpucontrol::deviceCreated(cpu, flags);
     pf::logInfo("d3d9: CreateDevice type %u flags 0x%x, back buffer %ux%u format %u, depth %u (%u), windowed %u",
                 type, flags, params->BackBufferWidth, params->BackBufferHeight, params->BackBufferFormat,
                 params->EnableAutoDepthStencil, params->AutoDepthStencilFormat, params->Windowed);
