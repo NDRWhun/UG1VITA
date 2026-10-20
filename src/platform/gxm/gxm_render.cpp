@@ -609,17 +609,16 @@ render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height
     Depth* d = new Depth();
     d->width = uint16_t(width);
     d->height = uint16_t(height);
+    // No stencil plane: the layer never enables the stencil test, so it would only be loaded and stored.
     d->data = m_textureHeap->allocate(w * h * 4, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
-    d->stencil = m_textureHeap->allocate(w * h, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
-    if (!d->data || !d->stencil)
+    d->stencil = nullptr;
+    if (!d->data)
     {
-        m_textureHeap->free(d->data);
-        m_textureHeap->free(d->stencil);
         delete d;
         return nullptr;
     }
-    sceGxmDepthStencilSurfaceInit(&d->surface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M_S8, SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,
-                                  w, d->data, d->stencil);
+    sceGxmDepthStencilSurfaceInit(&d->surface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M, SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,
+                                  w, d->data, nullptr);
     return d;
 }
 
