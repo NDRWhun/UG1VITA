@@ -1,4 +1,5 @@
-// filter effect: weighted sum of TAPS (1..4) texture samples.
+// filter effect: weighted sum of TAPS (1..4) texture samples. FACTOR 1..3: the blend factor outputs
+// (render::FactorOutput): uBlendFactor, alpha = uBlendFactor.a, saturated colour * uBlendFactor.
 
 float4 main(
     float2 vTex0 : TEXCOORD0,
@@ -10,8 +11,12 @@ float4 main(
     uniform sampler2D uTex2,
     uniform sampler2D uTex3,
     uniform float4 uWeights[4],
-    uniform float4 uAlphaTest) : COLOR
+    uniform float4 uAlphaTest,
+    uniform float4 uBlendFactor) : COLOR
 {
+#if FACTOR == 1
+    return uBlendFactor;
+#else
     float4 c = tex2D(uTex0, vTex0) * uWeights[0];
 #if TAPS > 1
     c += tex2D(uTex1, vTex1) * uWeights[1];
@@ -26,5 +31,12 @@ float4 main(
     if (uAlphaTest.x * saturate(c.a) < uAlphaTest.y)
         discard;
 #endif
+#if FACTOR == 2
+    return float4(c.rgb, uBlendFactor.a);
+#elif FACTOR == 3
+    return saturate(c) * uBlendFactor;
+#else
     return c;
+#endif
+#endif
 }

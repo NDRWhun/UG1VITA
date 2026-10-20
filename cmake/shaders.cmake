@@ -66,7 +66,8 @@ function(nfsu_add_shader out_var name profile)
 endfunction()
 
 # Every program of the port: the present and clear programs, the Direct3D effect and fixed-function programs
-# (include/platform/render.h); fragment programs also with -DATEST (alpha test, suffix _atest).
+# (include/platform/render.h); fragment programs also with -DATEST (alpha test, suffix _atest), filter programs also
+# with -DFACTOR (blend factor outputs, suffixes _bfcolor, _bfalpha, _bfscale).
 function(nfsu_add_shaders out_var)
   set(list "")
   nfsu_add_shader(list blit_v  sce_vp_psp2)
@@ -85,6 +86,12 @@ function(nfsu_add_shaders out_var)
   foreach(taps 1 2 3 4)
     nfsu_add_shader(list filter${taps}_f sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps})
     nfsu_add_shader(list filter${taps}_f_atest sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps} ATEST=1)
+    # Blend factor variants (render::FactorOutput 1..3).
+    set(factor 1)
+    foreach(suffix bfcolor bfalpha bfscale)
+      nfsu_add_shader(list filter${taps}_f_${suffix} sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps} FACTOR=${factor})
+      math(EXPR factor "${factor} + 1")
+    endforeach()
   endforeach()
   foreach(variant color tex proj)
     string(TOUPPER ${variant} define)

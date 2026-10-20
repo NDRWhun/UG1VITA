@@ -172,6 +172,63 @@ bool alphaTest(DWORD func, DWORD ref, float out[2])
     }
 }
 
+BlendFactorDraw resolveBlendFactor(DWORD src, DWORD dst, DWORD op, DWORD factor, bool variants, bool alphaWrite)
+{
+    BlendFactorDraw r = { src, dst, render::FactorNone, { 0.0f, 0.0f, 0.0f, 0.0f } };
+    const bool srcFactor = src == 14 || src == 15, dstFactor = dst == 14 || dst == 15;
+    if (!srcFactor && !dstFactor)
+        return r;
+    const float f[4] = { float((factor >> 16) & 0xff) / 255.0f, float((factor >> 8) & 0xff) / 255.0f,
+                         float(factor & 0xff) / 255.0f, float(factor >> 24) / 255.0f };
+    // BLENDFACTOR: the factor; INVBLENDFACTOR: 1 - factor.
+    auto term = [&f](DWORD blend, float* out) {
+        for (int i = 0; i < 4; ++i)
+            out[i] = blend == 14 ? f[i] : 1.0f - f[i];
+    };
+    // ZERO, ONE and the destination factors: they do not read the source.
+    const bool dstSourceFree = dst == 1 || dst == 2 || (dst >= 7 && dst <= 10);
+    const bool grey = ((factor >> 16) & 0xff) == ((factor >> 8) & 0xff) && ((factor >> 8) & 0xff) == (factor & 0xff);
+    if (variants)
+    {
+        if (dstFactor && src == 1)
+        {
+            // dest * k: the program outputs k, destination factor SRCCOLOR.
+            term(dst, r.factor);
+            r.src = 1;
+            r.dst = 3;
+            r.output = render::FactorColor;
+            return r;
+        }
+        if (srcFactor && dstSourceFree)
+        {
+            // source * k + dest * x: the program outputs source * k, source factor ONE.
+            term(src, r.factor);
+            r.src = 2;
+            r.output = render::FactorScale;
+            return r;
+        }
+        if (srcFactor && dstFactor && src != dst && grey)
+        {
+            // source * k + dest * (1 - k), k grey: the program outputs k as alpha.
+            float k[4];
+            term(src, k);
+            r.factor[3] = k[0];
+            r.src = 5;
+            r.dst = 6;
+            r.output = render::FactorAlpha;
+            if (alphaWrite)
+                D3D_LOG_ONCE("d3d9: blend %u/%u factor 0x%08x: alpha written as k * k + dest * (1 - k), not source * k",
+                             src, dst, factor);
+            return r;
+        }
+    }
+    D3D_LOG_ONCE("d3d9: blend %u/%u op %u factor 0x%08x%s approximated (BLENDFACTOR as ONE, INVBLENDFACTOR as ZERO)",
+                 src, dst, op, factor, variants ? "" : " (program without factor variants or alpha tested)");
+    r.src = src == 14 ? 2 : src == 15 ? 1 : src;
+    r.dst = dst == 14 ? 2 : dst == 15 ? 1 : dst;
+    return r;
+}
+
 void multiply(const float* a, const float* b, float* out)
 {
     float r[16];

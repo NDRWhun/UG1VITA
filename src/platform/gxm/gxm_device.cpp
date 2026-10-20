@@ -556,6 +556,17 @@ void Device::Impl::run()
 
         const bool timed = perf::enabled() && queued;
         const uint32_t start = timed ? perf::now() : 0;
+        uint32_t calls = 0, triangles = 0;
+        if (frame && timed)
+        {
+            // Counted before the frame is drawn: its slot may be reused once the GPU is done.
+            calls = frame->drawCount;
+            for (uint32_t i = 0; i < frame->drawCount; ++i)
+            {
+                const render::DrawCall& d = frame->draws[i];
+                triangles += d.state.primitive == render::PrimitiveTriangles ? d.count / 3 : d.count > 2 ? d.count - 2 : 0;
+            }
+        }
         if (frame)
             presentFrame(*frame, ++presentIndex);
         else
@@ -563,7 +574,7 @@ void Device::Impl::run()
         if (timed)
         {
             perf::add(perf::Render, perf::now() - start);
-            perf::framePresented(0, 0);
+            perf::framePresented(calls, triangles);
         }
     }
 }

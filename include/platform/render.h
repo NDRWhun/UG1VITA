@@ -182,6 +182,7 @@ struct FilterFragmentConstants
 {
     float alphaTest[4];
     float weights[16];
+    float blendFactor[4];       // factor variants: what the program outputs or multiplies by (FactorOutput)
 };
 
 struct ClearFragmentConstants
@@ -227,7 +228,21 @@ struct FragmentProgramInfo
     uint8_t             fieldCount;
     const UniformField* fields;
     uint8_t             samplers;       // uTex0..uTex<n-1>
+    uint16_t            blendFactor;    // float offset of uBlendFactor; 0: no factor variants
 };
+
+// Blend factor variants of a program (shader_<name>_bfcolor, _bfalpha, _bfscale; no alpha test). Direct3D's
+// constant blend colour has no GXM factor: the layer turns BLENDFACTOR and INVBLENDFACTOR terms into fixed factors
+// and one of these outputs, with uBlendFactor holding the factor (or 1 - factor).
+enum FactorOutput : uint8_t
+{
+    FactorNone,
+    FactorColor,                // output = uBlendFactor (source factor ZERO, destination SRCCOLOR)
+    FactorAlpha,                // alpha = uBlendFactor.a (SRCALPHA, INVSRCALPHA)
+    FactorScale,                // output = saturate(colour) * uBlendFactor (source factor ONE)
+    FactorCount
+};
+const char* factorSuffix(FactorOutput output);
 
 const VertexProgramInfo& vertexProgram(VertexProgram program);
 const FragmentProgramInfo& fragmentProgram(FragmentProgram program);
@@ -310,8 +325,8 @@ enum Primitive : uint8_t
     PrimitiveFan
 };
 
-// Direct3D values: blend factors D3DBLEND (1..15), compare D3DCMP (1..8), cull D3DCULL (1 none, 2 cw, 3 ccw),
-// colour mask D3DCOLORWRITEENABLE bits (1 r, 2 g, 4 b, 8 a).
+// Direct3D values: blend factors D3DBLEND (1..13; the layer resolves 14 and 15), compare D3DCMP (1..8), cull
+// D3DCULL (1 none, 2 cw, 3 ccw), colour mask D3DCOLORWRITEENABLE bits (1 r, 2 g, 4 b, 8 a).
 struct DrawState
 {
     const TextureStorage*   textures[MaxSamplers];
@@ -329,7 +344,8 @@ struct DrawState
     uint8_t                 depthWrite;
     uint8_t                 depthFunc;
     uint8_t                 cullMode;
-    uint8_t                 pad[3];
+    uint8_t                 factorOutput;   // FactorOutput; FactorNone with the alpha test
+    uint8_t                 pad[2];
 };
 
 struct Viewport

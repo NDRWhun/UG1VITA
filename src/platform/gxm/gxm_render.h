@@ -130,6 +130,11 @@ private:
         const SceGxmProgram*            program = nullptr;
         std::vector<const SceGxmProgramParameter*> fields;
         unsigned int                    units[render::MaxSamplers] = {};
+        bool                            owned = false;      // registered here (not a copy of another entry)
+    };
+    enum
+    {
+        Variants = 1 + render::FactorCount      // plain, alpha test, the blend factor outputs
     };
 
     void freePending();
@@ -155,7 +160,7 @@ private:
     Texture*                m_black = nullptr;          // read by samplers without a texture
 
     VertexProgram           m_vertexPrograms[render::VpCount];
-    FragmentProgram         m_fragmentPrograms[render::FpCount][2];
+    FragmentProgram         m_fragmentPrograms[render::FpCount][Variants];
     std::unordered_map<uint32_t, SceGxmVertexProgram*>     m_vertexCache;
     std::unordered_map<uint64_t, SceGxmFragmentProgram*>   m_fragmentCache;
     std::map<uint32_t, SceGxmRenderTarget*>                 m_targets;

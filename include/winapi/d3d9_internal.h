@@ -522,6 +522,17 @@ FixedResult resolveFixed(const FixedStage& stage);
 void texturePad(uint32_t components, float pad[4]);
 // Alpha test constants (sign, threshold) for D3DCMP func and ALPHAREF; false: the test always passes.
 bool alphaTest(DWORD func, DWORD ref, float out[2]);
+
+struct BlendFactorDraw
+{
+    DWORD   src, dst;           // D3DBLEND; BLENDFACTOR / INVBLENDFACTOR replaced
+    uint8_t output;             // render::FactorOutput
+    float   factor[4];          // uBlendFactor (rgba)
+};
+// BLENDFACTOR (14) and INVBLENDFACTOR (15) blends as fixed factors and a program factor output. variants: the
+// program has factor variants and no alpha test; alphaWrite: the colour mask writes alpha. What is not exact is
+// logged and approximated (14 as ONE, 15 as ZERO).
+BlendFactorDraw resolveBlendFactor(DWORD src, DWORD dst, DWORD op, DWORD factor, bool variants, bool alphaWrite);
 // Row-vector product out = a * b.
 void multiply(const float* a, const float* b, float* out);
 

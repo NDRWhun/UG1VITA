@@ -14,7 +14,10 @@
     X(world_f) X(world_f_atest) X(worldheadlight_f) X(worldheadlight_f_atest) X(worldreflect_f) \
     X(worldreflect_f_atest) X(worldheadlightreflect_f) X(worldheadlightreflect_f_atest) X(car_f) X(car_f_atest) \
     X(filter1_f) X(filter1_f_atest) X(filter2_f) X(filter2_f_atest) X(filter3_f) X(filter3_f_atest) \
-    X(filter4_f) X(filter4_f_atest) X(clear_f)
+    X(filter4_f) X(filter4_f_atest) X(clear_f) \
+    X(filter1_f_bfcolor) X(filter1_f_bfalpha) X(filter1_f_bfscale) X(filter2_f_bfcolor) X(filter2_f_bfalpha) \
+    X(filter2_f_bfscale) X(filter3_f_bfcolor) X(filter3_f_bfalpha) X(filter3_f_bfscale) X(filter4_f_bfcolor) \
+    X(filter4_f_bfalpha) X(filter4_f_bfscale)
 
 extern "C" {
 #define NFSU_DECLARE_SHADER(name) extern const unsigned char shader_##name[];
@@ -81,9 +84,28 @@ SceGxmBlendFactor blendFactor(uint8_t factor)
     case 9:  return SCE_GXM_BLEND_FACTOR_DST_COLOR;
     case 10: return SCE_GXM_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
     case 11: return SCE_GXM_BLEND_FACTOR_SRC_ALPHA_SATURATE;
-    case 15: return SCE_GXM_BLEND_FACTOR_ZERO;      // INVBLENDFACTOR: no constant colour
-    default: return SCE_GXM_BLEND_FACTOR_ONE;       // ONE, BLENDFACTOR
+    default: return SCE_GXM_BLEND_FACTOR_ONE;       // ONE (the layer resolves BLENDFACTOR, INVBLENDFACTOR)
     }
+}
+
+// The alpha channel reads the alpha of a colour factor, as in Direct3D.
+SceGxmBlendFactor alphaFactor(SceGxmBlendFactor factor)
+{
+    switch (factor)
+    {
+    case SCE_GXM_BLEND_FACTOR_SRC_COLOR:           return SCE_GXM_BLEND_FACTOR_SRC_ALPHA;
+    case SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case SCE_GXM_BLEND_FACTOR_DST_COLOR:           return SCE_GXM_BLEND_FACTOR_DST_ALPHA;
+    case SCE_GXM_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return SCE_GXM_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case SCE_GXM_BLEND_FACTOR_SRC_ALPHA_SATURATE:  return SCE_GXM_BLEND_FACTOR_ONE;
+    default:                                       return factor;
+    }
+}
+
+// Program variant: 0 plain, 1 alpha test, 2.. blend factor outputs (FrameRenderer::Variants).
+uint32_t variant(const render::DrawState& state)
+{
+    return state.factorOutput ? 1u + state.factorOutput : state.alphaTest ? 1u : 0u;
 }
 
 SceGxmAttributeFormat attributeFormat(uint8_t type, uint8_t* components)
@@ -243,22 +265,27 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     for (int f = 0; f < render::FpCount; ++f)
     {
         const render::FragmentProgramInfo& info = render::fragmentProgram(render::FragmentProgram(f));
-        for (int atest = 0; atest < 2; ++atest)
+        for (int v = 0; v < Variants; ++v)
         {
-            if (atest && f == render::FpClear)
+            // Without the variant: the plain program (the layer never selects it).
+            if ((v == 1 && f == render::FpClear) || (v >= 2 && !info.blendFactor))
             {
-                m_fragmentPrograms[f][1] = m_fragmentPrograms[f][0];
+                m_fragmentPrograms[f][v] = m_fragmentPrograms[f][0];
+                m_fragmentPrograms[f][v].owned = false;
                 continue;
             }
             // world_f serves world and worldbone: register it once.
             if (f == render::FpWorldBone)
             {
-                m_fragmentPrograms[f][atest] = m_fragmentPrograms[render::FpWorld][atest];
+                m_fragmentPrograms[f][v] = m_fragmentPrograms[render::FpWorld][v];
+                m_fragmentPrograms[f][v].owned = false;
                 continue;
             }
             char name[64];
-            snprintf(name, sizeof(name), atest ? "%s_atest" : "%s", info.name);
-            FragmentProgram& p = m_fragmentPrograms[f][atest];
+            snprintf(name, sizeof(name), "%s%s", info.name,
+                     v == 1 ? "_atest" : render::factorSuffix(render::FactorOutput(v >= 2 ? v - 1 : 0)));
+            FragmentProgram& p = m_fragmentPrograms[f][v];
+            p.owned = true;
             p.program = registerProgram(name, &p.id);
             for (uint8_t i = 0; i < info.fieldCount; ++i)
                 p.fields.push_back(sceGxmProgramFindParameterByName(p.program, info.fields[i].name));
@@ -326,13 +353,9 @@ void FrameRenderer::shutdown()
         if (p.id)
             sceGxmShaderPatcherUnregisterProgram(m_patcher, p.id);
     for (int f = 0; f < render::FpCount; ++f)
-    {
-        if (f == render::FpWorldBone)
-            continue;
-        for (int atest = 0; atest < (f == render::FpClear ? 1 : 2); ++atest)
-            if (m_fragmentPrograms[f][atest].id)
-                sceGxmShaderPatcherUnregisterProgram(m_patcher, m_fragmentPrograms[f][atest].id);
-    }
+        for (int v = 0; v < Variants; ++v)
+            if (m_fragmentPrograms[f][v].owned && m_fragmentPrograms[f][v].id)
+                sceGxmShaderPatcherUnregisterProgram(m_patcher, m_fragmentPrograms[f][v].id);
     delete m_textureHeap;
     delete m_bufferHeap;
     if (m_arenaUid >= 0)
@@ -718,14 +741,14 @@ SceGxmFragmentProgram* FrameRenderer::fragmentProgram(const render::DrawState& s
 {
     const bool blend = state.blendEnable != 0;
     const uint8_t mask = state.colorMask;
+    const uint32_t v = variant(state);
     const uint64_t key = uint64_t(state.vertexProgram) | uint64_t(state.fragmentProgram) << 8
-                       | uint64_t(state.alphaTest) << 16 | uint64_t(blend) << 17 | uint64_t(mask) << 18
+                       | uint64_t(v) << 16 | uint64_t(blend) << 19 | uint64_t(mask) << 20
                        | (blend ? uint64_t(state.srcBlend) << 24 | uint64_t(state.dstBlend) << 32 : 0);
     auto it = m_fragmentCache.find(key);
     if (it != m_fragmentCache.end())
         return it->second;
-    const FragmentProgram& p = m_fragmentPrograms[state.fragmentProgram < render::FpCount ? state.fragmentProgram : 0]
-                                                 [state.alphaTest ? 1 : 0];
+    const FragmentProgram& p = m_fragmentPrograms[state.fragmentProgram < render::FpCount ? state.fragmentProgram : 0][v];
     SceGxmBlendInfo info;
     memset(&info, 0, sizeof(info));
     info.colorMask = uint8_t(((mask & 1) ? SCE_GXM_COLOR_MASK_R : 0) | ((mask & 2) ? SCE_GXM_COLOR_MASK_G : 0)
@@ -739,12 +762,11 @@ SceGxmFragmentProgram* FrameRenderer::fragmentProgram(const render::DrawState& s
         dst = src == 12 ? 6 : 5;
         src = src == 12 ? 5 : 6;
     }
-    if (blend && (src == 14 || src == 15 || dst == 14 || dst == 15))
-        logError("gxm: BLENDFACTOR blending approximated");
-    info.colorSrc = blendFactor(src);
-    info.colorDst = blendFactor(dst);
-    info.alphaSrc = blendFactor(src);
-    info.alphaDst = blendFactor(dst);
+    const SceGxmBlendFactor colorSrc = blendFactor(src), colorDst = blendFactor(dst);
+    info.colorSrc = colorSrc;
+    info.colorDst = colorDst;
+    info.alphaSrc = alphaFactor(colorSrc);
+    info.alphaDst = alphaFactor(colorDst);
     const bool plain = !blend && mask == 0xf;
     const SceGxmProgram* vertex = m_vertexPrograms[state.vertexProgram < render::VpCount ? state.vertexProgram : 0].program;
     SceGxmFragmentProgram* result = nullptr;
@@ -774,7 +796,8 @@ void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
     const bool programs = first || s.vertexProgram != m_last.vertexProgram || s.fragmentProgram != m_last.fragmentProgram
                         || s.layout != m_last.layout || s.alphaTest != m_last.alphaTest
                         || s.blendEnable != m_last.blendEnable || s.srcBlend != m_last.srcBlend
-                        || s.dstBlend != m_last.dstBlend || s.colorMask != m_last.colorMask;
+                        || s.dstBlend != m_last.dstBlend || s.colorMask != m_last.colorMask
+                        || s.factorOutput != m_last.factorOutput;
     if (programs)
     {
         sceGxmSetVertexProgram(m_context, vertexProgram(s.vertexProgram, s.layout));
@@ -794,13 +817,13 @@ void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
     {
         void* buffer = nullptr;
         sceGxmReserveFragmentDefaultUniformBuffer(m_context, &buffer);
-        upload(buffer, finfo.fields, finfo.fieldCount, m_fragmentPrograms[s.fragmentProgram][s.alphaTest ? 1 : 0].fields,
+        upload(buffer, finfo.fields, finfo.fieldCount, m_fragmentPrograms[s.fragmentProgram][variant(s)].fields,
                frame.constants + d.fragmentConstants);
     }
     m_lastVertexConstants = d.vertexConstants;
     m_lastFragmentConstants = d.fragmentConstants;
 
-    const FragmentProgram& fp = m_fragmentPrograms[s.fragmentProgram][s.alphaTest ? 1 : 0];
+    const FragmentProgram& fp = m_fragmentPrograms[s.fragmentProgram][variant(s)];
     for (uint8_t i = 0; i < finfo.samplers; ++i)
     {
         if (!first && !programs && s.textures[i] == m_last.textures[i]
