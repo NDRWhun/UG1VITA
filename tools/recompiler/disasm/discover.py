@@ -437,7 +437,8 @@ class Discovery:
             return 'overlaps'
         for a, ins in function.items():
             m = mnemonic_of(ins)
-            if m in IMPLAUSIBLE or (m == 'int3' and a == entry):
+            # A function never starts in int3/nop padding (text like "ESE\0" = 0x00455345 points there).
+            if m in IMPLAUSIBLE or (m in ('int3', 'nop') and a == entry):
                 return 'implausible'
             if ins.operands and ins.operands[0].type == X.X86_OP_REG and ins.reg_name(ins.operands[0].reg) == 'esp' \
                     and m not in ESP_WRITERS:
