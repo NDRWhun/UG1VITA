@@ -14,6 +14,28 @@ void assertFail(const char* expression, const char* file, int line)
 #endif
 }
 
+void fpuCallMismatch(CPU& cpu, reg32 expected, uint32_t site)
+{
+    // Guest code runs under the execution lock: no other thread is here.
+    static uint32_t logged[64];
+    static uint32_t loggedCount = 0;
+    bool known = false;
+    for (uint32_t i = 0; i < loggedCount && !known; ++i)
+        known = logged[i] == site;
+    if (!known && loggedCount < 64)
+    {
+        logged[loggedCount++] = site;
+        pf::logError("x87 depth %u after the indirect call at 0x%08x, expected %d: corrected", cpu.fpu.count, site,
+                     int(expected));
+    }
+    if (expected > 8)
+        return;
+    // A surplus is a float result nobody reads; a missing result reads as zero.
+    while (cpu.fpu.count < expected)
+        cpu.fpu.push(Float(0.0));
+    cpu.fpu.count = expected;
+}
+
 void guestTrap(uint32_t address, const char* reason)
 {
     pf::logError("guest trap at 0x%08x: %s", address, reason);
