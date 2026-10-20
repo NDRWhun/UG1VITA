@@ -189,8 +189,10 @@ public:
     inline void dynamic_call(uint32_t address, x86::CPU& cpu)
     {
         allowPreemption(cpu);
-        const MethodSlot& slot = m_methodSlots[methodSlot(address)];
-        const MethodPtr method = slot.address == address ? slot.method : findMethod(address);
+        // Linear probing leaves most displaced methods in the next slot; the table ends with an empty one.
+        const MethodSlot* slot = &m_methodSlots[methodSlot(address)];
+        const MethodPtr method = slot[0].address == address ? slot[0].method
+                               : slot[1].address == address ? slot[1].method : findMethod(address);
         method(this, cpu);
     }
 
@@ -209,6 +211,7 @@ private:
     MethodPtr findMethod(x86::reg32 address) const __attribute__((cold));
     void insertMethod(x86::reg32 address, MethodPtr method);
     void growMethodTable();
+    x86::reg32 methodSlotCount() const { return x86::reg32(m_methodSlots.size()) - 1; }
     void yieldContext(const x86::CPU& cpu) __attribute__((cold));
 
 private:
@@ -220,9 +223,9 @@ private:
     std::atomic<int>                        m_preemptWaiters;   // preempting threads waiting for the lock
     int                                     m_contextDepth;     // lock count of the execution context owner
     Mutex*                                  m_resourceContext;
-    // Open addressing with linear probing; power-of-two size, at most half full.
+    // Open addressing with linear probing; power-of-two size, at most half full, and one more empty slot.
     std::vector<MethodSlot>                 m_methodSlots;
-    x86::reg32                              m_methodShift;  // 32 - log2(m_methodSlots.size())
+    x86::reg32                              m_methodShift;  // 32 - log2(methodSlotCount())
     std::unordered_map<x86::reg32, std::string> m_methodNames;
 
 protected:

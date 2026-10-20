@@ -148,7 +148,7 @@ WinApplication::WinApplication(const char* appName, x86::reg32 baseAddress, cons
     ,   m_preemptWaiters(0)
     ,   m_contextDepth(0)
     ,   m_resourceContext(new Mutex("Resource"))
-    ,   m_methodSlots(x86::reg32(1) << s_initialMethodSlotBits, MethodSlot{0, &callAddressZero})
+    ,   m_methodSlots((x86::reg32(1) << s_initialMethodSlotBits) + 1, MethodSlot{0, &callAddressZero})
     ,   m_methodShift(32 - s_initialMethodSlotBits)
     ,   m_cpu{}
 {
@@ -275,7 +275,7 @@ void WinApplication::registerMethod(x86::reg32 pointer, Method method)
     RC_ASSERT(pointer != 0);
     RC_ASSERT(m_methodNames.find(pointer) == m_methodNames.end());
     m_methodNames[pointer] = std::move(method.name);
-    if (m_methodNames.size() * 2 > m_methodSlots.size())
+    if (m_methodNames.size() * 2 > methodSlotCount())
         growMethodTable();
     insertMethod(pointer, method.method);
 }
@@ -295,7 +295,7 @@ const char* WinApplication::getMethodName(x86::reg32 address) const
 
 MethodPtr WinApplication::findMethod(x86::reg32 address) const
 {
-    const x86::reg32 mask = x86::reg32(m_methodSlots.size()) - 1;
+    const x86::reg32 mask = methodSlotCount() - 1;
     for (x86::reg32 i = methodSlot(address); ; i = (i + 1) & mask)
     {
         const MethodSlot& slot = m_methodSlots[i];
@@ -314,7 +314,7 @@ MethodPtr WinApplication::findMethod(x86::reg32 address) const
 // Stores at the first slot holding the address or empty.
 void WinApplication::insertMethod(x86::reg32 address, MethodPtr method)
 {
-    const x86::reg32 mask = x86::reg32(m_methodSlots.size()) - 1;
+    const x86::reg32 mask = methodSlotCount() - 1;
     x86::reg32 i = methodSlot(address);
     while (m_methodSlots[i].address != 0 && m_methodSlots[i].address != address)
         i = (i + 1) & mask;
@@ -323,7 +323,7 @@ void WinApplication::insertMethod(x86::reg32 address, MethodPtr method)
 
 void WinApplication::growMethodTable()
 {
-    std::vector<MethodSlot> slots(m_methodSlots.size() * 2, MethodSlot{0, &callAddressZero});
+    std::vector<MethodSlot> slots(methodSlotCount() * 2 + 1, MethodSlot{0, &callAddressZero});
     slots.swap(m_methodSlots);
     --m_methodShift;
     for (std::vector<MethodSlot>::const_iterator it = slots.begin(); it != slots.end(); ++it)
