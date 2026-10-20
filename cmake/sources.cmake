@@ -21,6 +21,7 @@ set(NFSU_LIB_SOURCES
   src/lib/cpu.cpp
   src/lib/event.cpp
   src/lib/file.cpp
+  src/lib/fpucontrol.cpp
   src/lib/gamepad.cpp
   src/lib/heap.cpp
   src/lib/jump.cpp
