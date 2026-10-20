@@ -79,7 +79,9 @@ const UniformField s_carFragment[] = {
 const UniformField s_filterFragment[] = {
     FIELD(FilterFragmentConstants, alphaTest, "uAlphaTest"),
     FIELD(FilterFragmentConstants, weights, "uWeights"),
+    FIELD(FilterFragmentConstants, blendFactor, "uBlendFactor"),
 };
+#define BLENDFACTOR(type) uint16_t(offsetof(type, blendFactor) / sizeof(float))
 const UniformField s_clearFragment[] = {
     FIELD(ClearFragmentConstants, color, "uColor"),
 };
@@ -110,10 +112,14 @@ const FragmentProgramInfo s_fragmentPrograms[FpCount] = {
       s_worldHeadlightFragment, 4 },
     { "world_f", FLOATS(WorldFragmentConstants), COUNT(s_worldFragment), s_worldFragment, 1 },
     { "car_f", FLOATS(CarFragmentConstants), COUNT(s_carFragment), s_carFragment, 2 },
-    { "filter1_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 1 },
-    { "filter2_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 2 },
-    { "filter3_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 3 },
-    { "filter4_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 4 },
+    { "filter1_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 1,
+      BLENDFACTOR(FilterFragmentConstants) },
+    { "filter2_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 2,
+      BLENDFACTOR(FilterFragmentConstants) },
+    { "filter3_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 3,
+      BLENDFACTOR(FilterFragmentConstants) },
+    { "filter4_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 4,
+      BLENDFACTOR(FilterFragmentConstants) },
     { "clear_f", FLOATS(ClearFragmentConstants), COUNT(s_clearFragment), s_clearFragment, 0 },
 };
 
@@ -139,6 +145,12 @@ const VertexProgramInfo& vertexProgram(VertexProgram program)
 const FragmentProgramInfo& fragmentProgram(FragmentProgram program)
 {
     return s_fragmentPrograms[program < FpCount ? program : 0];
+}
+
+const char* factorSuffix(FactorOutput output)
+{
+    static const char* const s_suffixes[FactorCount] = { "", "_bfcolor", "_bfalpha", "_bfscale" };
+    return output < FactorCount ? s_suffixes[output] : "";
 }
 
 const char* inputName(Usage usage)

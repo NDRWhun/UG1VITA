@@ -23,7 +23,7 @@ enum : DWORD
     D3DRS_ZENABLE = 7, D3DRS_ZWRITEENABLE = 14, D3DRS_ALPHATESTENABLE = 15, D3DRS_SRCBLEND = 19,
     D3DRS_DESTBLEND = 20, D3DRS_CULLMODE = 22, D3DRS_ZFUNC = 23, D3DRS_ALPHAREF = 24, D3DRS_ALPHAFUNC = 25,
     D3DRS_ALPHABLENDENABLE = 27, D3DRS_FOGENABLE = 28, D3DRS_TEXTUREFACTOR = 60, D3DRS_LIGHTING = 137,
-    D3DRS_COLORWRITEENABLE = 168, D3DRS_BLENDOP = 171,
+    D3DRS_COLORWRITEENABLE = 168, D3DRS_BLENDOP = 171, D3DRS_BLENDFACTOR = 193,
 
     D3DTS_VIEW = 2, D3DTS_PROJECTION = 3, D3DTS_TEXTURE0 = 16, D3DTS_WORLD = 256,
 
@@ -185,7 +185,7 @@ void Device::defaults()
     rs[D3DRS_LIGHTING] = 1;
     rs[D3DRS_COLORWRITEENABLE] = 0xf;
     rs[D3DRS_BLENDOP] = 1;
-    rs[193] = 0xffffffffu;          // BLENDFACTOR
+    rs[D3DRS_BLENDFACTOR] = 0xffffffffu;
     for (DWORD s = 0; s < MaxStages; ++s)
     {
         DWORD* tss = m_state.stageStates[s];
@@ -300,6 +300,7 @@ struct ConstantsKey
     const void* source;
     uint32_t    version;
     DWORD       alphaFunc, alphaRef;
+    float       blendFactor[4];
     uint8_t     vertexProgram, fragmentProgram, texComponents, alphaTest;
 };
 
@@ -383,12 +384,25 @@ bool Device::fillState(render::DrawState& state, render::DrawCall& draw, render:
     float test[2] = { 0.0f, 0.0f };
     state.alphaTest = alphaEnabled && alphaTest(rs[D3DRS_ALPHAFUNC], alphaRef, test) ? 1 : 0;
 
+    const render::FragmentProgramInfo& fragment =
+        render::fragmentProgram(render::FragmentProgram(state.fragmentProgram));
+    BlendFactorDraw factor = {};
+    if (state.blendEnable)
+    {
+        factor = resolveBlendFactor(state.srcBlend, state.dstBlend, rs[D3DRS_BLENDOP], rs[D3DRS_BLENDFACTOR],
+                                    fragment.blendFactor && !state.alphaTest, (state.colorMask & 8) != 0);
+        state.srcBlend = uint8_t(factor.src);
+        state.dstBlend = uint8_t(factor.dst);
+        state.factorOutput = factor.output;
+    }
+
     ConstantsKey key;
     memset(&key, 0, sizeof(key));
     key.source = source;
     key.version = version;
     key.alphaFunc = rs[D3DRS_ALPHAFUNC];
     key.alphaRef = alphaRef;
+    memcpy(key.blendFactor, factor.factor, sizeof(key.blendFactor));
     key.vertexProgram = state.vertexProgram;
     key.fragmentProgram = state.fragmentProgram;
     key.texComponents = uint8_t(texComponents | (positionT ? 0x80 : 0));
@@ -402,7 +416,7 @@ bool Device::fillState(render::DrawState& state, render::DrawCall& draw, render:
     }
 
     const uint32_t vertexFloats = render::vertexProgram(render::VertexProgram(state.vertexProgram)).constantFloats;
-    const uint32_t fragmentFloats = render::fragmentProgram(render::FragmentProgram(state.fragmentProgram)).constantFloats;
+    const uint32_t fragmentFloats = fragment.constantFloats;
     float* vc = nullptr;
     float* fc = nullptr;
     draw.vertexConstants = draw.fragmentConstants = render::NoConstants;
@@ -454,6 +468,8 @@ bool Device::fillState(render::DrawState& state, render::DrawCall& draw, render:
         fc[0] = test[0];
         fc[1] = test[1];
     }
+    if (fc && state.factorOutput)
+        memcpy(fc + fragment.blendFactor, factor.factor, sizeof(factor.factor));
     s_last = key;
     m_constantsKey = source;
     m_vertexConstants = draw.vertexConstants;
