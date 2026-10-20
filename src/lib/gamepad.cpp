@@ -50,6 +50,7 @@ Field                   s_field;
 std::deque<TypedKey>    s_typing;           // key messages of confirmed text not posted yet
 uint64_t                s_typedUs;          // when the last one was posted
 bool                    s_typedDown[256];   // typed keys down, by DirectInput code
+Gamepad::PollHook       s_pollHook;         // not guarded: set before the game starts
 
 void copyText(char16_t* target, const char* source, uint32_t maxLength)
 {
@@ -317,6 +318,9 @@ void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCo
     controls::shapeStick(state.axes[controls::AxisRz], 0.0f, right.deadZone, right.saturation,
                          &shaped[controls::AxisRz], &unused);
     *pov = state.pov;
+    *buttons = state.buttons;
+    if (s_pollHook)
+        s_pollHook(buttons, pov);
     for (int axis = 0; axis < controls::AxisCount; ++axis)
     {
         const AxisProperties& properties = m_axisProperties[axis];
@@ -324,7 +328,11 @@ void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCo
         const float range = float(properties.max) - float(properties.min);
         axes[axis] = x86::sreg32(std::lround(float(properties.min) + position * range));
     }
-    *buttons = state.buttons;
+}
+
+void Gamepad::setPollHook(PollHook hook)
+{
+    s_pollHook = hook;
 }
 
 void Gamepad::updateKeys()

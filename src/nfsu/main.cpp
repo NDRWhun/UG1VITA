@@ -1,6 +1,8 @@
 #include "bankcode.h"
 
 #include <lib/file.h>
+#include <lib/gamepad.h>
+#include <lib/memmap.h>
 #include <lib/registry.h>
 #include <platform/config.h>
 #include <platform/cores.h>
@@ -88,20 +90,76 @@ static std::vector<win32::Section> imageSections(const std::vector<uint8_t>& ima
     return sections;
 }
 
-// Default bindings of the EMS PS2 adapter, the device the Vita pad is presented as (src/lib/controls.cpp): race and menu
-// action per button index. Menus: Cross accepts, Circle goes back. Race: R accelerates, L brakes, Cross is nitrous,
-// Square the handbrake, Triangle the camera, Circle looks back, d-pad up/down and the rear touch halves shift.
-static void setPadBindings(nfsu::Application& app)
+// Bindings of the Vita pad, presented as the EMS PS2 adapter (src/lib/controls.cpp). Per button index, then per hat
+// direction (down, up, left, right) of each of the 4 hats the game reads. Race: R accelerates, L brakes, Cross is
+// nitrous, Square the handbrake, Triangle the camera, Circle looks back, d-pad up/down and the rear touch halves
+// shift. Menus: Cross accepts (20), Circle goes back (23), Start is the game's Start (25, also "button 2"), Square
+// "button 3" (26), L / R the triggers (27 / 28), d-pad and hat navigate.
+static const x86::reg32 s_raceActions[16] = { 10, 9, 6, 5, 8, 7, 2, 1, 14, 12, 0, 0, 7, 4, 8, 3 };
+static const x86::reg32 s_menuActions[16] = { 0, 23, 20, 26, 0, 0, 27, 28, 0, 25, 0, 0, 16, 19, 17, 18 };
+static const x86::reg32 s_raceHat[4] = { 0, 0, 3, 4 };
+static const x86::reg32 s_menuHat[4] = { 17, 16, 18, 19 };
+
+static x86::reg32& guestDword(x86::reg32 address)
 {
-    static const x86::reg32 raceActions[16] = { 10, 9, 6, 5, 8, 7, 2, 1, 14, 12, 0, 0, 7, 4, 8, 3 };
-    static const x86::reg32 menuActions[16] = { 25, 23, 20, 24, 0, 0, 26, 0, 0, 20, 0, 0, 16, 19, 17, 18 };
-    const x86::reg32 race = 0x00704268;     // EMS entry 0x00704258: product GUID, 16 race, 16 menu actions
-    const x86::reg32 menu = 0x007042A8;
+    return *reinterpret_cast<x86::reg32*>(win32::g_guestBase + address);
+}
+
+// The game's defaults for the EMS product (entry 0x00704258: GUID, 16 race, 16 menu actions) become the port's.
+static void setPadBindings()
+{
     for (x86::reg32 i = 0; i < 16; ++i)
     {
-        app.getMemory<x86::reg32>(race + 4 * i) = raceActions[i];
-        app.getMemory<x86::reg32>(menu + 4 * i) = menuActions[i];
+        guestDword(0x00704268 + 4 * i) = s_raceActions[i];
+        guestDword(0x007042A8 + 4 * i) = s_menuActions[i];
     }
+}
+
+// The game builds each device's action mask from both tables of its slot (0x004071B8), whatever map is active, and
+// loads the slot tables from the profile (0x0041CDA0; 0x004064D0 then puts the generic menu actions on buttons
+// 0-4). The keyboard instead gets one map at a time: 0x004057C0 picks the race map ([0x007041C4] = 0) only while
+// a race is driven, the menu map otherwise. At each pad poll the pad's slot is set to the port's layout for that
+// map: race actions while driving, menu actions in menus; in the front end the race table stays (it has no
+// consumers there and the controls screen shows it). Saved pad bindings are overridden. Inputs held across a
+// change stay hidden until released, as the keyboard's map change releases its keys.
+static void padPollHook(x86::reg32* buttons, int* pov)
+{
+    const x86::reg32 slots = 0x0078DAA8, slotSize = 0x270, slotCount = 6;
+    const bool driving = win32::g_guestBase[0x007041C4] == 0;
+    const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
+    const bool race = driving || frontEnd;
+    const bool menu = !driving;
+    for (x86::reg32 slot = slots; slot < slots + slotCount * slotSize; slot += slotSize)
+    {
+        // Channel 0 (the pad), a controller type (0x13 is the keyboard).
+        if (guestDword(slot + 0x130) != 0 || guestDword(slot + 0x134) == 0x13)
+            continue;
+        for (x86::reg32 i = 0; i < 16; ++i)
+        {
+            guestDword(slot + 0x18 + 4 * i) = race ? s_raceActions[i] : 0;
+            guestDword(slot + 0x98 + 4 * i) = menu ? s_menuActions[i] : 0;
+        }
+        for (x86::reg32 i = 0; i < 16; ++i)
+        {
+            guestDword(slot + 0x58 + 4 * i) = race ? s_raceHat[i % 4] : 0;
+            guestDword(slot + 0xD8 + 4 * i) = menu ? s_menuHat[i % 4] : 0;
+        }
+    }
+
+    const x86::reg32 hatBit = x86::reg32(1) << 31;
+    const x86::reg32 held = *buttons | (*pov >= 0 ? hatBit : 0);
+    static int s_layout = -1;
+    static x86::reg32 s_hidden = 0;
+    const int layout = (race ? 1 : 0) | (menu ? 2 : 0);
+    if (layout != s_layout)
+    {
+        s_hidden = s_layout < 0 ? 0 : held;
+        s_layout = layout;
+    }
+    s_hidden &= held;
+    *buttons &= ~s_hidden;
+    if (s_hidden & hatBit)
+        *pov = -1;
 }
 
 int main(int, char**)
@@ -137,7 +195,8 @@ int main(int, char**)
     {
         nfsu::Application app(s_commandLine, imageSections(image));
         std::vector<uint8_t>().swap(image);
-        setPadBindings(app);
+        setPadBindings();
+        win32::Gamepad::setPollHook(padPollHook);
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))
             pf::fatal("%s (the game folder) is missing", s_guestGameFolder);
         app.execute();
