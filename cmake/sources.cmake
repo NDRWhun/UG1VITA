@@ -19,6 +19,7 @@ set(NFSU_PLATFORM_SOURCES
   src/platform/config.cpp
   src/platform/cores.cpp
   src/platform/filesystem.cpp
+  src/platform/jobs.cpp
   src/platform/ime.cpp
   src/platform/log.cpp
   src/platform/perf.cpp
