@@ -1,16 +1,21 @@
-"""Function discovery and decoding for an MSVC-built executable.
+"""Function discovery and decoding for an MSVC-built executable without base relocations.
 
-Recursive descent from known entries; nothing is decoded by linear sweep except the gap check at the end.
+Recursive descent from verified entries; no linear sweep produces code.
 
-- Entries: the PE entry point, direct call targets, relocated immediates that point into code (function pointers
-  pushed or stored by code), relocated dwords outside code that point into code (function pointer tables, SEH scope
-  tables), and code found in the gaps between everything reachable (unreferenced functions).
+- Trusted entries: the PE entry point, configured addresses and direct call targets in accepted code.
+- Pointer candidates: immediates in accepted code that point into the code section (`push offset f`,
+  `mov r/m, offset f`), and aligned dwords in the other sections that point into it (vtables, callback and
+  function-pointer tables, EH tables). Without relocations any of these may be a plain number, so each one is
+  validated before it becomes an entry (validate()).
+- The gaps between functions hold filler: fragments of nearby code (copies with shifted relative branches) and dead
+  call sequences. No entry is ever taken from a gap by scanning; a pointer into a gap must pass validation like any
+  other.
+- Calls to functions that never return end the path (no_return()); the bytes after them are padding or filler.
 - Every function is decoded on its own from its entry: all code reachable through jumps belongs to it, jumps to other
   entries are tail calls. Code shared by several entries is decoded into each of them.
 - Switches: MSVC emits `jmp dword ptr [reg*4 + table]` with the table (and the byte index table of two-level
-  switches) inline in the code section after the function. A table holds the relocated dwords from its start; it ends
-  at the case count of the preceding `cmp reg, n; ja` bound or at the first dword that is not a relocated code
-  pointer, whichever comes first.
+  switches) inline in the code section after the function. A table ends at the case count of the preceding
+  `cmp reg, n; ja` bound, else at the first dword that is not a code address or that meets other code or data.
 - Instruction bytes covered by data (tables) are never decoded as code.
 """
 
@@ -24,14 +29,23 @@ JCC_PREFIX = 'j'
 LOOPS = ('loop', 'loope', 'loopne', 'jecxz', 'jcxz')
 # Instructions after which control never falls through.
 STOPS = ('ret', 'retf', 'jmp', 'int3', 'hlt', 'ud2', 'iretd', 'ljmp')
-PADDING = (0xcc, 0x90, 0x00)
+PADDING = (0xcc, 0x90)
 # Instructions no user-mode C or CRT code of this game executes: a candidate entry whose code contains one is data.
 IMPLAUSIBLE = {'in', 'out', 'insb', 'insw', 'insd', 'outsb', 'outsw', 'outsd', 'sldt', 'str', 'lds', 'les', 'lfs',
                'lgs', 'lss', 'into', 'iret', 'iretd', 'retf', 'hlt', 'lcall', 'ljmp', 'arpl', 'bound', 'aaa', 'aas',
                'daa', 'das', 'aam', 'aad', 'salc', 'cli', 'sti', 'int1', 'lar', 'lsl', 'lgdt', 'sgdt', 'lidt', 'sidt',
-               'enter'}
-# Entries found this way are code by construction; all others are checked (plausible()).
-TRUSTED = ('entry point', 'call', 'configured')
+               'enter', 'icebp'}
+# Instructions compiled code uses with esp as the destination; any other (dec esp, ...) marks data.
+ESP_WRITERS = ('add', 'sub', 'and', 'mov', 'lea', 'push', 'pop', 'cmp', 'test', 'xchg')
+# Entries found this way are code by construction; all others are validated.
+TRUSTED = ('entry point', 'call', 'configured', 'jump')
+# Imports that never return.
+NO_RETURN_IMPORTS = ('ExitProcess', 'ExitThread', 'FreeLibraryAndExitThread', 'FatalAppExitA', 'FatalExit')
+# Unbounded jump tables stop after this many entries.
+MAX_TABLE = 1024
+
+# Byte classes of the code section map.
+FREE, START, BODY, DATA = 0, 1, 2, 3
 
 
 def inside(starts, items, address):
@@ -79,27 +93,49 @@ def ins_writes(ins):
 
 class Table:
     """A jump table: case targets of one `jmp [reg*4 + address]`."""
-    def __init__(self, address, end, targets, bounded):
-        self.address = address
+    def __init__(self, address, end, targets, bounded, start=None):
+        self.address = address      # the jump's displacement
+        self.start = address if start is None else start    # first entry (below address for negative indexes)
         self.end = end
         self.targets = targets
         self.bounded = bounded      # the case count came from a cmp/ja bound
 
 
 class Discovery:
-    def __init__(self, image, cs, log=print):
+    def __init__(self, image, cs, log=print, no_return=()):
+        """no_return: functions declared never to return (those that leave through a pointer or a flag the
+        analysis cannot follow, such as the CRT's exit)."""
         self.image = image
         self.cs = cs
         self.log = log
         self.decoded = {}           # address -> capstone instruction, or None when undecodable
+        self.code_section = image.code_sections[0] if image.code_sections else None
+        # Import address table slots of imports that never return.
+        self.no_return_slots = set(i.iat_address for i in image.imports if i.name in NO_RETURN_IMPORTS)
+        self.declared_no_return = set(no_return)
+        self.no_return = set(no_return)     # entries that never return
+        self.reset()
+
+    def reset(self):
+        """Forgets everything but the decoded instructions and the no-return entries."""
         self.tables = {}            # table address -> Table
         self.index_tables = {}      # byte index table address -> length (None: unknown)
         self.data_refs = set()      # code-section addresses read as data by instructions
         self.entries = set()
         self.origin = {}            # entry -> how it was found
         self.code = set()           # instruction addresses of accepted functions
-        self.rejected = {}          # candidate entry -> origin, for candidates that decode as data
-        self.stats = {}
+        self.rejected = {}          # candidate entry -> (origin, reason), for candidates that are not code
+        self.code_refs = {}         # code address -> instruction addresses whose immediate holds it
+        self.data_pointers = {}     # code address -> addresses of aligned dwords outside code that hold it
+        self.string_pointers = {}   # the same for dwords in text, which are not candidates
+        self.jump_targets = set()   # targets of direct unconditional jumps in accepted code
+        self.flow_targets = set()   # addresses reached by falling through, a conditional jump or a switch
+        self.owner = {}             # instruction address -> the entry whose walk accepted it first
+        self.conflicts = []         # (entry, instructions its code overlaps at other boundaries)
+        self.trusted_overlaps = []  # (entry, owners) overlaps not resolved by dropping a pointer entry
+        self.displaced = set()      # data pointer entries in the way of an accepted code pointer
+        s = self.code_section
+        self.map = bytearray(max(s.virtual_size, s.raw_size) if s else 0)
 
     # ---- decoding ------------------------------------------------------------------------------------------------
     def instruction(self, address):
@@ -110,6 +146,35 @@ class Discovery:
                     break
             self.decoded[address] = ins
         return self.decoded[address]
+
+    def map_index(self, address):
+        s = self.code_section
+        return address - s.address if s and s.address <= address < s.address + len(self.map) else None
+
+    def mark(self, start, size, kind):
+        i = self.map_index(start)
+        if i is None:
+            return
+        if kind == START:
+            if self.map[i] != DATA:
+                self.map[i] = START
+            for j in range(i + 1, min(i + size, len(self.map))):
+                if self.map[j] == FREE:
+                    self.map[j] = BODY
+        else:
+            for j in range(i, min(i + size, len(self.map))):
+                self.map[j] = kind
+
+    def byte_class(self, address):
+        i = self.map_index(address)
+        return self.map[i] if i is not None else None
+
+    def instruction_at(self, address):
+        """The accepted instruction whose bytes include address, or None."""
+        for s in range(address, address - 16, -1):
+            if s in self.code and s + self.decoded[s].size > address:
+                return s
+        return None
 
     def switch_bound(self, jmp, function):
         """Case count from the code before a table jump, following the index value back through moves:
@@ -161,37 +226,61 @@ class Discovery:
                 return None
         return None
 
+    def table_entry(self, address, table_start, function):
+        """The code address in the dword at address when it can be a table entry, else None. The dword must not
+        overlap accepted code or the instructions decoded so far in function."""
+        if address != table_start and (address in self.tables or address in self.index_tables
+                                       or address in self.data_refs):
+            return None
+        if any(self.byte_class(address + k) in (START, BODY) for k in range(4)):
+            return None
+        for s in range(address - 15, address + 4):
+            ins = function.get(s)
+            if ins is not None and s + ins.size > address:
+                return None
+        value = self.image.dword(address)
+        if value is None or not self.image.is_code(value) or self.instruction(value) is None:
+            return None
+        return value
+
     def table(self, jmp, function):
         op = jmp.operands[0]
         address = op.mem.disp & 0xffffffff
         if address in self.tables:
             return self.tables[address]
         bound = self.switch_bound(jmp, function)
-        # Leading entries may be unused (the index never takes those values): they are not relocated.
         targets = []
-        a = address
-        while bound is not None and a not in self.image.relocations and (a - address) // 4 < bound:
-            a += 4
-        while a in self.image.relocations and (bound is None or (a - address) // 4 < bound):
-            if a != address and (a in self.tables or a in self.index_tables or a in self.data_refs):
-                break
-            value = self.image.dword(a)
-            if not self.image.is_code(value):
+        start = a = address
+        limit = bound if bound is not None else MAX_TABLE
+        while (a - address) // 4 < limit:
+            value = self.table_entry(a, start, function)
+            if value is None:
+                # Leading entries the index never takes may overlap the code before the table (memmove's
+                # `jmp [eax*4 + T]` with eax 1..3).
+                if bound is not None and not targets:
+                    a += 4
+                    start = a
+                    continue
                 break
             targets.append(value)
             a += 4
         if bound is not None and (a - address) // 4 < bound:
-            self.log('warning: table 0x%x: %d relocated entries, the switch bound says %d'
-                     % (address, (a - address) // 4, bound))
-        if not targets and address not in self.image.relocations:
+            self.log('warning: table 0x%x: %d code entries, the switch bound says %d'
+                     % (address, len(targets), bound))
+        if not targets:
             # Negative index (`sub r, n; jb` then `jmp [r*4 + end]`): the entries lie just below the address.
+            start = a = address
             b = address - 4
-            while b in self.image.relocations and self.image.is_code(self.image.dword(b)):
-                targets.insert(0, self.image.dword(b))
+            while len(targets) < (bound or MAX_TABLE):
+                value = self.table_entry(b, b, function)
+                if value is None:
+                    break
+                targets.insert(0, value)
+                start = b
                 b -= 4
             if targets:
-                self.log('note: table 0x%x indexed downwards from 0x%x, %d entries' % (b + 4, address, len(targets)))
-        t = Table(address, a, targets, bound is not None)
+                self.log('note: table 0x%x indexed downwards from 0x%x, %d entries' % (start, address, len(targets)))
+        t = Table(address, a, targets, bound is not None, start)
         self.tables[address] = t
         return t
 
@@ -201,13 +290,22 @@ class Discovery:
         m = ins.operands[0].mem
         return not m.base and m.index and m.scale == 4 and not m.segment and self.image.is_code(m.disp & 0xffffffff)
 
+    def calls_no_return(self, ins):
+        """True for a call to a function or import that never returns."""
+        op = ins.operands[0]
+        if op.type == X.X86_OP_IMM:
+            return (op.imm & 0xffffffff) in self.no_return
+        if op.type == X.X86_OP_MEM and not op.mem.base and not op.mem.index and not op.mem.segment:
+            return (op.mem.disp & 0xffffffff) in self.no_return_slots
+        return False
+
     # ---- one function --------------------------------------------------------------------------------------------
     def walk(self, entry, tails=frozenset()):
-        """Instructions reachable from entry (address -> instruction or None) and the references found on the way.
-        Jumps to addresses in tails end the path (tail calls)."""
+        """Instructions reachable from entry (address -> instruction or None), the direct call targets and the
+        code addresses held by immediates. Jumps to addresses in tails end the path (tail calls)."""
         function = {}
         calls = set()
-        code_refs = set()
+        code_refs = {}
         work = [entry]
         while work:
             address = work.pop()
@@ -224,12 +322,14 @@ class Discovery:
                             self.data_refs.add(disp)
                     if op.type == X.X86_OP_IMM and not is_jump(m) and m != 'call':
                         value = op.imm & 0xffffffff
-                        if self.image.is_code(value) and ins.address + ins.imm_offset in self.image.relocations:
-                            code_refs.add(value)
+                        if op.size == 4 and self.image.is_code(value):
+                            code_refs.setdefault(value, set()).add(ins.address)
                 if m == 'call':
                     op = ins.operands[0]
                     if op.type == X.X86_OP_IMM:
                         calls.add(op.imm & 0xffffffff)
+                    if self.calls_no_return(ins):
+                        break
                 elif is_jump(m):
                     op = ins.operands[0]
                     if op.type == X.X86_OP_IMM:
@@ -254,14 +354,14 @@ class Discovery:
         """Tables and index tables: start -> end."""
         items = {}
         for t in self.tables.values():
-            items[t.address] = max(items.get(t.address, 0), t.end)
+            if t.end > t.start:
+                items[t.start] = max(items.get(t.start, 0), t.end)
         for a, count in self.index_tables.items():
             items[a] = max(items.get(a, 0), a + (count or 1))
         return items
 
     def in_data(self, address):
-        items = self.data_items()
-        return address in self.data_refs or inside(sorted(items), items, address)
+        return address in self.data_refs or self.byte_class(address) == DATA
 
     def covered(self):
         """Bytes covered by the code of accepted functions and by tables: start -> end."""
@@ -270,104 +370,285 @@ class Discovery:
             items[a] = max(items.get(a, 0), a + self.decoded[a].size)
         return items
 
-    def plausible(self, function):
-        """False when decoded code looks like data: undecodable bytes, instructions from IMPLAUSIBLE, or a relocated
-        dword that is not an instruction's displacement or immediate."""
+    def mark_data(self):
+        for start, end in self.data_items().items():
+            self.mark(start, end - start, DATA)
+
+    def accept(self, entry, why, function):
+        self.entries.add(entry)
+        self.origin[entry] = why
+        overlapped = set()
         for a, ins in function.items():
-            if ins is None or mnemonic_of(ins) in IMPLAUSIBLE:
-                return False
-            fields = set()
-            if ins.disp_size:
-                fields.add(a + ins.disp_offset)
-            if ins.imm_size:
-                fields.add(a + ins.imm_offset)
-            for r in range(a - 3, a + ins.size):
-                if r in self.image.relocations and r not in fields:
-                    return False
-        return True
+            if ins is None or a in self.code:
+                continue
+            for k in range(ins.size):
+                if self.byte_class(a + k) in (START, BODY):
+                    overlapped.add(self.instruction_at(a + k))
+            self.code.add(a)
+            self.owner[a] = entry
+            self.mark(a, ins.size, START)
+            m = mnemonic_of(ins)
+            if is_jump(m):
+                op = ins.operands[0]
+                if op.type == X.X86_OP_IMM:
+                    (self.jump_targets if m == 'jmp' else self.flow_targets).add(op.imm & 0xffffffff)
+                elif self.is_table_jump(ins):
+                    self.flow_targets.update(self.tables[op.mem.disp & 0xffffffff].targets)
+            if m not in STOPS and not (m == 'call' and self.calls_no_return(ins)):
+                self.flow_targets.add(a + ins.size)
+        self.mark_data()
+        overlapped.discard(None)
+        if overlapped:
+            self.conflicts.append((entry, overlapped))
+
+    def tail_targets(self):
+        """Code reached only by unconditional jumps, never by falling through, a conditional jump or a switch:
+        the entry of a function that other functions tail-call. Splitting there is always sound (the jump becomes
+        a tail call)."""
+        return sorted(t for t in self.jump_targets - self.flow_targets - self.entries if t in self.code)
+
+    def validate(self, entry, why):
+        """None when a pointer candidate is a function entry, else the reason it is not. Checks: the address starts no
+        instruction of an accepted function and lies in no instruction or table; every path from it decodes into
+        plausible instructions that stay off accepted code (except at entries: tail calls) and off tables; no
+        path falls through into an entry. A code pointer comes from accepted code and outranks a
+        data pointer entry in its way: that entry is marked displaced (dropped on the next round)."""
+        displaced = set()
+
+        def displaces(address):
+            """True when the accepted code at address belongs to a data pointer entry this code pointer outranks."""
+            start = self.instruction_at(address) if address not in self.entries else address
+            owner = address if address in self.entries else self.owner.get(start)
+            if why == 'code pointer' and owner is not None and self.origin.get(owner) == 'data pointer':
+                displaced.add(owner)
+                return True
+            return False
+
+        cls = self.byte_class(entry)
+        if cls in (START, BODY) and not displaces(entry):
+            return 'interior' if cls == START else 'misaligned'
+        if cls == DATA or entry in self.data_refs:
+            return 'data'
+        function, _, _ = self.walk(entry, frozenset(self.entries))
+        if any(ins is None for ins in function.values()):
+            return 'undecodable'
+        ordered = sorted(function)
+        if any(a + function[a].size > b for a, b in zip(ordered, ordered[1:])):
+            return 'overlaps'
+        for a, ins in function.items():
+            m = mnemonic_of(ins)
+            if m in IMPLAUSIBLE or (m == 'int3' and a == entry):
+                return 'implausible'
+            if ins.operands and ins.operands[0].type == X.X86_OP_REG and ins.reg_name(ins.operands[0].reg) == 'esp' \
+                    and m not in ESP_WRITERS:
+                return 'implausible'
+            for k in range(ins.size):
+                c = self.byte_class(a + k)
+                if c == DATA:
+                    return 'data'
+                if c is not None and c != FREE and not displaces(a + k):
+                    return 'merges' if k == 0 and c == START else 'overlaps'
+            if m in STOPS:
+                continue
+            if m == 'call' and self.calls_no_return(ins):
+                continue
+            following = a + ins.size
+            if following in self.entries and not displaces(following):
+                return 'runs into an entry'
+        self.displaced |= displaced
+        return None
 
     def closure(self, seeds, origin):
-        """Walks the new entries among seeds and everything they reach; returns the number of new entries. Entries
-        that are not TRUSTED and do not look like code are rejected and leave no tables or data references."""
+        """Walks the new entries among seeds and everything they reach; returns the number of new entries.
+        Entries that are not TRUSTED must pass validate(); rejected ones leave no tables or data references."""
         work = [(a, origin) for a in reversed(seeds)]
         count = 0
         while work:
             entry, why = work.pop()
-            if entry in self.entries or entry in self.rejected or self.in_data(entry):
+            if entry in self.entries:
                 continue
-            saved = (dict(self.tables), dict(self.index_tables), set(self.data_refs))
-            function, calls, code_refs = self.walk(entry)
-            if why not in TRUSTED and not self.plausible(function):
+            if why not in TRUSTED and (entry in self.rejected or entry in self.blacklist):
+                continue
+            self.rejected.pop(entry, None)
+            if why not in TRUSTED:
+                saved = (dict(self.tables), dict(self.index_tables), set(self.data_refs))
+                reason = self.validate(entry, why)
                 self.tables, self.index_tables, self.data_refs = saved
-                self.rejected[entry] = why
-                continue
-            self.entries.add(entry)
-            self.origin[entry] = why
+                if reason:
+                    self.rejected[entry] = (why, reason)
+                    continue
+            function, calls, code_refs = self.walk(entry)
+            self.accept(entry, why, function)
             count += 1
-            self.code.update(a for a, ins in function.items() if ins is not None)
+            for value, sites in code_refs.items():
+                self.code_refs.setdefault(value, set()).update(sites)
             work += [(t, 'call') for t in sorted(calls, reverse=True)]
-            work += [(t, 'pointer') for t in sorted(code_refs, reverse=True)]
         return count
 
-    def gaps(self):
-        """Code-section ranges that no accepted instruction or table covers, without leading padding."""
-        items = sorted(self.covered().items())
-        result = []
-        for section in self.image.code_sections:
-            position = section.address
-            end = section.address + section.virtual_size
-            for start, stop in items + [(end, end)]:
-                if start < section.address or start > end:
-                    continue
-                if start > position:
-                    result.append((position, start))
-                position = max(position, stop)
-        trimmed = []
-        for start, stop in result:
-            data = self.image.read(start, stop - start)
-            first = next((i for i, b in enumerate(data) if b not in PADDING), None)
-            if first is not None:
-                trimmed.append((start + first, stop))
-        return trimmed
+    def scan_data_pointers(self):
+        """Aligned dwords outside the code section that hold a code address, except text: a dword right after four
+        printable characters (b'OWN\\0' reads as 0x004e574f), or UTF-16 characters after UTF-16 characters."""
+        def printable(b):
+            return 32 <= b < 127
 
-    def decodes_cleanly(self, start, stop):
-        """True when every path from start decodes into valid instructions inside [start, stop) or reaches a known
-        entry. A rejected candidate leaves no tables or data references behind."""
-        saved = (dict(self.tables), dict(self.index_tables), set(self.data_refs))
-        function, _, _ = self.walk(start, frozenset(self.entries))
-        clean = all(ins is not None and start <= a < stop for a, ins in function.items()) and self.plausible(function)
-        if not clean:
-            self.tables, self.index_tables, self.data_refs = saved
-        return clean
+        def utf16(d):
+            return printable(d[0]) and not d[1] and printable(d[2]) and not d[3]
+
+        def word(d):
+            """Up to three characters and a NUL."""
+            return not d[3] and all(printable(b) or not b for b in d[:3]) and printable(d[0])
+
+        def shorts(d):
+            return int.from_bytes(d[:2], 'little') < 0x400 and int.from_bytes(d[2:], 'little') < 0x400
+
+        pointers = {}
+        self.string_pointers = {}
+        for s in self.image.sections:
+            if s.code:
+                continue
+            data = s.data
+            for offset in range(0, len(data) - 3, 4):
+                value = int.from_bytes(data[offset:offset + 4], 'little')
+                if self.image.is_code(value):
+                    before = data[offset - 4:offset] if offset >= 4 else b'\0\0\0\0'
+                    this = data[offset:offset + 4]
+                    after = data[offset + 4:offset + 8].ljust(4, b'\0')
+                    text = all(printable(b) for b in before) or (utf16(before) and utf16(this))
+                    if value % 16 and not text:
+                        # Short strings next to short strings that are no code address, arrays of 16-bit values.
+                        near = [int.from_bytes(x, 'little') for x in (before, after)]
+                        text = (word(this) and any(word(x) for x in (before, after))
+                                and not any(self.image.is_code(x) for x in near)) or \
+                            (shorts(before) and shorts(this) and shorts(after))
+                    target = self.string_pointers if text else pointers
+                    target.setdefault(value, set()).add(s.address + offset)
+        return pointers
+
+    def resolve_conflicts(self):
+        """Pointer entries whose code overlaps code reached later from a call (at other instruction boundaries):
+        the pointer was a number that happened to decode."""
+        bad = set()
+        for entry, sites in self.conflicts:
+            owners = set(self.owner[a] for a in sites)
+            if self.origin.get(entry) in TRUSTED and all(self.origin[o] not in TRUSTED for o in owners):
+                bad |= owners
+            else:
+                self.trusted_overlaps.append((entry, sorted(owners)))
+        return bad
 
     def discover(self, extra_entries=()):
-        image = self.image
-        self.closure([image.entry_point], 'entry point')
-        self.closure(extra_entries, 'configured')
-        self.closure([image.dword(a) for a in sorted(image.relocations)
-                      if not image.is_code(a) and image.is_code(image.dword(a))], 'data pointer')
-        while True:
-            # Code no reference reaches (dead functions), then relocated code pointers stored in the code section
-            # outside instructions and tables.
-            found = [start for start, stop in self.gaps()
-                     if start not in self.data_refs and start not in self.rejected
-                     and self.decodes_cleanly(start, stop)]
-            new = self.closure(found, 'unreferenced')
-            covered = self.covered()
-            starts = sorted(covered)
-            loose = [image.dword(a) for a in sorted(image.relocations)
-                     if image.is_code(a) and not inside(starts, covered, a) and image.is_code(image.dword(a))]
-            new += self.closure(loose, 'code-section pointer')
-            if not new:
+        """Finds every entry. Rounds repeat the search from scratch while the set of no-return functions grows,
+        so code after a call that never returns does not contribute entries, and while pointer entries turn out
+        to overlap code reached from calls."""
+        self.blacklist = {}
+        for rounds in range(1, 30):
+            self.reset()
+            self.closure([self.image.entry_point], 'entry point')
+            self.closure(list(extra_entries), 'configured')
+            self.data_pointers = self.scan_data_pointers()
+            while True:
+                # Tail-call targets, then code immediates (they come from accepted code), then data dwords. A
+                # candidate rejected earlier is checked again: new entries may end the path that hit other code.
+                self.rejected = {}
+                new = self.closure(self.tail_targets(), 'jump')
+                new += self.closure(sorted(v for v in self.code_refs if v not in self.entries), 'code pointer')
+                new += self.closure(sorted(v for v in self.data_pointers if v not in self.entries), 'data pointer')
+                if not new:
+                    break
+            no_return = self.find_no_return()
+            self.drop_data_entries()
+            bad = self.resolve_conflicts()
+            for e in bad:
+                self.blacklist[e] = (self.origin[e], 'overlaps call-reached code')
+            for e in self.displaced - bad:
+                self.blacklist[e] = (self.origin[e], 'in the way of a code pointer')
+            if no_return <= self.no_return and not bad and not self.displaced:
                 break
-        self.drop_data_entries()
+            self.no_return |= no_return
+        for e, reason in self.blacklist.items():
+            self.rejected[e] = reason
+        self.rounds = rounds
+        # Entries code or data may hold the address of (text dwords too: being wrong there only costs speed).
+        self.address_taken = set(e for e in self.entries if e in self.code_refs or e in self.data_pointers
+                                 or e in self.string_pointers)
+        self.address_taken.add(self.image.entry_point)
+
+    def find_no_return(self):
+        """Entries none of whose paths returns: least fixpoint over ret, tail calls, indirect jumps and falls into
+        other entries; calls to no-return functions end their path."""
+        tails = frozenset(self.entries)
+        exits = {}
+        for e in self.entries:
+            if e in self.declared_no_return:
+                exits[e] = set()
+                continue
+            function, _, _ = self.walk(e, tails)
+            returns = False
+            follow = set()
+            for a, ins in function.items():
+                if ins is None:
+                    continue
+                m = mnemonic_of(ins)
+                if m in ('ret', 'retf', 'iretd'):
+                    returns = True
+                    break
+                if is_jump(m):
+                    op = ins.operands[0]
+                    if op.type == X.X86_OP_IMM:
+                        target = op.imm & 0xffffffff
+                        if target in tails and target != e:
+                            follow.add(target)
+                    elif not self.is_table_jump(ins):
+                        if op.type == X.X86_OP_MEM and not op.mem.base and not op.mem.index \
+                                and (op.mem.disp & 0xffffffff) in self.no_return_slots:
+                            continue
+                        returns = True      # indirect jump: a tail call to anything
+                        break
+                if m == 'call' and self.calls_no_return(ins):
+                    continue
+                if m not in STOPS and ins.address + ins.size in tails and ins.address + ins.size != e:
+                    follow.add(ins.address + ins.size)
+            exits[e] = True if returns else follow
+        returning = set(e for e, x in exits.items() if x is True)
+        changed = True
+        while changed:
+            changed = False
+            for e, x in exits.items():
+                if e not in returning and x is not True and x & returning:
+                    returning.add(e)
+                    changed = True
+        return (set(self.entries) - returning) | self.declared_no_return
 
     def drop_data_entries(self):
         """Entries found before the table that covers them was known."""
         for e in sorted(self.entries):
-            if self.in_data(e):
+            if self.in_data(e) and self.origin[e] not in TRUSTED:
                 self.log('warning: entry 0x%x (%s) lies in a jump table, dropped' % (e, self.origin[e]))
                 self.entries.discard(e)
+
+    def gaps(self):
+        """Code-section ranges that no accepted instruction or table covers, without leading padding."""
+        result = []
+        s = self.code_section
+        if s is None:
+            return result
+        start = None
+        for i, c in enumerate(self.map):
+            if c == FREE:
+                if start is None:
+                    start = i
+            elif start is not None:
+                result.append((s.address + start, s.address + i))
+                start = None
+        if start is not None:
+            result.append((s.address + start, s.address + len(self.map)))
+        trimmed = []
+        for start, stop in result:
+            data = self.image.read(start, stop - start)
+            first = next((i for i, b in enumerate(data) if b not in PADDING + (0,)), None)
+            if first is not None:
+                trimmed.append((start + first, stop))
+        return trimmed
 
     # ---- final functions -----------------------------------------------------------------------------------------
     def subroutine(self, entry):
@@ -398,6 +679,10 @@ class Discovery:
                     for target in ins.potential_destinations:
                         sub.dynamic_labels.append((ins.address, target))
             if m in STOPS:
+                continue
+            if m == 'call' and self.calls_no_return(ins):
+                # Never returns: trap if it does.
+                instructions.append(FakeTrapInstruction(ins.address, 'no-return call returned'))
                 continue
             fallthrough = ins.address + ins.size
             following = ordered[i + 1] if i + 1 < len(ordered) else None

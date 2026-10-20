@@ -3,9 +3,6 @@
 #include <platform/config.h>
 #include <platform/cores.h>
 #include <platform/gxm.h>
-#ifdef NFSU_HOST
-#include <platform/host/harness.h>
-#endif
 #include <platform/log.h>
 #include <platform/perf.h>
 #include <platform/sha256.h>
@@ -28,15 +25,10 @@ int          _newlib_heap_size_user      = 64 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize  = 4 * 1024 * 1024;
 }
 
-// The data folder is the guest's C:\ drive; the game folder is C:\NFSU.
-#ifdef NFSU_HOST
-// Host harness: the data folder comes from the environment; its file names are lower case.
-static std::string s_dataDirectory;
-static const char* const s_exeName = "nfsu/speed.exe";
-#else
+// The data folder is the game folder and the guest's C:\ drive: Speed.exe and the game's data folders lie in it
+// beside nfsug1vita.cfg, nfsug1vita.log and registry.txt.
 static std::string s_dataDirectory = "ux0:data/NFSUG1VITA";
-static const char* const s_exeName = "NFSU/Speed.exe";
-#endif
+static const char* const s_exeName = "Speed.exe";
 
 static std::string dataPath(const char* name)
 {
@@ -44,9 +36,9 @@ static std::string dataPath(const char* name)
 }
 
 // Guest view of the executable and its folder.
-static const char* s_guestGameFolder = "C:\\NFSU";
-static const char* s_guestExePath = "C:\\NFSU\\Speed.exe";
-static const char* s_commandLine = "\"C:\\NFSU\\Speed.exe\"";
+static const char* s_guestGameFolder = "C:\\";
+static const char* s_guestExePath = "C:\\Speed.exe";
+static const char* s_commandLine = "\"C:\\Speed.exe\"";
 
 // Reads the executable and checks it is the one the code was generated from.
 static bool loadExecutable(std::vector<uint8_t>& image)
@@ -56,7 +48,7 @@ static bool loadExecutable(std::vector<uint8_t>& image)
     FILE* file = fopen(exeFile, "rb");
     if (!file)
     {
-        pf::logError("%s not found: copy the game folder to %s/NFSU", exeFile, s_dataDirectory.c_str());
+        pf::logError("%s not found: copy the game folder's contents to %s/", exeFile, s_dataDirectory.c_str());
         return false;
     }
     fseek(file, 0, SEEK_END);
@@ -96,10 +88,6 @@ static std::vector<win32::Section> imageSections(const std::vector<uint8_t>& ima
 
 int main(int, char**)
 {
-#ifdef NFSU_HOST
-    pf::host::init();
-    s_dataDirectory = pf::host::dataDirectory();
-#else
     scePowerSetArmClockFrequency(444);
     scePowerSetBusClockFrequency(222);
     scePowerSetGpuClockFrequency(222);
@@ -107,7 +95,6 @@ int main(int, char**)
 
     mkdir("ux0:data", 0777);
     mkdir(s_dataDirectory.c_str(), 0777);
-#endif
     pf::logInit(dataPath("nfsug1vita.log").c_str());
     pf::logInfo("NFSUG1VITA starting");
     x86::mmxSelfTest();
@@ -133,9 +120,6 @@ int main(int, char**)
         std::vector<uint8_t>().swap(image);
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))
             pf::fatal("%s (the game folder) is missing", s_guestGameFolder);
-#ifdef NFSU_HOST
-        pf::host::start();
-#endif
         app.execute();
     }
     pf::logInfo("NFSUG1VITA exiting");

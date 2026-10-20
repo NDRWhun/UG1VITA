@@ -87,8 +87,10 @@ set(NFSU_WINAPI_SOURCES
   src/lib/winapi/dsound/idirectsoundbuffer.cpp
 )
 
-# Port code that works with guest addresses of Speed.exe (none yet).
+# Port code that works with guest addresses of Speed.exe.
 set(NFSU_GAME_PORT_SOURCES
+  src/nfsu/movie_yuv.cpp
+  src/nfsu/native.cpp
 )
 
 # Runtime sources that include headers generated from the game binary (nfsu_layout.h).
