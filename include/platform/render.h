@@ -36,6 +36,7 @@ struct TextureDesc
     bool        cube;
     bool        target;     // render target: one level, rendered to by scenes
     uint16_t    width, height;
+    bool        linear = false; // streamed: one uncompressed level in linear rows, rewritten by the CPU (movie frames)
 };
 
 struct TextureStorage : Resource

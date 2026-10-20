@@ -341,6 +341,8 @@ private:
     std::vector<MemMap*>    m_locks;        // per face * levels + level: the guest buffer of a lock
     std::vector<DWORD>      m_lockFlags;
     std::vector<bool>       m_written;      // the level has been written since creation
+    std::vector<uint8_t>    m_lockCounts;   // locks so far, saturating at 2
+    std::vector<MemMap*>    m_shadows;      // linear copy kept for levels locked repeatedly (movie frames)
     std::vector<Surface*>   m_surfaces;
 };
 

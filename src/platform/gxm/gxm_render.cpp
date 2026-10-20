@@ -492,6 +492,21 @@ render::TextureStorage* FrameRenderer::createTexture(const render::TextureDesc& 
                                desc.height, strideInPixels, t->data);
         return t;
     }
+    if (desc.linear && !desc.cube && desc.levels == 1 && !texture::isBlock(desc.format))
+    {
+        // Streamed: linear rows (8-pixel multiples) the CPU rewrites with a row copy instead of a swizzle.
+        t->stride = alignUp(desc.width, 8) * texture::unitBytes(desc.format);
+        t->bytes = t->stride * desc.height;
+        t->faceStride = t->bytes;
+        t->data = m_textureHeap->allocate(t->bytes, 256);
+        if (!t->data)
+        {
+            delete t;
+            return nullptr;
+        }
+        sceGxmTextureInitLinear(&t->texture, t->data, format, desc.width, desc.height, 1);
+        return t;
+    }
     t->stride = 0;
     t->faceStride = texture::faceStride(desc.format, desc.width, desc.height, desc.levels);
     t->bytes = texture::totalBytes(desc.format, desc.width, desc.height, desc.levels, desc.cube);
@@ -524,10 +539,14 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return;
     uint8_t* base = static_cast<uint8_t*>(t->data) + face * t->faceStride;
-    if (d.target && !d.cube)
+    if (t->stride)
     {
-        for (uint32_t y = 0; y < d.height; ++y)
-            memcpy(base + y * t->stride, static_cast<const uint8_t*>(data) + y * pitch, d.width * 4u);
+        const uint32_t rowBytes = d.width * texture::unitBytes(d.format);
+        if (pitch == t->stride)
+            memcpy(base, data, size_t(rowBytes) + size_t(t->stride) * (d.height - 1));
+        else
+            for (uint32_t y = 0; y < d.height; ++y)
+                memcpy(base + y * t->stride, static_cast<const uint8_t*>(data) + y * pitch, rowBytes);
         return;
     }
     texture::swizzleLevel(d.format, d.width, d.height, level, data, pitch,
@@ -542,10 +561,11 @@ void FrameRenderer::readTexture(const render::TextureStorage* storage, uint32_t 
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return;
     const uint8_t* base = static_cast<const uint8_t*>(t->data) + face * t->faceStride;
-    if (d.target && !d.cube)
+    if (t->stride)
     {
+        const uint32_t rowBytes = d.width * texture::unitBytes(d.format);
         for (uint32_t y = 0; y < d.height; ++y)
-            memcpy(static_cast<uint8_t*>(data) + y * pitch, base + y * t->stride, d.width * 4u);
+            memcpy(static_cast<uint8_t*>(data) + y * pitch, base + y * t->stride, rowBytes);
         return;
     }
     texture::unswizzleLevel(d.format, d.width, d.height, level,
