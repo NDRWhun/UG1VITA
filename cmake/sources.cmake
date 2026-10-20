@@ -8,6 +8,14 @@ set(NFSU_RENDER_SOURCES
 set(NFSU_RENDER_HOST_SOURCES
   src/platform/host/raster.cpp
 )
+# Direct3D 9 and D3DX layer.
+set(NFSU_D3D9_SOURCES
+  src/lib/winapi/d3d9.cpp
+  src/lib/winapi/d3d9_device.cpp
+  src/lib/winapi/d3d9_resources.cpp
+  src/lib/winapi/d3d9_state.cpp
+  src/lib/winapi/d3dx9.cpp
+)
 
 set(NFSU_PLATFORM_SOURCES
   ${NFSU_RENDER_SOURCES}
@@ -47,6 +55,7 @@ set(NFSU_LIB_SOURCES
 )
 
 set(NFSU_WINAPI_SOURCES
+  ${NFSU_D3D9_SOURCES}
   src/lib/winapi/advapi32.cpp
   src/lib/winapi/com.cpp
   src/lib/winapi/ddraw.cpp
