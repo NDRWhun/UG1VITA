@@ -607,7 +607,7 @@ class Function:
 class Program:
     def __init__(self, modules, thread_segments, skip_instructions, function_names, flags_preserved=(), not_code=(),
                  native_overrides=(), local_registers=True, memory_functions=(), local_x87=True, setjmp=None,
-                 longjmp_jumps=None, fpu_check=False, fpu_deltas=None, preempt_loops=False):
+                 longjmp_jumps=None, fpu_check=False, fpu_deltas=None, preempt_loops=False, address_taken=None):
         self.functions = {}
         # Backward jumps are preemption points (WinApplication::allowPreemption).
         self.preempt_loops = preempt_loops
@@ -632,16 +632,18 @@ class Program:
                 fn = Function(module, sub, thread_segments, skip_instructions, function_names)
                 fn.program = self
                 self.functions[fn.entry_address] = fn
-        self.address_taken = self.find_address_taken(modules) - set(not_code)
+        if address_taken is None:
+            address_taken = self.find_address_taken(modules)
+        self.address_taken = (set(address_taken) & set(self.functions)) - set(not_code)
         self.live_in = {}
         self.ret_live = {}
         self.may_def = {}
         self.indirect_live_in = 0
 
     def find_address_taken(self, modules):
-        """Entries that may be called indirectly: module entry points and every entry a relocated dword points to
-        (function pointers in data, pushed or stored immediates, table slots). Without relocations nothing else can
-        hold the absolute address of a function."""
+        """Entries that may be called indirectly, for an image with relocations: module entry points and every entry
+        a relocated dword points to (function pointers in data, pushed or stored immediates, table slots). Images
+        without relocations pass the set pointer discovery found (Program(address_taken=...))."""
         entries = set(self.functions)
         taken = set()
         for module in modules:

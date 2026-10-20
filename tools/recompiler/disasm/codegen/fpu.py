@@ -192,6 +192,17 @@ def cg_frstor(ctx, op):
     return ['cpu.fpu.restore(rc::host(%s));' % ctx.address(op)] + ctx.set_fc([])
 
 
+def cg_fsincos(ctx):
+    """st0 = sin(st0), then push cos of the original value; C2 = 0 (in range)."""
+    lines = ['const x86::Float t = %s;' % ctx.st(0), '%s = cpu.fpu.sin(t);' % ctx.st(0)]
+    return ['{'] + ['    ' + l for l in lines + ctx.fpush('cpu.fpu.cos(t)')] + ['}'] + ctx.set_fc([])
+
+
+def cg_ffree(ctx, op):
+    """Marks a register empty: the stack model keeps no tags, so nothing changes."""
+    return [';']
+
+
 def cg_fptan(ctx):
     return ['%s = cpu.fpu.tan(%s);' % (ctx.st(0), ctx.st(0))] + ctx.fpush('1.0')
 

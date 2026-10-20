@@ -29,13 +29,15 @@ class FakeJmpInstruction:
 
 
 class FakeTrapInstruction:
-    """Bytes the decoder could not decode on a reachable path: the generated code traps there."""
-    def __init__(self, address):
+    """A place the generated code traps: bytes the decoder could not decode on a reachable path, or the return of a
+    call that never returns. It has no size."""
+    def __init__(self, address, reason='undecodable'):
         self.prefix = [0, 0, 0, 0]
         self.bytes = b'\xcc'
         self.opcode = b'\xcc'
         self.mnemonic = 'int3'
-        self.op_str = '(undecodable)'
+        self.op_str = '(%s)' % reason
+        self.reason = reason
         self.operands = []
         self.address = address
         self.size = 0

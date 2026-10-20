@@ -84,7 +84,7 @@ def lit(value, bits):
 LAZY_KINDS = {
     'sub': (('a', 'b'), ('cf', 'zf', 'sf', 'of'), ('cf', 'zf', 'sf', 'of')),
     'add': (('a', 'b'), ('cf', 'zf', 'sf', 'of'), ('cf', 'zf', 'sf', 'of')),
-    'logic': (('r',), ('cf', 'zf', 'sf', 'of'), ('cf', 'zf', 'sf', 'of')),
+    'logic': (('r',), ('cf', 'pf', 'zf', 'sf', 'of'), ('cf', 'pf', 'zf', 'sf', 'of')),
     'inc': (('r',), ('zf', 'sf', 'of'), ('zf', 'sf', 'of')),
     'dec': (('r',), ('zf', 'sf', 'of'), ('zf', 'sf', 'of')),
     'neg': (('a',), ('cf', 'zf', 'sf', 'of'), ('cf', 'zf', 'sf', 'of')),
@@ -134,7 +134,9 @@ def lazy_flags(kind, bits, v):
                 'of': sign('~(%s ^ %s) & (%s ^ %s)' % (a, b, a, r))}
     if kind == 'logic':
         r = '%s(%s)' % (t, v['r'])
-        return {'cf': 'false', 'of': 'false', 'zf': '(%s == 0)' % r, 'sf': sign(r)}
+        # pf: even parity of the low byte.
+        return {'cf': 'false', 'of': 'false', 'zf': '(%s == 0)' % r, 'sf': sign(r),
+                'pf': '!__builtin_parity(x86::reg8(%s))' % r}
     if kind in ('inc', 'dec'):
         r = '%s(%s)' % (t, v['r'])
         edge = (1 << (bits - 1)) if kind == 'inc' else mask(bits - 1)

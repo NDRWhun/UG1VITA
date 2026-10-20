@@ -548,6 +548,13 @@ def cg_setcc(ctx, dst, cc):
     return ctx.put(dst, 'x86::reg8(%s)' % ctx.cond(cc))
 
 
+def cg_cmovcc(ctx, dst, src, cc):
+    """dst = src when cc holds; the source is read either way (as on x86, where a memory source may fault)."""
+    bits = dst.size * 8
+    return block(['const %s s = %s;' % (T(bits), ctx.val(src, bits))]
+                 + ctx.put(dst, '%s ? s : %s' % (ctx.cond(cc), ctx.val(dst, bits))))
+
+
 # ---- stack ----------------------------------------------------------------------------------------------------
 
 def stack_slot(ins):

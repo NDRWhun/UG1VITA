@@ -6,7 +6,7 @@ need the callee's net push count (fpu delta); a function whose depth is not know
 stack (cpu.fpu.push/pop/st).
 """
 
-PUSH = {'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fptan'}
+PUSH = {'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fptan', 'fsincos'}
 POP = {'fstp', 'fistp', 'faddp', 'fsubp', 'fsubrp', 'fmulp', 'fdivp', 'fdivrp', 'fcomp', 'fpatan', 'fyl2x'}
 POP2 = {'fcompp'}
 RESET = {'fninit', 'finit', 'frstor', 'fnsave', 'fsave', 'fldenv', 'fnstenv', 'fstenv', 'ffree', 'fdecstp',

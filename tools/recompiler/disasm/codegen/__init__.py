@@ -1,5 +1,7 @@
 """C++ code generators, one per x86 mnemonic: cg_<mnemonic>(ctx, *operands) -> list of statements."""
 
+from capstone import x86 as X
+
 from . import control, fpu, integer, mmx, string
 from .ctx import CC_ALIASES
 
@@ -18,6 +20,26 @@ def _lookup(mnemonic):
 
 
 unhandled_sites = []    # (address, mnemonic) of instructions the generator cannot translate (record pass)
+simd_sites = []         # (address, mnemonic, class) of SIMD instructions that trap (record pass)
+
+_SIMD_GROUPS = ((X.X86_GRP_3DNOW, '3DNow!'), (X.X86_GRP_SSE1, 'SSE'), (X.X86_GRP_SSE2, 'SSE2'),
+                (X.X86_GRP_SSE3, 'SSE3'), (X.X86_GRP_MMX, 'MMX'))
+
+
+def simd_class(ins):
+    """'MMX', 'SSE', 'SSE2', 'SSE3' or '3DNow!' for a SIMD instruction, else None."""
+    groups = getattr(ins, 'groups', ())
+    for group, name in _SIMD_GROUPS:
+        if group in groups:
+            return name
+    for op in getattr(ins, 'operands', []):
+        if op.type == X.X86_OP_REG:
+            name = ins.reg_name(op.reg)
+            if name.startswith('xmm'):
+                return 'SSE'
+            if name.startswith('mm'):
+                return 'MMX'
+    return None
 
 
 def _unhandled(ctx, ins):
@@ -27,7 +49,24 @@ def _unhandled(ctx, ins):
     return ['x86::guestTrap(0x%x, "unsupported instruction %s");' % (ins.address, ins.mnemonic)]
 
 
+def _simd_trap(ctx, ins, kind):
+    """SIMD code runs only behind CPU feature tests that the runtime's CPU profile fails: reaching it traps."""
+    ctx.boundary('trap')
+    if ctx.record:
+        simd_sites.append((ins.address, ins.mnemonic, kind))
+    return ['x86::guestTrap(0x%x, "%s instruction %s on a CPU-feature-gated path");' % (ins.address, kind, ins.mnemonic)]
+
+
 def generate(ctx, ins):
+    reason = getattr(ins, 'reason', None)
+    if reason is not None:
+        ctx.boundary('trap')
+        return ['x86::guestTrap(0x%x, "%s");' % (ins.address, reason)]
+    kind = simd_class(ins)
+    if kind is not None:
+        mnemonic = ins.mnemonic.split()[-1]
+        if kind != 'MMX' or getattr(mmx, 'cg_' + mnemonic, None) is None:
+            return _simd_trap(ctx, ins, kind)
     parts = ins.mnemonic.split()
     prefix = parts[0] if len(parts) > 1 else None
     mnemonic = parts[-1]
@@ -56,6 +95,8 @@ def generate(ctx, ins):
         return control.cg_jcc(ctx, mnemonic[1:])
     if mnemonic.startswith('set') and mnemonic[3:] in CC_ALIASES:
         return integer.cg_setcc(ctx, operands[0], mnemonic[3:])
+    if mnemonic.startswith('cmov') and mnemonic[4:] in CC_ALIASES:
+        return integer.cg_cmovcc(ctx, operands[0], operands[1], mnemonic[4:])
     cg = _lookup(mnemonic)
     if cg is None:
         return _unhandled(ctx, ins)
