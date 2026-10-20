@@ -110,6 +110,9 @@ HRESULT IDirectSound::CreateSoundBuffer(WinApplication* app, x86::CPU& cpu,
             s_primaryBuffer = Packed<IDirectSoundBuffer>(com::ComAlloc(app));
             IDirectSoundBuffer* buffer = &app->getMemory<IDirectSoundBuffer>(s_primaryBuffer);
             new (buffer) IDirectSoundBuffer(app, sharedDevice(app), bufferBytes, format, true);
+            // The cached primary buffer keeps one reference of its own: the caps probe releases its device and
+            // primary buffer before the game creates them again.
+            buffer->AddRef(app, cpu);
         }
         else
         {
