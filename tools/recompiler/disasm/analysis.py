@@ -550,10 +550,13 @@ class Function:
         after = self.fpu_after_call(i)
         if self.program.fpu_check and after is not None:
             lines.append('RC_ASSERT(cpu.fpu.count == fpu_count %s %d);' % ('+' if after >= 0 else '-', abs(after)))
-        elif self.branch[i][0] == 'dyncall' and self.program.indirect_fpu_checked and d is not None:
-            # Indirect calls keep the x87 depth or push the float result the analysis inferred; check it.
+        elif self.branch[i][0] == 'dyncall' and self.program.indirect_fpu_checked and d is not None \
+                and self.fpu.evidence.get(i) == 'inferred':
+            # The callee keeps the x87 depth or pushes the float result the analysis inferred; the runtime logs and
+            # corrects any other depth. Import calls need no check; open calls keep the stack in cpu.fpu.
             d += self.indirect_fpu_delta(i)
-            lines.append('RC_ASSERT(cpu.fpu.count == fpu_count %s %d);' % ('+' if d >= 0 else '-', abs(d)))
+            lines.append('RC_FPU_CALL(cpu, fpu_count %s %d, 0x%xu);'
+                         % ('+' if d >= 0 else '-', abs(d), self.instructions[i].address))
         if after is not None:
             for j in range(1, after + 1):
                 lines.append('fp%d = cpu.fpu.regs[(fpu_count + %d) & 7];' % (j, j))
@@ -637,6 +640,8 @@ class Program:
                 fn = Function(module, sub, thread_segments, skip_instructions, function_names)
                 fn.program = self
                 self.functions[fn.entry_address] = fn
+        # Import address table slots: indirect calls through them reach host shims.
+        self.import_slots = set(imp.iat_address for module in modules for imp in module.image.imports)
         if address_taken is None:
             address_taken = self.find_address_taken(modules)
         self.address_taken = (set(address_taken) & set(self.functions)) - set(not_code)

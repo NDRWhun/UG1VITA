@@ -36,6 +36,14 @@ typedef int64_t sreg64;
 struct CPU;
 struct FPU;
 
+// The x87 depth after the indirect call at site is not the one the recompiled code expects (the callee returned a
+// float or not, against the analysis): logs the site once and sets the expected depth.
+__attribute__((cold)) void fpuCallMismatch(CPU& cpu, reg32 expected, uint32_t site);
+
 }
+
+#define RC_FPU_CALL(cpu, expected, site)                                                      \
+    do { if (__builtin_expect((cpu).fpu.count != (expected), 0)) ::x86::fpuCallMismatch((cpu), (expected), (site)); } \
+    while (0)
 
 #endif /* !X86_H_ */

@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dis
 import bootstrap  # noqa: E402
 bootstrap.ensure_capstone()
 import capstone  # noqa: E402
-from disasm import analysis, codegen, discover, image as pe_image, writer  # noqa: E402
+from disasm import analysis, codegen, discover, fpustack, image as pe_image, writer  # noqa: E402
 
 EXE_NAME = 'Speed.exe'
 EXE_SHA256 = 'c0fad450912952f53809a54690d235aa8b4e25b9f46650693c7cbee1b4c074b7'
@@ -185,6 +185,13 @@ def report(discovery, module, program):
           % (sum(b - a for a, b in gaps), len(gaps)))
     mnemonics = collections.Counter(discovery.decoded[a].mnemonic for a in discovery.code)
     print('mnemonics: %d distinct' % len(mnemonics))
+    calls = fpustack.audit(program)
+    print('indirect calls: %d; import table %d (host, no check); float result inferred %d, none inferred %d '
+          '(checked: %s); open %d and no static x87 depth %d (stack in cpu.fpu, no check)'
+          % (sum(calls.values()), calls.get(('import', 0), 0), calls.get(('inferred', 1), 0),
+             calls.get(('inferred', 0), 0), 'yes' if program.indirect_fpu_checked else 'no',
+             sum(n for (k, _), n in calls.items() if k == 'open'),
+             sum(n for (k, _), n in calls.items() if k == 'unknown')))
     traps = collections.defaultdict(set)
     for fn in program.functions.values():
         for i in fn.reachable:
