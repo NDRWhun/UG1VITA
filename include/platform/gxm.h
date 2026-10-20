@@ -2,8 +2,7 @@
 #define PLATFORM_GXM_H_
 
 // The display device: the game window's front-buffer image (565 pixels) scaled to the display through a gamma
-// table, and the Direct3D frames of platform/render.h. Everything in this header is platform neutral; the host
-// harness implements the same Device.
+// table, and the Direct3D frames of platform/render.h. Everything in this header is platform neutral.
 
 #include <platform/render.h>
 #include <cstdint>
