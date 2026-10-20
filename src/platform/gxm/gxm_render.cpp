@@ -609,17 +609,16 @@ render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height
     Depth* d = new Depth();
     d->width = uint16_t(width);
     d->height = uint16_t(height);
+    // No stencil plane: the layer never enables the stencil test, so it would only be loaded and stored.
     d->data = m_textureHeap->allocate(w * h * 4, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
-    d->stencil = m_textureHeap->allocate(w * h, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
-    if (!d->data || !d->stencil)
+    d->stencil = nullptr;
+    if (!d->data)
     {
-        m_textureHeap->free(d->data);
-        m_textureHeap->free(d->stencil);
         delete d;
         return nullptr;
     }
-    sceGxmDepthStencilSurfaceInit(&d->surface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M_S8, SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,
-                                  w, d->data, d->stencil);
+    sceGxmDepthStencilSurfaceInit(&d->surface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M, SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,
+                                  w, d->data, nullptr);
     return d;
 }
 
@@ -650,8 +649,8 @@ SceGxmNotification* FrameRenderer::doneNotification(const render::Frame& frame)
 
 const SceGxmTexture* FrameRenderer::offscreen(const render::Frame& frame) const
 {
-    const Texture* t = m_slots[frame.index % Slots].offscreen;
-    return (frame.width == 960 && frame.height == 544) || !t ? nullptr : &t->texture;
+    const Slot& s = m_slots[frame.index % Slots];
+    return s.direct || !s.offscreen ? nullptr : &s.offscreen->texture;
 }
 
 bool FrameRenderer::presentScene(const render::Frame& frame) const
@@ -857,9 +856,11 @@ void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
     if (first || d.viewport != m_lastViewport)
     {
         // Direct3D window coordinates have pixel centres at integers: half a pixel to GXM's.
+        // A back buffer drawn to the display directly: its pixels scaled to the display's.
         const render::Viewport& v = frame.viewports[d.viewport];
-        sceGxmSetViewport(m_context, v.x + 0.5f * v.width + 0.5f, 0.5f * v.width, v.y + 0.5f * v.height + 0.5f,
-                          -0.5f * v.height, v.minZ, v.maxZ - v.minZ);
+        const float sx = m_viewScaleX, sy = m_viewScaleY;
+        sceGxmSetViewport(m_context, sx * (v.x + 0.5f * v.width + 0.5f), sx * 0.5f * v.width,
+                          sy * (v.y + 0.5f * v.height + 0.5f), sy * -0.5f * v.height, v.minZ, v.maxZ - v.minZ);
         m_lastViewport = d.viewport;
     }
     if (first || s.depthEnable != m_last.depthEnable || s.depthWrite != m_last.depthWrite || s.depthFunc != m_last.depthFunc)
@@ -885,22 +886,121 @@ void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
     sceGxmDraw(m_context, primitiveType(s.primitive), SCE_GXM_INDEX_FORMAT_U16, d.indices ? d.indices : m_sequence, count);
 }
 
-void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync)
+void FrameRenderer::planFrame(const render::Frame& frame, bool stretchDirect)
+{
+    m_plan.resize(frame.sceneCount);
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const render::Scene& scene = frame.scenes[i];
+        bool used = scene.target.depth && scene.depthCleared;
+        for (uint32_t n = 0; n < scene.drawCount && scene.target.depth && !used; ++n)
+            used = frame.draws[scene.firstDraw + n].state.depthEnable != 0;
+        m_plan[i].depthUsed = used;
+        m_plan[i].skipped = false;
+        m_plan[i].carriedTo = i;
+    }
+
+    // A scene of colour clears alone (the game clears the back buffer right after Present) moves to the start of
+    // the next scene on its target when nothing in between samples that target and its depth clear is dead.
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const render::Scene& scene = frame.scenes[i];
+        bool clears = scene.drawCount != 0;
+        for (uint32_t n = 0; n < scene.drawCount && clears; ++n)
+        {
+            const render::DrawState& s = frame.draws[scene.firstDraw + n].state;
+            clears = s.vertexProgram == render::VpClear && !s.depthEnable;
+        }
+        if (!clears)
+            continue;
+        uint32_t next = i + 1;
+        while (next < frame.sceneCount && (frame.scenes[next].target.color != scene.target.color
+                                           || frame.scenes[next].target.face != scene.target.face))
+            ++next;
+        if (next == frame.sceneCount)
+            continue;
+        bool sampled = false;
+        for (uint32_t k = i + 1; k < next && scene.target.color && !sampled; ++k)
+        {
+            const render::Scene& between = frame.scenes[k];
+            for (uint32_t n = 0; n < between.drawCount && !sampled; ++n)
+                for (const render::TextureStorage* t : frame.draws[between.firstDraw + n].state.textures)
+                    sampled = sampled || t == scene.target.color;
+        }
+        if (sampled)
+            continue;
+        if (scene.target.depth && scene.depthCleared)
+        {
+            bool dead = true;
+            for (uint32_t k = i + 1; k < frame.sceneCount; ++k)
+            {
+                if (frame.scenes[k].target.depth == scene.target.depth && m_plan[k].depthUsed)
+                {
+                    dead = frame.scenes[k].depthCleared;
+                    break;
+                }
+            }
+            if (!dead)
+                continue;
+        }
+        m_plan[i].skipped = true;
+        m_plan[i].carriedTo = next;
+        m_plan[i].depthUsed = false;
+    }
+    // A carried scene that is itself carried passes its clears on.
+    for (uint32_t i = frame.sceneCount; i-- > 0;)
+    {
+        if (m_plan[i].skipped && m_plan[m_plan[i].carriedTo].skipped)
+            m_plan[i].carriedTo = m_plan[m_plan[i].carriedTo].carriedTo;
+    }
+
+    // A stretched back buffer whose scenes need no depth is drawn to the display at its resolution: no offscreen
+    // store and no scaling pass.
+    Slot& slot = m_slots[frame.index % Slots];
+    slot.direct = frame.width == 960 && frame.height == 544;
+    if (!slot.direct && stretchDirect)
+    {
+        bool any = false, depth = false;
+        for (uint32_t i = 0; i < frame.sceneCount; ++i)
+        {
+            if (frame.scenes[i].target.color || m_plan[i].skipped)
+                continue;
+            any = true;
+            depth = depth || m_plan[i].depthUsed;
+        }
+        slot.direct = any && !depth;
+    }
+}
+
+void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync,
+                              bool stretchDirect)
 {
     Slot& slot = m_slots[frame.index % Slots];
+    planFrame(frame, stretchDirect);
     const bool lastWritesDone = !presentScene(frame);
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
+        if (m_plan[i].skipped)
+            continue;
         const render::Scene& scene = frame.scenes[i];
         const SceGxmColorSurface* color = display;
         SceGxmSyncObject* sync = nullptr;
         uint32_t width = scene.width, height = scene.height;
+        m_viewScaleX = m_viewScaleY = 1.0f;
         if (scene.target.color)
         {
             const Texture* t = static_cast<const Texture*>(scene.target.color);
             color = &t->surfaces[scene.target.face < 6 ? scene.target.face : 0];
         }
-        else if (slot.offscreen && !(frame.width == 960 && frame.height == 544))
+        else if (slot.direct)
+        {
+            sync = displaySync;
+            width = 960;
+            height = 544;
+            m_viewScaleX = 960.0f / float(scene.width);
+            m_viewScaleY = 544.0f / float(scene.height);
+        }
+        else if (slot.offscreen)
         {
             color = &slot.offscreen->surfaces[0];
         }
@@ -908,8 +1008,9 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         {
             sync = displaySync;
         }
+        // Scenes whose draws never test depth (filter passes, the HUD) neither load nor store it.
         SceGxmDepthStencilSurface depth;
-        const Depth* d = static_cast<const Depth*>(scene.target.depth);
+        const Depth* d = m_plan[i].depthUsed ? static_cast<const Depth*>(scene.target.depth) : nullptr;
         if (d)
         {
             depth = d->surface;
@@ -917,11 +1018,11 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
                 sceGxmDepthStencilSurfaceSetBackgroundDepth(&depth, scene.clearDepth);
             sceGxmDepthStencilSurfaceSetForceLoadMode(&depth, scene.depthCleared ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED
                                                                                  : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
-            // Stored only when a later scene of the frame continues with this depth.
+            // Stored only when the next scene of the frame using this depth continues with it.
             bool store = false;
-            for (uint32_t j = i + 1; j < frame.sceneCount && !store; ++j)
+            for (uint32_t j = i + 1; j < frame.sceneCount; ++j)
             {
-                if (frame.scenes[j].target.depth == scene.target.depth)
+                if (frame.scenes[j].target.depth == scene.target.depth && m_plan[j].depthUsed)
                 {
                     store = !frame.scenes[j].depthCleared;
                     break;
@@ -936,6 +1037,12 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         sceGxmSetTwoSidedEnable(m_context, SCE_GXM_TWO_SIDED_DISABLED);
         m_lastValid = false;
         m_lastViewport = 0xffff;
+        for (uint32_t c = 0; c < i; ++c)
+        {
+            if (m_plan[c].skipped && m_plan[c].carriedTo == i)
+                for (uint32_t n = 0; n < frame.scenes[c].drawCount; ++n)
+                    draw(frame, frame.draws[frame.scenes[c].firstDraw + n]);
+        }
         for (uint32_t n = 0; n < scene.drawCount; ++n)
             draw(frame, frame.draws[scene.firstDraw + n]);
         const bool last = i + 1 == frame.sceneCount;

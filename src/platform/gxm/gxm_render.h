@@ -89,12 +89,14 @@ public:
     void release(render::BufferStorage* buffer);
 
     // Render thread. Back buffer scenes go to the display surface when the frame's back buffer has the display
-    // size, else to the slot's offscreen target. presentScene(): the caller must add a scene that shows the
-    // frame (the offscreen target scaled, or black when nothing drew the display); that scene then writes the
-    // done notification, else the frame's last scene does.
+    // size, or when stretchDirect (the back buffer fills the display, no gamma) and none of them uses depth;
+    // else to the slot's offscreen target. presentScene(): the caller must add a scene that shows the frame
+    // (the offscreen target scaled, or black when nothing drew the display); that scene then writes the done
+    // notification, else the frame's last scene does. Both hold after drawFrame.
     bool presentScene(const render::Frame& frame) const;
     const SceGxmTexture* offscreen(const render::Frame& frame) const;
-    void drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync);
+    void drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync,
+                   bool stretchDirect);
     SceGxmNotification* doneNotification(const render::Frame& frame);
     uint32_t vblanks(const render::Frame& frame) const;
 
@@ -111,7 +113,16 @@ private:
         bool                            inFlight = false;
         uint32_t                        vblanks = 2;
         Texture*                        offscreen = nullptr;    // back buffer when not the display size
+        bool                            direct = false;         // back buffer scenes drawn to the display
     };
+    // Per scene of the frame being drawn (render thread).
+    struct ScenePlan
+    {
+        bool        depthUsed;      // cleared or tested by a draw
+        bool        skipped;        // only colour clears: drawn at the start of scene carriedTo instead
+        uint32_t    carriedTo;
+    };
+    void planFrame(const render::Frame& frame, bool stretchDirect);
     struct Pending
     {
         int         kind;           // 0 texture, 1 depth, 2 buffer
@@ -170,6 +181,8 @@ private:
     bool                    m_lastValid = false;
     uint32_t                m_lastVertexConstants = 0, m_lastFragmentConstants = 0;
     uint16_t                m_lastViewport = 0xffff;
+    std::vector<ScenePlan>  m_plan;
+    float                   m_viewScaleX = 1.0f, m_viewScaleY = 1.0f;  // back buffer to display, this scene
 };
 
 }}
