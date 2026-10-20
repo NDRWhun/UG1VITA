@@ -96,10 +96,10 @@ SDK (`host_tools/bin/psp2cgc`, `SCE_PSP2_SDK_DIR`) is only needed to change them
 |------|----------|
 | `include/` | virtual x86 CPU (cpu/fpu/mmx), `lib/` runtime headers, `winapi/` shim headers, `platform/` |
 | `src/lib/` | runtime: guest memory, threads, Win32 shims, DirectDraw presentation |
-| `src/platform/` | Vita backend: gxm device and render thread, audio, input, sync, logging; `host/` test harness |
+| `src/platform/` | Vita backend: gxm device and render thread, audio, input, sync, logging |
 | `src/nfsu/` | entry point (+ generated `generated/`) |
 | `shaders/` | Cg programs; `gxp/` holds their compiled binaries |
-| `tools/` | recompiler, generate, build and environment scripts; `host/` harness scripts |
+| `tools/` | recompiler, generate, build and environment scripts |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

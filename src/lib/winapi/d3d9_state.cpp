@@ -1,4 +1,4 @@
-// Fixed-function stage 0 and alpha test resolution of the Direct3D layer: pure functions (unit tested).
+// Fixed-function stage 0 and alpha test resolution of the Direct3D layer: pure functions.
 
 #include <winapi/d3d9_internal.h>
 

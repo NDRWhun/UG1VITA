@@ -2,7 +2,7 @@
 #define PLATFORM_RENDER_H_
 
 // The frame data model between the Direct3D 9 layer (game thread, records) and a device that draws it (the GXM
-// render thread on the Vita, the software rasteriser on the host). Platform neutral.
+// render thread on the Vita). Platform neutral.
 //
 // A Frame is a list of scenes (one render target and depth surface each) and of draw calls. A draw call has a
 // DrawState (compared with memcmp: equal states need no state changes), the vertex and index data it reads, its

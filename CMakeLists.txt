@@ -1,14 +1,7 @@
 # NFSUG1VITA - Need for Speed Underground (static recompilation) -> PS Vita. ELF -> SELF -> VPK.
 cmake_minimum_required(VERSION 3.16)
 
-# -DNFSU_HOST=ON: the Linux (x86-64) test harness instead of the Vita build (cmake/host.cmake).
-option(NFSU_HOST "Build the host test harness" OFF)
 option(NFSU_RUNTIME_CHECK "Only compile the runtime sources that build without the generated code (CI)" OFF)
-if(NFSU_HOST)
-  project(NFSUG1VITA_HOST C CXX)
-  include(cmake/host.cmake)
-  return()
-endif()
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   if(DEFINED ENV{VITASDK})

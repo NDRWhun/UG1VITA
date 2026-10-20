@@ -1,12 +1,9 @@
 # Hand-written runtime sources. The generated game code is globbed separately.
 
-# Direct3D frame model and texture layouts (platform neutral), and the host's software rasteriser.
+# Direct3D frame model and texture layouts (platform neutral).
 set(NFSU_RENDER_SOURCES
   src/platform/render.cpp
   src/platform/texture.cpp
-)
-set(NFSU_RENDER_HOST_SOURCES
-  src/platform/host/raster.cpp
 )
 # Direct3D 9 and D3DX layer.
 set(NFSU_D3D9_SOURCES
@@ -21,6 +18,7 @@ set(NFSU_PLATFORM_SOURCES
   ${NFSU_RENDER_SOURCES}
   src/platform/config.cpp
   src/platform/cores.cpp
+  src/platform/filesystem.cpp
   src/platform/ime.cpp
   src/platform/log.cpp
   src/platform/perf.cpp

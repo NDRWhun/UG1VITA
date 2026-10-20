@@ -1,18 +1,11 @@
 #include <lib/file.h>
+#include <platform/filesystem.h>
 #include <platform/log.h>
-#include <platform/sync.h>
-#include <map>
-#ifdef NFSU_HOST
-#include <sys/statvfs.h>
-#else
-#include <psp2/io/devctl.h>
-#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstring>
@@ -83,65 +76,6 @@ static std::string absoluteGuestPath(const std::string& path)
 
 static std::string normalizePath(const std::string& input);
 
-#ifdef NFSU_HOST
-// The game writes names in upper case while the install mixes cases (docs/re/files.md section 8). The Vita file
-// system ignores case; a Linux host does not, so each component of the lower-cased path is matched against the
-// directory's entries without case. A component with no match stays lower case (a file about to be created).
-// Directory listings are cached and read again when a name is not found in them.
-static pf::LwMutex s_caseMutex("file_case");
-static std::map<std::string, std::map<std::string, std::string>> s_directoryNames;
-
-static bool readDirectory(const std::string& directory, std::map<std::string, std::string>& names)
-{
-    names.clear();
-    DIR* d = opendir(directory.empty() ? "." : directory.c_str());
-    if (!d)
-        return false;
-    while (struct dirent* entry = readdir(d))
-    {
-        std::string lower = entry->d_name;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        names[lower] = entry->d_name;
-    }
-    closedir(d);
-    return true;
-}
-
-static std::string resolveCase(const std::string& root, const std::string& path)
-{
-    pf::LwLockGuard guard(s_caseMutex);
-    std::string resolved;
-    size_t start = 0;
-    while (start <= path.size())
-    {
-        size_t end = path.find('/', start);
-        if (end == std::string::npos)
-            end = path.size();
-        const std::string part = path.substr(start, end - start);
-        if (!part.empty())
-        {
-            const std::string directory = root + resolved;
-            std::map<std::string, std::string>& names = s_directoryNames[directory];
-            auto it = names.find(part);
-            if (it == names.end() && readDirectory(directory, names))
-                it = names.find(part);
-            resolved += it != names.end() ? it->second : part;
-        }
-        if (end < path.size())
-            resolved += '/';
-        start = end + 1;
-    }
-    return resolved;
-}
-#else
-// The Vita file system ignores case: the lower-cased path is found as it is.
-static std::string resolveCase(const std::string& root, const std::string& path)
-{
-    RC_USE(root);
-    return path;
-}
-#endif
-
 // Guest path -> host path. Drive-letter paths land in the data (or CD) directory; only the guest part is normalised,
 // so the data directory keeps its case.
 static std::string moveToRoot(const std::string& path)
@@ -159,7 +93,7 @@ static std::string moveToRoot(const std::string& path)
     while (!rest.empty() && isSeparator(rest[0]))
         rest.erase(0, 1);
     const std::string& root = (toupper(full[0]) == 'D') ? s_cdDirectory : s_dataDirectory;
-    return root + resolveCase(root, normalizePath(rest));
+    return root + pf::resolveCase(root, normalizePath(rest));
 }
 
 // Lower-cases, converts separators and collapses repeats; the Vita filesystem is case-insensitive.
@@ -473,24 +407,7 @@ void File::setCdDirectory(const char* path)
 
 bool File::diskSpace(x86::reg64* total, x86::reg64* free)
 {
-#ifdef NFSU_HOST
-    struct statvfs volume;
-    if (statvfs(s_dataDirectory.c_str(), &volume) != 0)
-        return false;
-    *total = x86::reg64(volume.f_blocks) * volume.f_frsize;
-    *free = x86::reg64(volume.f_bavail) * volume.f_frsize;
-    return true;
-#else
-    // The device of the data folder ("ux0:"), queried with devctl 0x3001.
-    SceIoDevInfo info;
-    memset(&info, 0, sizeof(info));
-    const std::string device = s_dataDirectory.substr(0, s_dataDirectory.find(':') + 1);
-    if (sceIoDevctl(device.c_str(), 0x3001, nullptr, 0, &info, sizeof(info)) < 0)
-        return false;
-    *total = x86::reg64(info.max_size);
-    *free = x86::reg64(info.free_size);
-    return true;
-#endif
+    return pf::diskSpace(s_dataDirectory, total, free);
 }
 
 std::string File::hostPath(const char* path)
