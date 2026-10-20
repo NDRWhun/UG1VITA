@@ -147,6 +147,17 @@ bool characterKey(char c, KeyCode* key, bool* shift)
 
 // ---- Joystick ----
 
+uint32_t buttonMask(Input input)
+{
+    uint32_t mask = 0;
+    for (const ButtonMapping& mapping : s_buttons)
+    {
+        if (mapping.input == input)
+            mask |= uint32_t(1) << mapping.button;
+    }
+    return mask;
+}
+
 // The adapter's four axes: X, Y (left stick), Z (combined pedal, held centred) and Rz (right stick Y).
 bool axisPresent(Axis axis)
 {
