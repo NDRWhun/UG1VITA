@@ -31,6 +31,7 @@ set(NFSU_PLATFORM_SOURCES
   src/platform/mmx_selftest.cpp
   src/platform/fpu_selftest.cpp
   src/platform/gxm/gxm_device.cpp
+  src/platform/gxm/gxm_render.cpp
 )
 
 set(NFSU_LIB_SOURCES

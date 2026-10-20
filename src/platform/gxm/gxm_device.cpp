@@ -5,6 +5,7 @@
 #include <platform/log.h>
 #include <platform/perf.h>
 #include <platform/sync.h>
+#include "gxm_render.h"
 #include <psp2/gxm.h>
 #include <psp2/display.h>
 #include <psp2/kernel/sysmem.h>
@@ -267,6 +268,12 @@ struct Device::Impl
     Rect                    layerValid = {};            // valid area of the front image of the current window
     std::atomic<uint32_t>   gammaBits{0x3f800000};      // float
 
+    // Direct3D frames: recorded on the game thread, queued (at most one per slot) for the render thread.
+    FrameRenderer           frames;
+    render::Frame*          frameJobs[FrameRenderer::Slots] = {};
+    uint32_t                frameJobFirst = 0, frameJobCount = 0;
+    bool                    frameShown = false;         // the display shows a Direct3D frame, not the layer
+
     // Render thread
     Thread*                 thread = nullptr;
     volatile bool           running = false;
@@ -282,6 +289,8 @@ struct Device::Impl
     static int threadEntry(void* self);
     void run();
     void present(const Present& image, uint32_t frameIndex);
+    void presentFrame(const render::Frame& frame, uint32_t frameIndex);
+    void blitPrograms();
     int  updateLayer(uint32_t width, uint32_t height);
     void drawQuad(const Rect& display, float u0, float v0, float u1, float v1, const SceGxmTexture* texture,
                   bool textured);
@@ -509,11 +518,12 @@ void Device::Impl::run()
     {
         Present image;
         bool queued = false;
+        render::Frame* frame = nullptr;
         {
             LockGuard guard(jobLock);
-            while (running && !pending)
+            while (running && !pending && !frameJobCount)
             {
-                if (ime::pending())
+                if (ime::pending() && !frameShown)
                 {
                     // A system dialog needs frames even while the game presents none.
                     if (!jobReady.waitFor(DialogRefreshMs) && !pending)
@@ -526,14 +536,30 @@ void Device::Impl::run()
             }
             if (!running)
                 break;
-            queued = pending;
-            image = queued ? pendingPresent : shown;
-            pending = false;
+            if (frameJobCount)
+            {
+                // Direct3D frames first, in order; a layer present waits for them.
+                frame = frameJobs[frameJobFirst];
+                frameJobFirst = (frameJobFirst + 1) % FrameRenderer::Slots;
+                --frameJobCount;
+                queued = true;
+            }
+            else
+            {
+                if (!running)
+                    break;
+                queued = pending;
+                image = queued ? pendingPresent : shown;
+                pending = false;
+            }
         }
 
         const bool timed = perf::enabled() && queued;
         const uint32_t start = timed ? perf::now() : 0;
-        present(image, queued ? ++presentIndex : 0);
+        if (frame)
+            presentFrame(*frame, ++presentIndex);
+        else
+            present(image, queued ? ++presentIndex : 0);
         if (timed)
         {
             perf::add(perf::Render, perf::now() - start);
@@ -593,6 +619,7 @@ int Device::Impl::updateLayer(uint32_t width, uint32_t height)
 // Shows the valid area of the front image in its window rectangle, through the gamma table; the rest is black.
 void Device::Impl::present(const Present& image, uint32_t frameIndex)
 {
+    frameShown = false;
     const bool showLayer = !image.area.empty() && image.width && image.height;
     const int layerBuffer = showLayer ? updateLayer(image.width, image.height) : -1;
     const Rect box = Device::windowRect(image.width, image.height);
@@ -675,6 +702,62 @@ void Device::Impl::present(const Present& image, uint32_t frameIndex)
     queueDisplay(1, frameIndex);
 }
 
+void Device::Impl::blitPrograms()
+{
+    sceGxmSetVertexProgram(context, blitV);
+    sceGxmSetFragmentProgram(context, blitF);
+    uint32_t bits = gammaBits.load();
+    float gamma;
+    memcpy(&gamma, &bits, sizeof(gamma));
+    const float invGamma = gamma > 0.0f ? 1.0f / gamma : 1.0f;
+    void* uniforms = nullptr;
+    sceGxmReserveFragmentDefaultUniformBuffer(context, &uniforms);
+    sceGxmSetUniformDataF(uniforms, blitGammaParam, 0, 1, &invGamma);
+}
+
+// A Direct3D frame: its scenes, then (for another back buffer size, or when nothing drew the back buffer) a scene
+// that shows the offscreen back buffer in its window rectangle or black.
+void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
+{
+    frameShown = true;
+    frames.drawFrame(frame, &displaySurface[backBuffer], displaySync[backBuffer]);
+    if (frames.presentScene(frame))
+    {
+        const SceGxmTexture* offscreen = frames.offscreen(frame);
+        sceGxmBeginScene(context, 0, displayTarget, nullptr, nullptr, displaySync[backBuffer], &displaySurface[backBuffer],
+                         nullptr);
+        sceGxmSetViewportEnable(context, SCE_GXM_VIEWPORT_ENABLED);
+        sceGxmSetViewport(context, 0.5f * DisplayWidth, 0.5f * DisplayWidth, 0.5f * DisplayHeight, -0.5f * DisplayHeight,
+                          0.0f, 1.0f);
+        sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_NONE, 0, 0, DisplayWidth - 1, DisplayHeight - 1);
+        sceGxmSetCullMode(context, SCE_GXM_CULL_NONE);
+        sceGxmSetFrontDepthFunc(context, SCE_GXM_DEPTH_FUNC_ALWAYS);
+        sceGxmSetFrontDepthWriteEnable(context, SCE_GXM_DEPTH_WRITE_DISABLED);
+        static const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        sceGxmSetVertexProgram(context, clearV);
+        sceGxmSetFragmentProgram(context, clearF);
+        void* uniforms = nullptr;
+        sceGxmReserveFragmentDefaultUniformBuffer(context, &uniforms);
+        sceGxmSetUniformDataF(uniforms, clearColorParam, 0, 4, black);
+        drawQuad(Rect{ 0, 0, DisplayWidth, DisplayHeight }, 0, 0, 0, 0, nullptr, false);
+        if (offscreen)
+        {
+            blitPrograms();
+            SceGxmTexture texture = *offscreen;
+            sceGxmTextureSetMinFilter(&texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
+            sceGxmTextureSetMagFilter(&texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
+            drawQuad(Device::windowRect(frame.width, frame.height), 0, 0, 1, 1, &texture, true);
+        }
+        sceGxmEndScene(context, nullptr, frames.doneNotification(frame));
+    }
+    if (perf::enabled())
+        endSceneTime = perf::now();
+    shown = Present{};
+    if (ime::prepareFrame())
+        ime::drawFrame(displayData[backBuffer], DisplayWidth, DisplayHeight, DisplayStride, displaySync[backBuffer]);
+    queueDisplay(frames.vblanks(frame), frameIndex);
+}
+
 void Device::Impl::queueDisplay(uint32_t vblanks, uint32_t frameIndex)
 {
     sceGxmPadHeartbeat(&displaySurface[backBuffer], displaySync[backBuffer]);
@@ -716,7 +799,8 @@ bool Device::init()
     if (m_impl)
         return true;
     m_impl = new Impl();
-    if (!m_impl->initCore() || !m_impl->initSurfaces() || !m_impl->initPrograms() || !m_impl->initBuffers())
+    if (!m_impl->initCore() || !m_impl->initSurfaces() || !m_impl->initPrograms() || !m_impl->initBuffers()
+        || !m_impl->frames.init(m_impl->context, m_impl->patcher, sceGxmGetNotificationRegion()))
     {
         shutdown();
         return false;
@@ -754,6 +838,7 @@ void Device::shutdown()
     }
     if (impl.patcher)
     {
+        impl.frames.shutdown();
         if (impl.blitV) sceGxmShaderPatcherReleaseVertexProgram(impl.patcher, impl.blitV);
         if (impl.blitF) sceGxmShaderPatcherReleaseFragmentProgram(impl.patcher, impl.blitF);
         if (impl.clearV) sceGxmShaderPatcherReleaseVertexProgram(impl.patcher, impl.clearV);
@@ -842,6 +927,76 @@ Rect Device::windowRect(uint32_t width, uint32_t height)
     const int w = int(DisplayHeight * width / height) & ~1;
     const int x = (DisplayWidth - w) / 2;
     return Rect{ x, 0, x + w, DisplayHeight };
+}
+
+// ---- Direct3D frames -----------------------------------------------------------------------------------------------
+
+render::Frame* Device::beginFrame(uint32_t width, uint32_t height)
+{
+    return m_impl->frames.beginFrame(width, height);
+}
+
+void Device::submitFrame(render::Frame* frame, uint32_t vblanks)
+{
+    Impl& impl = *m_impl;
+    impl.frames.submitted(frame, vblanks);
+    LockGuard guard(impl.jobLock);
+    // beginFrame waited for the slot, so the queue has room.
+    impl.frameJobs[(impl.frameJobFirst + impl.frameJobCount) % FrameRenderer::Slots] = frame;
+    ++impl.frameJobCount;
+    impl.jobReady.signal();
+}
+
+uint32_t Device::completedFrame()
+{
+    return m_impl->frames.completedFrame();
+}
+
+render::TextureStorage* Device::createTexture(const render::TextureDesc& desc)
+{
+    return m_impl->frames.createTexture(desc);
+}
+
+void Device::writeTexture(render::TextureStorage* texture, uint32_t face, uint32_t level, const void* data,
+                          uint32_t pitch)
+{
+    m_impl->frames.writeTexture(texture, face, level, data, pitch);
+}
+
+void Device::readTexture(const render::TextureStorage* texture, uint32_t face, uint32_t level, void* data,
+                         uint32_t pitch)
+{
+    m_impl->frames.readTexture(texture, face, level, data, pitch);
+}
+
+void Device::copyTexture(render::TextureStorage* to, const render::TextureStorage* from)
+{
+    m_impl->frames.copyTexture(to, from);
+}
+
+render::DepthStorage* Device::createDepth(uint32_t width, uint32_t height)
+{
+    return m_impl->frames.createDepth(width, height);
+}
+
+render::BufferStorage* Device::createBuffer(uint32_t size)
+{
+    return m_impl->frames.createBuffer(size);
+}
+
+void Device::release(render::TextureStorage* texture)
+{
+    m_impl->frames.release(texture);
+}
+
+void Device::release(render::DepthStorage* depth)
+{
+    m_impl->frames.release(depth);
+}
+
+void Device::release(render::BufferStorage* buffer)
+{
+    m_impl->frames.release(buffer);
 }
 
 }}
