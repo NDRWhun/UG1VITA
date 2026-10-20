@@ -195,7 +195,7 @@ static void padPollHook(x86::reg32* buttons, int* pov)
 
 int main(int, char**)
 {
-    scePowerSetArmClockFrequency(444);
+    scePowerSetArmClockFrequency(500);
     scePowerSetBusClockFrequency(222);
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
