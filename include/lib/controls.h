@@ -61,6 +61,9 @@ enum Axis
     AxisCount
 };
 
+// DirectInput button bits an input reports (0 for none).
+uint32_t buttonMask(Input input);
+
 bool axisPresent(Axis axis);
 x86::reg32 presentAxisCount();
 x86::reg32 joystickButtonCount();

@@ -85,11 +85,13 @@ public:
     // by the message loop, at each presented frame and at each poll. Any thread.
     static void updateKeys();
 
-    // A text field of the game is being edited and shows text (ASCII; any thread). The first call of a field opens
-    // the on-screen keyboard with that text. Confirmed text is typed (letters, digits and space, or only letters
-    // and space with lettersOnly; at most maxLength) and ends with Enter; a cancel presses Escape. The game's fields
-    // replace their shown text with the first character typed.
-    static void editText(const char* title, const char* text, uint32_t maxLength, bool lettersOnly);
+    // A text field of the game is being edited and holds text (ASCII; any thread; called again while it lasts). The
+    // first call of a field opens the on-screen keyboard with that text. Confirmed text replaces the field's (End,
+    // one Backspace per character, then letters, digits and extraChars, at most maxLength) and ends with Enter. A
+    // cancel, or Circle while the keyboard is closed, types Escape when the field is cancellable, else empties the
+    // field and types Enter. Cross while the keyboard is closed opens it again.
+    static void editText(const char* title, const char* text, uint32_t maxLength, const char* extraChars,
+                         bool cancellable);
     // The field is no longer edited: a keyboard still open for it closes without typing.
     static void endTextEdit();
 

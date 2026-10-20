@@ -5,6 +5,7 @@
 #include <platform/sync.h>
 #include <platform/time.h>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 
@@ -34,9 +35,18 @@ struct Field
     bool        shown;          // the keyboard was opened for it
     char16_t    title[pf::ime::MaxTitleLength + 1];
     char16_t    text[pf::ime::MaxTextLength + 1];
+    uint32_t    length;         // characters in text
     uint32_t    maxLength;
-    bool        lettersOnly;
+    char        extraChars[64]; // accepted besides letters and digits
+    bool        cancellable;    // Escape cancels it
 };
+
+// Characters the game's line editor takes as commands (docs/re/input.md section 6).
+const char CharBackspace = 0x08;
+const char CharEnter = 0x0D;
+const char CharEscape = 0x1B;
+// End moves the line editor's cursor behind the text.
+const controls::KeyCode KeyEnd = { 0x23, 0x4F, true };
 
 // The pump runs on the message thread, at frames and in polls; s_mutex guards everything below.
 pf::LwMutex             s_mutex("input");
@@ -46,6 +56,7 @@ uint32_t                s_keysDown;         // controls::Key bits posted down
 bool                    s_imeOpen;          // on-screen keyboard requested or shown
 bool                    s_imeForField;      // ... for s_field
 bool                    s_releaseWait;      // after the keyboard and its typing, until the pad is released
+uint32_t                s_padInputs;        // inputs of the last pump
 Field                   s_field;
 std::deque<TypedKey>    s_typing;           // key messages of confirmed text not posted yet
 uint64_t                s_typedUs;          // when the last one was posted
@@ -94,15 +105,27 @@ void queueChar(char character)
     s_typing.push_back(TypedKey{ controls::KeyCode{ 0, 0, false }, false, character });
 }
 
-// Types confirmed text as one WM_CHAR per character (the game's line editor reads only WM_CHAR), at most maxLength
-// characters, and ends it with a carriage return, which commits the field.
-void queueText(const char* text, uint32_t maxLength, bool lettersOnly)
+// Empties s_field: cursor to the end, then one Backspace per character.
+void queueClear()
 {
+    queueKey(KeyEnd);
+    for (uint32_t i = 0; i < s_field.length; ++i)
+        queueChar(CharBackspace);
+}
+
+// Types confirmed text as one WM_CHAR per character (the game's line editor reads only WM_CHAR), at most maxLength
+// characters, and ends it with a carriage return, which commits the field. Into a field it replaces the field's text
+// and keeps only the characters the field takes.
+void queueText(const char* text, uint32_t maxLength, bool field)
+{
+    if (field)
+        queueClear();
     uint32_t typed = 0;
     for (const char* c = text; *c && typed < maxLength; ++c)
     {
-        const bool letter = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z');
-        const bool allowed = x86::reg8(*c) >= 0x20 && x86::reg8(*c) < 0x7f && (!lettersOnly || letter || *c == ' ');
+        const bool alphanumeric = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9');
+        const bool printable = x86::reg8(*c) >= 0x20 && x86::reg8(*c) < 0x7f;
+        const bool allowed = printable && (!field || alphanumeric || strchr(s_field.extraChars, *c));
         if (!allowed)
         {
             pf::logInfo("input: '%c' cannot be typed", *c);
@@ -111,7 +134,20 @@ void queueText(const char* text, uint32_t maxLength, bool lettersOnly)
         queueChar(*c);
         ++typed;
     }
-    queueChar('\r');
+    queueChar(CharEnter);
+}
+
+// The game cancels a field on Escape. A field that refuses that is emptied and committed instead, which the game
+// treats as no text entered.
+void queueCancel()
+{
+    if (s_field.cancellable)
+    {
+        queueChar(CharEscape);
+        return;
+    }
+    queueClear();
+    queueChar(CharEnter);
 }
 
 void openIme(bool forField)
@@ -135,9 +171,9 @@ void updateIme()
     if (field && !s_field.active)
         return;     // the field closed meanwhile
     if (result == pf::ime::ResultConfirmed)
-        queueText(text, field ? s_field.maxLength : TextLength, field && s_field.lettersOnly);
+        queueText(text, field ? s_field.maxLength : TextLength, field);
     else if (result == pf::ime::ResultCancelled && field)
-        queueKey(controls::keyCode(controls::KeyEscape));
+        queueCancel();
 }
 
 void typeNext(uint64_t now)
@@ -160,10 +196,14 @@ void typeNext(uint64_t now)
 
 // Under s_mutex. While the on-screen keyboard is up or its text is being typed, and until every pad input is
 // released after that (a button that closed the keyboard does not reach the game), the pad holds no keys or buttons.
+// While a field is edited with the keyboard closed, Cross opens it and Circle cancels the field; neither reaches the
+// game then.
 void pump()
 {
     const uint64_t now = pf::ticksUs();
     const controls::PadSample pad = controls::readPad();
+    const uint32_t pressed = pad.inputs & ~s_padInputs;
+    s_padInputs = pad.inputs;
     controls::State state = s_mapper.update(pad, now);
     if (s_imeOpen || !s_typing.empty())
         s_releaseWait = true;
@@ -179,6 +219,16 @@ void pump()
     {
         openIme(s_field.active);
     }
+    else if (!busy && s_field.active && (pressed & controls::bit(controls::Circle)))
+    {
+        queueCancel();
+    }
+    else if (!busy && s_field.active && (pressed & controls::bit(controls::Cross)))
+    {
+        openIme(true);
+    }
+    if (s_field.active)
+        state.buttons &= ~(controls::buttonMask(controls::Circle) | controls::buttonMask(controls::Cross));
     if (busy)
     {
         state.buttons = 0;
@@ -341,19 +391,23 @@ void Gamepad::updateKeys()
     pump();
 }
 
-void Gamepad::editText(const char* title, const char* text, uint32_t maxLength, bool lettersOnly)
+void Gamepad::editText(const char* title, const char* text, uint32_t maxLength, const char* extraChars,
+                       bool cancellable)
 {
     pf::LwLockGuard lock(s_mutex);
     if (!s_field.active)
     {
         s_field.active = true;
         s_field.shown = false;
-        pf::logInfo("input: text field \"%s\" (%u characters)", text, unsigned(maxLength));
+        pf::logInfo("input: text field \"%s\" \"%s\" (%u characters, also \"%s\"%s)", title, text, unsigned(maxLength),
+                    extraChars, cancellable ? "" : ", no cancel");
     }
     copyText(s_field.title, title, pf::ime::MaxTitleLength);
     copyText(s_field.text, text, pf::ime::MaxTextLength);
+    s_field.length = uint32_t(strnlen(text, pf::ime::MaxTextLength));
     s_field.maxLength = maxLength;
-    s_field.lettersOnly = lettersOnly;
+    snprintf(s_field.extraChars, sizeof(s_field.extraChars), "%s", extraChars);
+    s_field.cancellable = cancellable;
 }
 
 void Gamepad::endTextEdit()
