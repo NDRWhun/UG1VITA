@@ -210,6 +210,12 @@ int AudioDevice::threadEntry(void* self)
 // buffers' play cursors advance in real time.
 void AudioDevice::run()
 {
+    // perf_log: output level and playing buffers about every 5 s.
+    const bool levels = pf::perf::enabled();
+    x86::reg32 levelFrames = 0;
+    x86::reg32 peak = 0;
+    double squares = 0.0;
+    x86::reg32 clipped = 0;
     while (m_running)
     {
         const x86::reg32 wanted = portRate(m_requestedRate.load());
@@ -231,6 +237,33 @@ void AudioDevice::run()
         {
             x86::sreg32 v = m_accumulator[i];
             m_output[i] = x86::sreg16(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+        }
+        if (levels)
+        {
+            size_t playing;
+            {
+                pf::LockGuard guard(m_mutex);
+                playing = m_playingBuffers.size();
+            }
+            for (x86::reg32 i = 0; i < samples; ++i)
+            {
+                const x86::sreg32 v = m_accumulator[i];
+                const x86::reg32 magnitude = x86::reg32(v < 0 ? -v : v);
+                peak = std::max(peak, magnitude);
+                squares += double(v) * double(v);
+                clipped += magnitude > 32767;
+            }
+            levelFrames += m_grain;
+            if (levelFrames >= m_rate * 5)
+            {
+                pf::logInfo("audio: peak %u rms %.0f clipped %u over %u frames, %u buffers playing", peak,
+                            std::sqrt(squares / (double(levelFrames) * s_channelCount)), clipped, levelFrames,
+                            unsigned(playing));
+                levelFrames = 0;
+                peak = 0;
+                squares = 0.0;
+                clipped = 0;
+            }
         }
         sceAudioOutOutput(m_port, m_output);
     }

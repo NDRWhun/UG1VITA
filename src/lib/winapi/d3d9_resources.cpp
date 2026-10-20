@@ -46,13 +46,19 @@ Texture::Texture(Device* device, const render::TextureDesc& desc, DWORD format, 
     m_locks.assign(count, nullptr);
     m_lockFlags.assign(count, 0);
     m_written.assign(count, false);
+    m_lockCounts.assign(count, 0);
+    m_shadows.assign(count, nullptr);
     m_surfaces.assign(count, nullptr);
 }
 
 Texture::~Texture()
 {
-    for (MemMap* lock : m_locks)
-        delete lock;
+    for (size_t i = 0; i < m_locks.size(); ++i)
+    {
+        if (m_locks[i] != m_shadows[i])
+            delete m_locks[i];
+        delete m_shadows[i];
+    }
     for (Surface* surface : m_surfaces)
         delete surface;
     if (m_storage)
@@ -184,10 +190,17 @@ HRESULT Texture::lock(uint32_t face, uint32_t level, D3DLOCKED_RECT* locked, con
     const texture::Format format = m_desc.format;
     const uint32_t bytes = texture::levelBytes(format, m_desc.width, m_desc.height, level);
     const uint32_t pitch = texture::levelPitch(format, m_desc.width, level);
-    MemMap* memory = new MemMap(bytes);
-    void* data = host(memory->getBlockStart());
-    if (m_written[index] && !(flags & D3DLOCK_DISCARD))
-        gpu().readTexture(m_storage, face, level, data, pitch);
+    // A level locked again keeps its linear copy: only locks write textures, so it equals the GPU copy and the
+    // lock needs no read back (no unswizzle).
+    MemMap* memory = m_shadows[index];
+    if (!memory)
+    {
+        memory = new MemMap(bytes);
+        if (m_written[index] && !(flags & D3DLOCK_DISCARD))
+            gpu().readTexture(m_storage, face, level, host(memory->getBlockStart()), pitch);
+    }
+    if (m_lockCounts[index] < 2)
+        ++m_lockCounts[index];
     m_locks[index] = memory;
     m_lockFlags[index] = flags;
     x86::reg32 bits = memory->getBlockStart();
@@ -211,13 +224,29 @@ HRESULT Texture::unlock(uint32_t face, uint32_t level)
         return D3DERR_INVALIDCALL;
     if (!(m_lockFlags[index] & D3DLOCK_READONLY))
     {
-        if (gpu().busy(*m_storage))
+        const bool powerOfTwo = !(m_desc.width & (m_desc.width - 1)) && !(m_desc.height & (m_desc.height - 1));
+        if (m_lockCounts[index] >= 2 && !m_desc.linear && m_locks.size() == 1 && !m_desc.target
+            && !texture::isBlock(m_desc.format) && powerOfTwo)
         {
-            // Frames in flight still read this copy: continue in a new one.
+            // Rewritten over and over: continue in linear storage, written with a row copy instead of a swizzle.
+            render::TextureDesc desc = m_desc;
+            desc.linear = true;
+            if (render::TextureStorage* streamed = gpu().createTexture(desc))
+            {
+                gpu().release(m_storage);
+                m_storage = streamed;
+                m_desc = desc;
+            }
+        }
+        else if (gpu().busy(*m_storage))
+        {
+            // Frames in flight still read this copy: continue in a new one. A single level is rewritten whole
+            // just below, so only textures with more levels or faces copy the old contents.
             render::TextureStorage* fresh = gpu().createTexture(m_desc);
             if (fresh)
             {
-                gpu().copyTexture(fresh, m_storage);
+                if (m_locks.size() > 1)
+                    gpu().copyTexture(fresh, m_storage);
                 gpu().release(m_storage);
                 m_storage = fresh;
             }
@@ -226,7 +255,10 @@ HRESULT Texture::unlock(uint32_t face, uint32_t level)
                            texture::levelPitch(m_desc.format, m_desc.width, level));
         m_written[index] = true;
     }
-    delete memory;
+    if (m_lockCounts[index] >= 2)
+        m_shadows[index] = memory;
+    else
+        delete memory;
     m_locks[index] = nullptr;
     return D3D_OK;
 }

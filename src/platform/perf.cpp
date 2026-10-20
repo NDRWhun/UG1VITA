@@ -153,6 +153,9 @@ void init(bool enabled)
             sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId()),
             scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
             scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
+    // A profiler maps sampled PCs to the ELF with this (load address minus the symbol's ELF address).
+    if (enabled)
+        logInfo("perf: pf::perf::init at %p", reinterpret_cast<void*>(&init));
 }
 
 uint32_t now()
