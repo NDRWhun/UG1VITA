@@ -19,6 +19,7 @@ enum DirectSoundResult : HRESULT
 
 class IDirectSoundBuffer;
 struct WAVEFORMATEX;
+// DirectX 7 layout (36 bytes); DSBUFFERDESC1 of DirectX 6 and earlier ends before guid3DAlgorithm (20 bytes).
 struct DSBUFFERDESC
 {
     DWORD dwSize;
@@ -26,7 +27,10 @@ struct DSBUFFERDESC
     DWORD dwBufferBytes;
     DWORD dwReserved;
     Packed<WAVEFORMATEX> lpwfxFormat;
-    //GUID guid3DAlgorithm;
+    DWORD guid3DAlgorithm[4];
+
+    static const DWORD Size1 = 20;
+    bool validSize() const { return dwSize == sizeof(DSBUFFERDESC) || dwSize == Size1; }
 };
 
 struct DSCAPS;
