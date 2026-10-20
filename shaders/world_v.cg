@@ -1,0 +1,16 @@
+// world effect: diffuse texture with a texture offset, vertex colour.
+
+void main(
+    float3 aPosition,
+    float4 aColor,
+    float2 aTex0,
+    uniform float4 uWvp[4],
+    uniform float4 uTextureOffset,
+    float4 out vPosition : POSITION,
+    float4 out vColor : COLOR0,
+    float2 out vTex0 : TEXCOORD0)
+{
+    vPosition = aPosition.x * uWvp[0] + aPosition.y * uWvp[1] + aPosition.z * uWvp[2] + uWvp[3];
+    vColor = aColor.zyxw;
+    vTex0 = aTex0 + uTextureOffset.xy;
+}

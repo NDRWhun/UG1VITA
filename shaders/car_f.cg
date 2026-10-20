@@ -1,0 +1,24 @@
+// car effect: diffuse texture * lighting, plus specular and the cube map weighted by the diffuse alpha.
+
+float4 main(
+    float4 vDiffuse : COLOR0,
+    float4 vSpecular : COLOR1,
+    float2 vTex0 : TEXCOORD0,
+    float3 vTex1 : TEXCOORD1,
+    uniform sampler2D uTex0,
+    uniform samplerCUBE uTex1,
+    uniform float4 uEnvmapMin,
+    uniform float4 uEnvmapRange,
+    uniform float4 uAlphaTest) : COLOR
+{
+    float4 d = tex2D(uTex0, vTex0) * vDiffuse;
+    float4 e = texCUBE(uTex1, vTex1);
+    float3 envmap = e.rgb * (2.0 * (uEnvmapMin.rgb + vSpecular.w * uEnvmapRange.rgb));
+    float4 c = 2.0 * d;
+    c.rgb += 2.0 * d.a * (vSpecular.rgb + 2.0 * envmap);
+#ifdef ATEST
+    if (uAlphaTest.x * saturate(c.a) < uAlphaTest.y)
+        discard;
+#endif
+    return c;
+}

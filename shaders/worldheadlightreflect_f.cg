@@ -1,0 +1,26 @@
+// worldheadlightreflect effect: the headlight-lit texture * 2 plus the reflection; opaque.
+
+float4 main(
+    float4 vColor : COLOR0,
+    float2 vTex0 : TEXCOORD0,
+    float4 vTex1 : TEXCOORD1,
+    float3 vTex2 : TEXCOORD2,
+    uniform sampler2D uTex0,
+    uniform sampler2D uTex1,
+    uniform sampler2D uTex2,
+    uniform sampler2D uTex3,
+    uniform float4 uHeadlightColor,
+    uniform float4 uAlphaTest) : COLOR
+{
+    float4 t = tex2D(uTex0, vTex0);
+    float4 h = tex2Dproj(uTex1, vTex1.xyz);
+    float4 k = tex2D(uTex2, float2(vTex1.w, 0.0));
+    float4 r = tex2Dproj(uTex3, vTex2);
+    float3 diffuse = (h.rgb * k.rgb * uHeadlightColor.rgb + vColor.rgb) * t.rgb;
+    float4 c = float4(diffuse * 2.0 + t.a * vColor.a * r.rgb, 1.0);
+#ifdef ATEST
+    if (uAlphaTest.x < uAlphaTest.y)
+        discard;
+#endif
+    return c;
+}

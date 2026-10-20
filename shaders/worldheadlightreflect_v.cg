@@ -1,0 +1,24 @@
+// worldheadlightreflect effect: headlight and planar reflection.
+
+void main(
+    float3 aPosition,
+    float4 aColor,
+    float2 aTex0,
+    uniform float4 uWvp[4],
+    uniform float4 uHeadlightWvp[4],
+    float4 out vPosition : POSITION,
+    float4 out vColor : COLOR0,
+    float2 out vTex0 : TEXCOORD0,
+    float4 out vTex1 : TEXCOORD1,
+    float3 out vTex2 : TEXCOORD2)
+{
+    float4 p = aPosition.x * uWvp[0] + aPosition.y * uWvp[1] + aPosition.z * uWvp[2] + uWvp[3];
+    float4 tp = aPosition.x * uHeadlightWvp[0] + aPosition.y * uHeadlightWvp[1] + aPosition.z * uHeadlightWvp[2]
+              + uHeadlightWvp[3];
+    vPosition = p;
+    vColor = aColor.zyxw;
+    vTex0 = aTex0;
+    // xyw: projected headlight coordinates; w: depth fade coordinate.
+    vTex1 = float4(tp.xyw, tp.w * 0.005 + 0.5);
+    vTex2 = float3((p.x + p.w) * 0.5, (p.w - p.y) * 0.5, p.w);
+}

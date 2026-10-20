@@ -1,0 +1,30 @@
+// filter effect: weighted sum of TAPS (1..4) texture samples.
+
+float4 main(
+    float2 vTex0 : TEXCOORD0,
+    float2 vTex1 : TEXCOORD1,
+    float2 vTex2 : TEXCOORD2,
+    float2 vTex3 : TEXCOORD3,
+    uniform sampler2D uTex0,
+    uniform sampler2D uTex1,
+    uniform sampler2D uTex2,
+    uniform sampler2D uTex3,
+    uniform float4 uWeights[4],
+    uniform float4 uAlphaTest) : COLOR
+{
+    float4 c = tex2D(uTex0, vTex0) * uWeights[0];
+#if TAPS > 1
+    c += tex2D(uTex1, vTex1) * uWeights[1];
+#endif
+#if TAPS > 2
+    c += tex2D(uTex2, vTex2) * uWeights[2];
+#endif
+#if TAPS > 3
+    c += tex2D(uTex3, vTex3) * uWeights[3];
+#endif
+#ifdef ATEST
+    if (uAlphaTest.x * saturate(c.a) < uAlphaTest.y)
+        discard;
+#endif
+    return c;
+}
