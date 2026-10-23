@@ -490,7 +490,7 @@ struct Stream
     void grow(uint32_t words);
 };
 
-// The stream of a frame index; game thread. Waits for nothing: the frame slots keep it free.
+// The stream of a frame index, emptied; game thread.
 Stream& frameStream(uint32_t frameIndex);
 // Render thread: completes the draws of a frame from its stream (Frame::resolve).
 void resolveFrame(render::Frame& frame);

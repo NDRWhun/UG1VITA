@@ -731,7 +731,7 @@ render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height
     Depth* d = new Depth();
     d->width = uint16_t(width);
     d->height = uint16_t(height);
-    // No stencil plane: the layer never enables the stencil test, so it would only be loaded and stored.
+    // Depth plane only, no stencil plane.
     d->data = m_textureHeap->allocate(w * h * 4, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
     d->stencil = nullptr;
     if (!d->data)
@@ -927,7 +927,7 @@ void FrameRenderer::preparePrograms(const render::Frame& frame)
             m_programs[i] = DrawPrograms{ nullptr, nullptr };
             continue;
         }
-        // Consecutive draws mostly share their programs.
+        // Programs looked up where the state differs from the previous draw's.
         if (!previous || s.vertexProgram != previous->vertexProgram || s.layout != previous->layout)
             last.vertex = vertexProgram(s.vertexProgram, s.layout);
         if (!previous || s.vertexProgram != previous->vertexProgram || s.fragmentProgram != previous->fragmentProgram
@@ -985,8 +985,7 @@ void FrameRenderer::setFixedState(ContextState& c, SceGxmContext* context, const
     const render::DrawState& s = d.state;
     if (first || d.viewport != c.viewport)
     {
-        // Direct3D window coordinates have pixel centres at integers: half a pixel to GXM's.
-        // A back buffer drawn to the display directly: its pixels scaled to the display's.
+        // Direct3D window coordinates moved by half a pixel, scaled by the scene's display scale.
         const render::Viewport& v = frame.viewports[d.viewport];
         const float sx = c.scaleX, sy = c.scaleY;
         sceGxmSetViewport(context, sx * (v.x + 0.5f * v.width + 0.5f), sx * 0.5f * v.width,
@@ -1378,7 +1377,7 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         const bool last = i + 1 == frame.sceneCount;
         sceGxmEndScene(m_context, nullptr, last && lastWritesDone ? &slot.done : nullptr);
     }
-    // The present pass draws with the context's own state again.
+    // Unbinds the precomputed states.
     sceGxmSetPrecomputedVertexState(m_context, nullptr);
     sceGxmSetPrecomputedFragmentState(m_context, nullptr);
 }
@@ -1391,7 +1390,7 @@ namespace
 const uint32_t ListMinimumDraws = 96;   // smaller frames are drawn on the immediate context
 const uint32_t JobMinimumDraws = 32;    // smallest range a list records
 const uint32_t WorkerHostMem = 16 * 1024;
-// Above guest threads, like the job workers: a helper preempted inside a range would hold up the render thread.
+// 80: below the job workers (76), level with guest threads at THREAD_PRIORITY_HIGHEST, above the other guest threads.
 const int ListWorkerPriority = Thread::PriorityHigh + 16;
 
 }
@@ -1624,7 +1623,7 @@ bool FrameRenderer::recordLists(const render::Frame& frame)
             p.firstJob = uint32_t(m_jobs.size());
             if (p.skipped || !p.orderCount)
                 continue;
-            // About two ranges per thread, so that a late helper leaves less to wait for.
+            // About two ranges per thread.
             const uint32_t size = std::max(JobMinimumDraws, (p.orderCount + 2 * threads - 1) / (2 * threads));
             for (uint32_t begin = 0; begin < p.orderCount; begin += size)
             {

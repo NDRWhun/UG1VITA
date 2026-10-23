@@ -28,8 +28,7 @@ enum : DWORD
 
 const float s_identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
-// Frame slots keep at most 3 frames in flight: beginFrame(n) returns once frame n - 3 is finished, so it has
-// been resolved and the stream of n - 4 is free.
+// The recording of frame n is s_streams[n % StreamCount]; s_resolved: the last frame resolved.
 const uint32_t StreamCount = 4;
 Stream s_streams[StreamCount];
 std::atomic<uint32_t> s_resolved{0};
@@ -132,7 +131,6 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
         shared = block(effect.shared);
         if (!own)
         {
-            // Cannot happen: a block is sent whole before its first draw.
             D3D_LOG_ONCE("d3d9: effect draw without parameter values dropped");
             draw.count = 0;
             return true;
