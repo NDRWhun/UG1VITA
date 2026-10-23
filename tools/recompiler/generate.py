@@ -86,6 +86,9 @@ NATIVE_OVERRIDES = [
     0x5677d0,   # grow a box by a point and radius
     0x567740,   # grow a box by a point
     0x567710,   # box of one point
+    # Render preparation (src/nfsu/prep.cpp): per-instance light-context fills on the workers.
+    0x446730,   # StuffScenery: fill light contexts and submit the view's instances
+    0x40a580,   # frame render and present
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
