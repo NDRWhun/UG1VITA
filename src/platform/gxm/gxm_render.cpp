@@ -801,7 +801,7 @@ uint32_t FrameRenderer::queueUpload(Upload* upload)
     {
         LockGuard guard(*m_uploadLock);
         m_uploading.push_back(ticket);
-        m_uploadCount.store(uint32_t(m_uploading.size()), std::memory_order_relaxed);
+        m_firstUploading.store(m_uploading.front(), std::memory_order_relaxed);
     }
     if (perf::enabled())
         perf::upload(perf::UploadAsync, 1);
@@ -828,7 +828,8 @@ void FrameRenderer::runUpload(void* argument)
         const auto it = std::lower_bound(self->m_uploading.begin(), self->m_uploading.end(), u->ticket);
         if (it != self->m_uploading.end() && *it == u->ticket)
             self->m_uploading.erase(it);
-        self->m_uploadCount.store(uint32_t(self->m_uploading.size()), std::memory_order_release);
+        self->m_firstUploading.store(self->m_uploading.empty() ? 0xffffffffu : self->m_uploading.front(),
+                                     std::memory_order_release);
         u->to->uploads.fetch_sub(1, std::memory_order_release);
         self->m_uploadDone->broadcast();
     }
@@ -837,7 +838,7 @@ void FrameRenderer::runUpload(void* argument)
 
 bool FrameRenderer::uploadDone(uint32_t ticket)
 {
-    if (!ticket || !m_uploadCount.load(std::memory_order_acquire))
+    if (ticket < m_firstUploading.load(std::memory_order_acquire))
         return true;
     LockGuard guard(*m_uploadLock);
     return !std::binary_search(m_uploading.begin(), m_uploading.end(), ticket);

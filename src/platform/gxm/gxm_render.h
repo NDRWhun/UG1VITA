@@ -338,7 +338,7 @@ private:
     Mutex*                  m_uploadLock = nullptr;
     CondVar*                m_uploadDone = nullptr;
     std::vector<uint32_t>   m_uploading;                // tickets queued and not finished, ascending (m_uploadLock)
-    std::atomic<uint32_t>   m_uploadCount{0};           // m_uploading.size()
+    std::atomic<uint32_t>   m_firstUploading{0xffffffffu};  // m_uploading.front(), all ones when empty
 
     VertexProgram           m_vertexPrograms[render::VpCount];
     FragmentProgram         m_fragmentPrograms[render::FpCount][Variants];
