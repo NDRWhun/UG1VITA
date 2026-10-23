@@ -75,6 +75,25 @@ NATIVE_OVERRIDES = [
     0x440a40,   # ground height under a point from a topology coordinate's polygon cache
     0x4400e0,   # distance of a point outside a track polygon
     0x4407b0,   # interest box and polygon cache of a topology coordinate
+    # Math helpers (src/nfsu/mathfn.cpp): trigonometry by 16-bit angle, lookups, vectors and boxes.
+    0x564b10,   # sine of a 16-bit angle
+    0x564bb0,   # sine of a float in radians
+    0x564bd0,   # sine and cosine of a 16-bit angle
+    0x564cd0,   # arcsine as a 16-bit angle
+    0x564db0,   # angle of a 2D vector
+    0x4387e0,   # float truncated to an integer, as a float
+    0x583ea0,   # table value, linear between entries
+    0x583f20,   # graph value, linear between points
+    0x567370,   # normalise a vector
+    0x567450,   # normalise a vector with the w term
+    0x567310,   # normalise a 2D vector to a length
+    0x540830,   # length with the w term
+    0x5677d0,   # grow a box by a point and radius
+    0x567740,   # grow a box by a point
+    0x567710,   # box of one point
+    # Render preparation (src/nfsu/prep.cpp): per-instance light-context fills on the workers.
+    0x446730,   # StuffScenery: fill light contexts and submit the view's instances
+    0x40a580,   # frame render and present
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
