@@ -1,6 +1,8 @@
 // Direct3D frames on SceGxm: GPU heaps, resources, frame slots and scene drawing (gxm_render.h).
 
 #include "gxm_render.h"
+#include <platform/config.h>
+#include <platform/cores.h>
 #include <platform/log.h>
 #include <platform/texture.h>
 #include <algorithm>
@@ -136,6 +138,116 @@ bool powerOfTwo(uint32_t v)
     return v && !(v & (v - 1));
 }
 
+// Default uniform buffer bytes of a program: its own size, and at least what the fields write.
+uint32_t uniformBytes(const SceGxmProgram* program, const render::UniformField* fields,
+                      const std::vector<const SceGxmProgramParameter*>& parameters)
+{
+    uint32_t bytes = sceGxmProgramGetDefaultUniformBufferSize(program);
+    for (size_t i = 0; i < parameters.size(); ++i)
+    {
+        if (parameters[i])
+            bytes = std::max<uint32_t>(bytes, (sceGxmProgramParameterGetResourceIndex(parameters[i]) + fields[i].count) * 4);
+    }
+    return alignUp(bytes, 16);
+}
+
+}
+
+// ---- HostArena -----------------------------------------------------------------------------------------------------
+
+HostArena::~HostArena()
+{
+    for (uint8_t* b : m_blocks)
+        delete[] b;
+}
+
+void* HostArena::allocate(uint32_t size)
+{
+    size = alignUp(size, 16);
+    if (m_block < m_blocks.size() && m_used + size > BlockSize)
+    {
+        ++m_block;
+        m_used = 0;
+    }
+    if (m_block == m_blocks.size())
+        m_blocks.push_back(new uint8_t[BlockSize]);
+    void* p = m_blocks[m_block] + m_used;
+    m_used += size;
+    return p;
+}
+
+// ---- FramePool -----------------------------------------------------------------------------------------------------
+
+FramePool::~FramePool()
+{
+    for (Chunk& c : m_chunks)
+    {
+        sceGxmUnmapMemory(c.base);
+        sceKernelFreeMemBlock(c.uid);
+    }
+}
+
+void FramePool::begin(uint32_t frameIndex, Finished finished, void* context)
+{
+    m_frame = frameIndex;
+    m_finished = finished;
+    m_context = context;
+    if (m_current >= 0)
+        m_chunks[m_current].lastUse = frameIndex;
+}
+
+int FramePool::freeChunk(uint32_t minimum)
+{
+    for (size_t i = 0; i < m_chunks.size(); ++i)
+    {
+        Chunk& c = m_chunks[i];
+        if (int(i) != m_current && c.size >= minimum && (c.lastUse == 0 || m_finished(m_context, c.lastUse)))
+        {
+            c.used = 0;
+            return int(i);
+        }
+    }
+    const uint32_t size = alignUp(std::max(minimum, m_chunkSize), 4096);
+    const SceUID uid = sceKernelAllocMemBlock(m_name, SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, size, nullptr);
+    if (uid < 0)
+        fatal("gxm: %s: out of memory for %u KB: 0x%08x", m_name, size / 1024, uid);
+    void* base = nullptr;
+    sceKernelGetMemBlockBase(uid, &base);
+    if (sceGxmMapMemory(base, size, SCE_GXM_MEMORY_ATTRIB_READ) < 0)
+        fatal("gxm: %s: sceGxmMapMemory failed", m_name);
+    m_chunks.push_back(Chunk{ uid, static_cast<uint8_t*>(base), size, 0, 0 });
+    logInfo("gxm: %s pool +%u KB", m_name, size / 1024);
+    return int(m_chunks.size() - 1);
+}
+
+void* FramePool::allocate(uint32_t size, uint32_t alignment)
+{
+    if (m_current >= 0)
+    {
+        Chunk& c = m_chunks[m_current];
+        const uint32_t start = alignUp(c.used, alignment);
+        if (start + size <= c.size)
+        {
+            c.used = start + size;
+            c.lastUse = m_frame;
+            return c.base + start;
+        }
+    }
+    m_current = freeChunk(size + alignment);
+    Chunk& c = m_chunks[m_current];
+    c.used = size;
+    c.lastUse = m_frame;
+    return c.base;
+}
+
+void* FramePool::take(uint32_t minimum, uint32_t* size)
+{
+    m_current = freeChunk(minimum);
+    Chunk& c = m_chunks[m_current];
+    c.used = c.size;
+    c.lastUse = m_frame;
+    *size = c.size;
+    return c.base;
 }
 
 // ---- GpuHeap -------------------------------------------------------------------------------------------------------
@@ -239,6 +351,9 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
 {
     m_context = context;
     m_patcher = patcher;
+    m_main.context = context;
+    m_precomputed = Config::getBool("gxm_precomputed", true);
+    logInfo("gxm: %s draws", m_precomputed ? "precomputed" : "immediate");
     m_textureHeap = new GpuHeap("gxm_textures", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 16 * 1024 * 1024,
                                 SCE_GXM_MEMORY_ATTRIB_RW);
     m_bufferHeap = new GpuHeap("gxm_buffers", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, 8 * 1024 * 1024,
@@ -261,6 +376,7 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
         p.program = registerProgram(info.name, &p.id);
         for (uint8_t i = 0; i < info.fieldCount; ++i)
             p.fields.push_back(sceGxmProgramFindParameterByName(p.program, info.fields[i].name));
+        p.uniformBytes = uniformBytes(p.program, info.fields, p.fields);
     }
     for (int f = 0; f < render::FpCount; ++f)
     {
@@ -289,6 +405,7 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
             p.program = registerProgram(name, &p.id);
             for (uint8_t i = 0; i < info.fieldCount; ++i)
                 p.fields.push_back(sceGxmProgramFindParameterByName(p.program, info.fields[i].name));
+            p.uniformBytes = uniformBytes(p.program, info.fields, p.fields);
             for (uint8_t s = 0; s < info.samplers; ++s)
             {
                 char sampler[8] = "uTex0";
@@ -338,15 +455,17 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     memset(m_black->data, 0, m_black->bytes);
     for (uint32_t i = 0; i < 64; ++i)
         static_cast<uint8_t*>(m_black->data)[i * 4 + 3] = 0xff;
+    initLists();
     return true;
 }
 
 void FrameRenderer::shutdown()
 {
+    shutdownLists();
     for (auto& v : m_vertexCache)
-        sceGxmShaderPatcherReleaseVertexProgram(m_patcher, v.second);
+        sceGxmShaderPatcherReleaseVertexProgram(m_patcher, v.second.program);
     for (auto& f : m_fragmentCache)
-        sceGxmShaderPatcherReleaseFragmentProgram(m_patcher, f.second);
+        sceGxmShaderPatcherReleaseFragmentProgram(m_patcher, f.second.program);
     for (auto& t : m_targets)
         sceGxmDestroyRenderTarget(t.second);
     for (VertexProgram& p : m_vertexPrograms)
@@ -422,6 +541,9 @@ render::Frame* FrameRenderer::beginFrame(uint32_t width, uint32_t height)
     f.vertices = static_cast<uint8_t*>(s.vertices);
     f.vertexBytes = 0;
     f.vertexCapacity = SlotVertexBytes;
+    f.resolve = nullptr;
+    f.commands = nullptr;
+    f.commandCount = 0;
     return &f;
 }
 
@@ -686,12 +808,12 @@ SceGxmRenderTarget* FrameRenderer::renderTarget(uint32_t width, uint32_t height)
     return target;
 }
 
-SceGxmVertexProgram* FrameRenderer::vertexProgram(uint8_t program, uint8_t layoutId)
+const FrameRenderer::VertexEntry* FrameRenderer::vertexProgram(uint8_t program, uint8_t layoutId)
 {
     const uint32_t key = uint32_t(program) << 8 | layoutId;
     auto it = m_vertexCache.find(key);
     if (it != m_vertexCache.end())
-        return it->second;
+        return &it->second;
     const VertexProgram& p = m_vertexPrograms[program < render::VpCount ? program : 0];
     const render::VertexLayout& layout = render::layout(layoutId);
     SceGxmVertexAttribute attributes[render::UsageCount];
@@ -732,11 +854,16 @@ SceGxmVertexProgram* FrameRenderer::vertexProgram(uint8_t program, uint8_t layou
     if (error < 0)
         fatal("gxm: vertex program %s for layout %u: 0x%08x", render::vertexProgram(render::VertexProgram(program)).name,
               layoutId, error);
-    m_vertexCache[key] = result;
-    return result;
+    VertexEntry& entry = m_vertexCache[key];
+    entry.program = result;
+    entry.source = uint8_t(program < render::VpCount ? program : 0);
+    entry.drawSize = sceGxmGetPrecomputedDrawSize(result);
+    entry.stateSize = sceGxmGetPrecomputedVertexStateSize(result);
+    entry.uniformBytes = p.uniformBytes;
+    return &entry;
 }
 
-SceGxmFragmentProgram* FrameRenderer::fragmentProgram(const render::DrawState& state)
+const FrameRenderer::FragmentEntry* FrameRenderer::fragmentProgram(const render::DrawState& state)
 {
     const bool blend = state.blendEnable != 0;
     const uint8_t mask = state.colorMask;
@@ -746,7 +873,7 @@ SceGxmFragmentProgram* FrameRenderer::fragmentProgram(const render::DrawState& s
                        | (blend ? uint64_t(state.srcBlend) << 24 | uint64_t(state.dstBlend) << 32 : 0);
     auto it = m_fragmentCache.find(key);
     if (it != m_fragmentCache.end())
-        return it->second;
+        return &it->second;
     const FragmentProgram& p = m_fragmentPrograms[state.fragmentProgram < render::FpCount ? state.fragmentProgram : 0][v];
     SceGxmBlendInfo info;
     memset(&info, 0, sizeof(info));
@@ -774,8 +901,43 @@ SceGxmFragmentProgram* FrameRenderer::fragmentProgram(const render::DrawState& s
                                                                vertex, &result);
     if (error < 0)
         fatal("gxm: fragment program %u (vertex %u): 0x%08x", state.fragmentProgram, state.vertexProgram, error);
-    m_fragmentCache[key] = result;
-    return result;
+    FragmentEntry& entry = m_fragmentCache[key];
+    entry.program = result;
+    entry.stateSize = sceGxmGetPrecomputedFragmentStateSize(result);
+    entry.uniformBytes = p.uniformBytes;
+    return &entry;
+}
+
+bool FrameRenderer::finished(void* self, uint32_t frameIndex)
+{
+    const Slot& s = static_cast<FrameRenderer*>(self)->m_slots[frameIndex % Slots];
+    return *s.done.address >= frameIndex;
+}
+
+void FrameRenderer::preparePrograms(const render::Frame& frame)
+{
+    m_programs.resize(frame.drawCount);
+    DrawPrograms last = { nullptr, nullptr };
+    const render::DrawState* previous = nullptr;
+    for (uint32_t i = 0; i < frame.drawCount; ++i)
+    {
+        const render::DrawState& s = frame.draws[i].state;
+        if (!frame.draws[i].count)
+        {
+            m_programs[i] = DrawPrograms{ nullptr, nullptr };
+            continue;
+        }
+        // Consecutive draws mostly share their programs.
+        if (!previous || s.vertexProgram != previous->vertexProgram || s.layout != previous->layout)
+            last.vertex = vertexProgram(s.vertexProgram, s.layout);
+        if (!previous || s.vertexProgram != previous->vertexProgram || s.fragmentProgram != previous->fragmentProgram
+            || s.alphaTest != previous->alphaTest || s.factorOutput != previous->factorOutput
+            || s.blendEnable != previous->blendEnable || s.srcBlend != previous->srcBlend
+            || s.dstBlend != previous->dstBlend || s.colorMask != previous->colorMask)
+            last.fragment = fragmentProgram(s);
+        m_programs[i] = last;
+        previous = &s;
+    }
 }
 
 void FrameRenderer::upload(void* buffer, const render::UniformField* fields, uint8_t count,
@@ -788,102 +950,226 @@ void FrameRenderer::upload(void* buffer, const render::UniformField* fields, uin
     }
 }
 
-void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
+// Texture of sampler i of a draw with the sampler's modes; black without a texture.
+SceGxmTexture FrameRenderer::samplerTexture(const render::DrawState& s, uint32_t i) const
+{
+    const Texture* t = s.textures[i] ? static_cast<const Texture*>(s.textures[i]) : m_black;
+    SceGxmTexture texture = t->texture;
+    const render::Sampler& sm = s.samplers[i];
+    const bool pow2 = powerOfTwo(t->desc.width) && powerOfTwo(t->desc.height);
+    auto mode = [pow2](uint8_t a) {
+        return !pow2 || a == render::AddressClamp ? SCE_GXM_TEXTURE_ADDR_CLAMP
+             : a == render::AddressMirror ? SCE_GXM_TEXTURE_ADDR_MIRROR : SCE_GXM_TEXTURE_ADDR_REPEAT;
+    };
+    if (!t->desc.cube)
+    {
+        sceGxmTextureSetUAddrMode(&texture, mode(sm.addressU));
+        sceGxmTextureSetVAddrMode(&texture, mode(sm.addressV));
+    }
+    sceGxmTextureSetMinFilter(&texture, (sm.filter & 1) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+    sceGxmTextureSetMagFilter(&texture, (sm.filter & 2) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+    if (t->desc.levels > 1)
+    {
+        if (sm.mip == render::MipNone)
+            sceGxmTextureSetMipmapCount(&texture, 1);
+        sceGxmTextureSetMipFilter(&texture, sm.mip == render::MipLinear ? SCE_GXM_TEXTURE_MIP_FILTER_ENABLED
+                                                                         : SCE_GXM_TEXTURE_MIP_FILTER_DISABLED);
+    }
+    return texture;
+}
+
+// Viewport, depth test and culling of a draw, where they changed.
+void FrameRenderer::setFixedState(ContextState& c, SceGxmContext* context, const render::Frame& frame,
+                                  const render::DrawCall& d, bool first)
 {
     const render::DrawState& s = d.state;
-    const bool first = !m_lastValid;
-    const bool programs = first || s.vertexProgram != m_last.vertexProgram || s.fragmentProgram != m_last.fragmentProgram
-                        || s.layout != m_last.layout || s.alphaTest != m_last.alphaTest
-                        || s.blendEnable != m_last.blendEnable || s.srcBlend != m_last.srcBlend
-                        || s.dstBlend != m_last.dstBlend || s.colorMask != m_last.colorMask
-                        || s.factorOutput != m_last.factorOutput;
-    if (programs)
-    {
-        sceGxmSetVertexProgram(m_context, vertexProgram(s.vertexProgram, s.layout));
-        sceGxmSetFragmentProgram(m_context, fragmentProgram(s));
-    }
-    const render::VertexProgramInfo& vinfo = render::vertexProgram(render::VertexProgram(s.vertexProgram));
-    const render::FragmentProgramInfo& finfo = render::fragmentProgram(render::FragmentProgram(s.fragmentProgram));
-    if ((programs || d.vertexConstants != m_lastVertexConstants) && vinfo.fieldCount && d.vertexConstants != render::NoConstants)
-    {
-        void* buffer = nullptr;
-        sceGxmReserveVertexDefaultUniformBuffer(m_context, &buffer);
-        upload(buffer, vinfo.fields, vinfo.fieldCount, m_vertexPrograms[s.vertexProgram].fields,
-               frame.constants + d.vertexConstants);
-    }
-    if ((programs || d.fragmentConstants != m_lastFragmentConstants) && finfo.fieldCount
-        && d.fragmentConstants != render::NoConstants)
-    {
-        void* buffer = nullptr;
-        sceGxmReserveFragmentDefaultUniformBuffer(m_context, &buffer);
-        upload(buffer, finfo.fields, finfo.fieldCount, m_fragmentPrograms[s.fragmentProgram][variant(s)].fields,
-               frame.constants + d.fragmentConstants);
-    }
-    m_lastVertexConstants = d.vertexConstants;
-    m_lastFragmentConstants = d.fragmentConstants;
-
-    const FragmentProgram& fp = m_fragmentPrograms[s.fragmentProgram][variant(s)];
-    for (uint8_t i = 0; i < finfo.samplers; ++i)
-    {
-        if (!first && !programs && s.textures[i] == m_last.textures[i]
-            && memcmp(&s.samplers[i], &m_last.samplers[i], sizeof(render::Sampler)) == 0)
-            continue;
-        const Texture* t = s.textures[i] ? static_cast<const Texture*>(s.textures[i]) : m_black;
-        SceGxmTexture texture = t->texture;
-        const render::Sampler& sm = s.samplers[i];
-        const bool pow2 = powerOfTwo(t->desc.width) && powerOfTwo(t->desc.height);
-        auto mode = [pow2](uint8_t a) {
-            return !pow2 || a == render::AddressClamp ? SCE_GXM_TEXTURE_ADDR_CLAMP
-                 : a == render::AddressMirror ? SCE_GXM_TEXTURE_ADDR_MIRROR : SCE_GXM_TEXTURE_ADDR_REPEAT;
-        };
-        if (!t->desc.cube)
-        {
-            sceGxmTextureSetUAddrMode(&texture, mode(sm.addressU));
-            sceGxmTextureSetVAddrMode(&texture, mode(sm.addressV));
-        }
-        sceGxmTextureSetMinFilter(&texture, (sm.filter & 1) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
-        sceGxmTextureSetMagFilter(&texture, (sm.filter & 2) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
-        if (t->desc.levels > 1)
-        {
-            if (sm.mip == render::MipNone)
-                sceGxmTextureSetMipmapCount(&texture, 1);
-            sceGxmTextureSetMipFilter(&texture, sm.mip == render::MipLinear ? SCE_GXM_TEXTURE_MIP_FILTER_ENABLED
-                                                                             : SCE_GXM_TEXTURE_MIP_FILTER_DISABLED);
-        }
-        sceGxmSetFragmentTexture(m_context, fp.units[i], &texture);
-    }
-
-    if (first || d.viewport != m_lastViewport)
+    if (first || d.viewport != c.viewport)
     {
         // Direct3D window coordinates have pixel centres at integers: half a pixel to GXM's.
         // A back buffer drawn to the display directly: its pixels scaled to the display's.
         const render::Viewport& v = frame.viewports[d.viewport];
-        const float sx = m_viewScaleX, sy = m_viewScaleY;
-        sceGxmSetViewport(m_context, sx * (v.x + 0.5f * v.width + 0.5f), sx * 0.5f * v.width,
+        const float sx = c.scaleX, sy = c.scaleY;
+        sceGxmSetViewport(context, sx * (v.x + 0.5f * v.width + 0.5f), sx * 0.5f * v.width,
                           sy * (v.y + 0.5f * v.height + 0.5f), sy * -0.5f * v.height, v.minZ, v.maxZ - v.minZ);
-        m_lastViewport = d.viewport;
+        c.viewport = d.viewport;
     }
-    if (first || s.depthEnable != m_last.depthEnable || s.depthWrite != m_last.depthWrite || s.depthFunc != m_last.depthFunc)
+    if (first || s.depthEnable != c.last.depthEnable || s.depthWrite != c.last.depthWrite
+        || s.depthFunc != c.last.depthFunc)
     {
         const uint32_t func = s.depthEnable && s.depthFunc >= 1 && s.depthFunc <= 8 ? s.depthFunc - 1u : 7u;
-        sceGxmSetFrontDepthFunc(m_context, SceGxmDepthFunc(func << 22));
-        sceGxmSetFrontDepthWriteEnable(m_context, s.depthEnable && s.depthWrite ? SCE_GXM_DEPTH_WRITE_ENABLED
-                                                                                 : SCE_GXM_DEPTH_WRITE_DISABLED);
+        sceGxmSetFrontDepthFunc(context, SceGxmDepthFunc(func << 22));
+        sceGxmSetFrontDepthWriteEnable(context, s.depthEnable && s.depthWrite ? SCE_GXM_DEPTH_WRITE_ENABLED
+                                                                               : SCE_GXM_DEPTH_WRITE_DISABLED);
     }
-    if (first || s.cullMode != m_last.cullMode)
-        sceGxmSetCullMode(m_context, s.cullMode == 2 ? SCE_GXM_CULL_CW : s.cullMode == 3 ? SCE_GXM_CULL_CCW
-                                                                                          : SCE_GXM_CULL_NONE);
-    m_last = s;
-    m_lastValid = true;
+    if (first || s.cullMode != c.last.cullMode)
+        sceGxmSetCullMode(context, s.cullMode == 2 ? SCE_GXM_CULL_CW : s.cullMode == 3 ? SCE_GXM_CULL_CCW
+                                                                                        : SCE_GXM_CULL_NONE);
+}
 
-    sceGxmSetVertexStream(m_context, 0, d.vertices);
-    const uint32_t count = d.count;
-    if (!d.indices && count > 65536)
+void FrameRenderer::draw(Recorder& r, const render::Frame& frame, uint32_t index)
+{
+    const render::DrawCall& d = frame.draws[index];
+    if (!d.count)
+        return;     // dropped by the layer
+    if (!d.indices && d.count > 65536)
     {
-        logError("gxm: draw of %u vertices without indices skipped", count);
+        logError("gxm: draw of %u vertices without indices skipped", d.count);
         return;
     }
-    sceGxmDraw(m_context, primitiveType(s.primitive), SCE_GXM_INDEX_FORMAT_U16, d.indices ? d.indices : m_sequence, count);
+    if (m_precomputed.load(std::memory_order_relaxed))
+    {
+        drawPrecomputed(r, frame, index);
+        return;
+    }
+    ContextState& c = r.state;
+    SceGxmContext* context = r.context;
+    const DrawPrograms& pr = m_programs[index];
+    const render::DrawState& s = d.state;
+    const bool first = !c.valid;
+    const bool programs = first || pr.vertex != c.vertex || pr.fragment != c.fragment;
+    if (programs)
+    {
+        sceGxmSetVertexProgram(context, pr.vertex->program);
+        sceGxmSetFragmentProgram(context, pr.fragment->program);
+    }
+    const render::VertexProgramInfo& vinfo = render::vertexProgram(render::VertexProgram(s.vertexProgram));
+    const render::FragmentProgramInfo& finfo = render::fragmentProgram(render::FragmentProgram(s.fragmentProgram));
+    if ((programs || d.vertexConstants != c.vertexConstants) && vinfo.fieldCount && d.vertexConstants != render::NoConstants)
+    {
+        void* buffer = nullptr;
+        sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
+        upload(buffer, vinfo.fields, vinfo.fieldCount, m_vertexPrograms[s.vertexProgram].fields,
+               frame.constants + d.vertexConstants);
+    }
+    if ((programs || d.fragmentConstants != c.fragmentConstants) && finfo.fieldCount
+        && d.fragmentConstants != render::NoConstants)
+    {
+        void* buffer = nullptr;
+        sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
+        upload(buffer, finfo.fields, finfo.fieldCount, m_fragmentPrograms[s.fragmentProgram][variant(s)].fields,
+               frame.constants + d.fragmentConstants);
+    }
+    c.vertexConstants = d.vertexConstants;
+    c.fragmentConstants = d.fragmentConstants;
+
+    const FragmentProgram& fp = m_fragmentPrograms[s.fragmentProgram][variant(s)];
+    for (uint8_t i = 0; i < finfo.samplers; ++i)
+    {
+        if (!programs && s.textures[i] == c.last.textures[i]
+            && memcmp(&s.samplers[i], &c.last.samplers[i], sizeof(render::Sampler)) == 0)
+            continue;
+        const SceGxmTexture texture = samplerTexture(s, i);
+        sceGxmSetFragmentTexture(context, fp.units[i], &texture);
+    }
+    setFixedState(c, context, frame, d, first);
+    c.last = s;
+    c.valid = true;
+    c.vertex = pr.vertex;
+    c.fragment = pr.fragment;
+
+    sceGxmSetVertexStream(context, 0, d.vertices);
+    sceGxmDraw(context, primitiveType(s.primitive), SCE_GXM_INDEX_FORMAT_U16, d.indices ? d.indices : m_sequence, d.count);
+}
+
+// The same draw with precomputed objects: a vertex state when the vertex constants change, a fragment state when
+// its constants, textures or samplers change, and a precomputed draw. Their memory and uniform buffers come from the
+// recorder's pool and live until the frame is finished.
+void FrameRenderer::drawPrecomputed(Recorder& r, const render::Frame& frame, uint32_t index)
+{
+    const render::DrawCall& d = frame.draws[index];
+    ContextState& c = r.state;
+    SceGxmContext* context = r.context;
+    FramePool& pool = r.data;
+    const DrawPrograms& pr = m_programs[index];
+    const render::DrawState& s = d.state;
+    const bool first = !c.valid;
+    const bool programs = first || pr.vertex != c.vertex || pr.fragment != c.fragment;
+    if (programs)
+    {
+        sceGxmSetVertexProgram(context, pr.vertex->program);
+        sceGxmSetFragmentProgram(context, pr.fragment->program);
+    }
+    const render::VertexProgramInfo& vinfo = render::vertexProgram(render::VertexProgram(s.vertexProgram));
+    const render::FragmentProgramInfo& finfo = render::fragmentProgram(render::FragmentProgram(s.fragmentProgram));
+    int error = 0;
+
+    if (programs || d.vertexConstants != c.vertexConstants)
+    {
+        auto* state = static_cast<SceGxmPrecomputedVertexState*>(r.words.allocate(sizeof(SceGxmPrecomputedVertexState)));
+        void* memory = pr.vertex->stateSize ? pool.allocate(pr.vertex->stateSize, 16) : nullptr;
+        error = sceGxmPrecomputedVertexStateInit(state, pr.vertex->program, memory);
+        if (!error && pr.vertex->uniformBytes)
+        {
+            void* buffer = pool.allocate(pr.vertex->uniformBytes, 16);
+            if (vinfo.fieldCount && d.vertexConstants != render::NoConstants)
+                upload(buffer, vinfo.fields, vinfo.fieldCount, m_vertexPrograms[s.vertexProgram].fields,
+                       frame.constants + d.vertexConstants);
+            else
+                memset(buffer, 0, pr.vertex->uniformBytes);
+            sceGxmPrecomputedVertexStateSetDefaultUniformBuffer(state, buffer);
+        }
+        if (!error)
+            sceGxmSetPrecomputedVertexState(context, state);
+    }
+
+    bool textures = programs || d.fragmentConstants != c.fragmentConstants;
+    for (uint8_t i = 0; i < finfo.samplers && !textures; ++i)
+        textures = s.textures[i] != c.last.textures[i]
+                || memcmp(&s.samplers[i], &c.last.samplers[i], sizeof(render::Sampler)) != 0;
+    if (!error && textures)
+    {
+        const FragmentProgram& fp = m_fragmentPrograms[s.fragmentProgram][variant(s)];
+        auto* state = static_cast<SceGxmPrecomputedFragmentState*>(r.words.allocate(sizeof(SceGxmPrecomputedFragmentState)));
+        void* memory = pr.fragment->stateSize ? pool.allocate(pr.fragment->stateSize, 16) : nullptr;
+        error = sceGxmPrecomputedFragmentStateInit(state, pr.fragment->program, memory);
+        for (uint8_t i = 0; i < finfo.samplers && !error; ++i)
+        {
+            const SceGxmTexture texture = samplerTexture(s, i);
+            error = sceGxmPrecomputedFragmentStateSetTexture(state, fp.units[i], &texture);
+        }
+        if (!error && pr.fragment->uniformBytes)
+        {
+            void* buffer = pool.allocate(pr.fragment->uniformBytes, 16);
+            if (finfo.fieldCount && d.fragmentConstants != render::NoConstants)
+                upload(buffer, finfo.fields, finfo.fieldCount, fp.fields, frame.constants + d.fragmentConstants);
+            else
+                memset(buffer, 0, pr.fragment->uniformBytes);
+            sceGxmPrecomputedFragmentStateSetDefaultUniformBuffer(state, buffer);
+        }
+        if (!error)
+            sceGxmSetPrecomputedFragmentState(context, state);
+    }
+
+    SceGxmPrecomputedDraw* draw = nullptr;
+    if (!error)
+    {
+        draw = static_cast<SceGxmPrecomputedDraw*>(r.words.allocate(sizeof(SceGxmPrecomputedDraw)));
+        void* memory = pr.vertex->drawSize ? pool.allocate(pr.vertex->drawSize, 16) : nullptr;
+        error = sceGxmPrecomputedDrawInit(draw, pr.vertex->program, memory);
+        const void* streams[1] = { d.vertices };
+        if (!error)
+            error = sceGxmPrecomputedDrawSetAllVertexStreams(draw, streams);
+    }
+    if (error)
+    {
+        // Not expected; the immediate path takes over from here.
+        logError("gxm: precomputed objects failed (0x%08x): immediate draws from now on", error);
+        m_precomputed.store(false, std::memory_order_relaxed);
+        c.valid = false;
+        this->draw(r, frame, index);
+        return;
+    }
+    c.vertexConstants = d.vertexConstants;
+    c.fragmentConstants = d.fragmentConstants;
+    setFixedState(c, context, frame, d, first);
+    c.last = s;
+    c.valid = true;
+    c.vertex = pr.vertex;
+    c.fragment = pr.fragment;
+
+    sceGxmPrecomputedDrawSetParams(draw, primitiveType(s.primitive), SCE_GXM_INDEX_FORMAT_U16,
+                                   d.indices ? d.indices : m_sequence, d.count);
+    sceGxmDrawPrecomputed(context, draw);
 }
 
 void FrameRenderer::planFrame(const render::Frame& frame, bool stretchDirect)
@@ -977,37 +1263,66 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
 {
     Slot& slot = m_slots[frame.index % Slots];
     planFrame(frame, stretchDirect);
+    preparePrograms(frame);
+    m_main.data.begin(frame.index, &finished, this);
+    m_main.words.reset();
     const bool lastWritesDone = !presentScene(frame);
+
+    // Where each scene draws, and its draws in order: the colour clears carried to it first.
+    m_order.clear();
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
-        if (m_plan[i].skipped)
-            continue;
+        ScenePlan& p = m_plan[i];
         const render::Scene& scene = frame.scenes[i];
-        const SceGxmColorSurface* color = display;
-        SceGxmSyncObject* sync = nullptr;
-        uint32_t width = scene.width, height = scene.height;
-        m_viewScaleX = m_viewScaleY = 1.0f;
+        p.color = display;
+        p.sync = nullptr;
+        p.width = scene.width;
+        p.height = scene.height;
+        p.scaleX = p.scaleY = 1.0f;
         if (scene.target.color)
         {
             const Texture* t = static_cast<const Texture*>(scene.target.color);
-            color = &t->surfaces[scene.target.face < 6 ? scene.target.face : 0];
+            p.color = &t->surfaces[scene.target.face < 6 ? scene.target.face : 0];
         }
         else if (slot.direct)
         {
-            sync = displaySync;
-            width = 960;
-            height = 544;
-            m_viewScaleX = 960.0f / float(scene.width);
-            m_viewScaleY = 544.0f / float(scene.height);
+            p.sync = displaySync;
+            p.width = 960;
+            p.height = 544;
+            p.scaleX = 960.0f / float(scene.width);
+            p.scaleY = 544.0f / float(scene.height);
         }
         else if (slot.offscreen)
         {
-            color = &slot.offscreen->surfaces[0];
+            p.color = &slot.offscreen->surfaces[0];
         }
         else
         {
-            sync = displaySync;
+            p.sync = displaySync;
         }
+        p.firstOrder = uint32_t(m_order.size());
+        p.firstJob = p.jobCount = 0;
+        if (!p.skipped)
+        {
+            for (uint32_t c = 0; c < i; ++c)
+            {
+                if (m_plan[c].skipped && m_plan[c].carriedTo == i)
+                    for (uint32_t n = 0; n < frame.scenes[c].drawCount; ++n)
+                        m_order.push_back(frame.scenes[c].firstDraw + n);
+            }
+            for (uint32_t n = 0; n < scene.drawCount; ++n)
+                m_order.push_back(scene.firstDraw + n);
+        }
+        p.orderCount = uint32_t(m_order.size()) - p.firstOrder;
+    }
+    const bool lists = recordLists(frame);
+
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const ScenePlan& p = m_plan[i];
+        if (p.skipped)
+            continue;
+        const render::Scene& scene = frame.scenes[i];
         // Scenes whose draws never test depth (filter passes, the HUD) neither load nor store it.
         SceGxmDepthStencilSurface depth;
         const Depth* d = m_plan[i].depthUsed ? static_cast<const Depth*>(scene.target.depth) : nullptr;
@@ -1031,23 +1346,293 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
             sceGxmDepthStencilSurfaceSetForceStoreMode(&depth, store ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED
                                                                      : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
         }
-        sceGxmBeginScene(m_context, 0, renderTarget(width, height), nullptr, nullptr, sync, color, d ? &depth : nullptr);
-        sceGxmSetViewportEnable(m_context, SCE_GXM_VIEWPORT_ENABLED);
-        sceGxmSetRegionClip(m_context, SCE_GXM_REGION_CLIP_NONE, 0, 0, width - 1, height - 1);
-        sceGxmSetTwoSidedEnable(m_context, SCE_GXM_TWO_SIDED_DISABLED);
-        m_lastValid = false;
-        m_lastViewport = 0xffff;
-        for (uint32_t c = 0; c < i; ++c)
+        sceGxmBeginScene(m_context, 0, renderTarget(p.width, p.height), nullptr, nullptr, p.sync, p.color,
+                         d ? &depth : nullptr);
+        bool recorded = lists && p.jobCount;
+        for (uint32_t j = 0; j < p.jobCount && recorded; ++j)
+            recorded = m_jobs[p.firstJob + j].ok;
+        if (recorded)
         {
-            if (m_plan[c].skipped && m_plan[c].carriedTo == i)
-                for (uint32_t n = 0; n < frame.scenes[c].drawCount; ++n)
-                    draw(frame, frame.draws[frame.scenes[c].firstDraw + n]);
+            for (uint32_t j = 0; j < p.jobCount; ++j)
+            {
+                const int error = sceGxmExecuteCommandList(m_context, &m_jobs[p.firstJob + j].list);
+                if (error < 0)
+                    logError("gxm: sceGxmExecuteCommandList failed: 0x%08x", error);
+            }
         }
-        for (uint32_t n = 0; n < scene.drawCount; ++n)
-            draw(frame, frame.draws[scene.firstDraw + n]);
+        else
+        {
+            sceGxmSetViewportEnable(m_context, SCE_GXM_VIEWPORT_ENABLED);
+            sceGxmSetRegionClip(m_context, SCE_GXM_REGION_CLIP_NONE, 0, 0, p.width - 1, p.height - 1);
+            sceGxmSetTwoSidedEnable(m_context, SCE_GXM_TWO_SIDED_DISABLED);
+            m_main.state.reset(p.scaleX, p.scaleY);
+            for (uint32_t n = 0; n < p.orderCount; ++n)
+                draw(m_main, frame, m_order[p.firstOrder + n]);
+        }
         const bool last = i + 1 == frame.sceneCount;
         sceGxmEndScene(m_context, nullptr, last && lastWritesDone ? &slot.done : nullptr);
     }
+    // The present pass draws with the context's own state again.
+    sceGxmSetPrecomputedVertexState(m_context, nullptr);
+    sceGxmSetPrecomputedFragmentState(m_context, nullptr);
+}
+
+// ---- Command lists -------------------------------------------------------------------------------------------------
+
+namespace
+{
+
+const uint32_t ListMinimumDraws = 96;   // smaller frames are drawn on the immediate context
+const uint32_t JobMinimumDraws = 32;    // smallest range a list records
+const uint32_t WorkerHostMem = 16 * 1024;
+// Above guest threads, like the job workers: a helper preempted inside a range would hold up the render thread.
+const int ListWorkerPriority = Thread::PriorityHigh + 16;
+
+}
+
+// Memory callbacks of the deferred contexts: a whole chunk of the worker's pool, kept until every frame that used it
+// is finished. The chunk a context writes into is its pool's current one.
+void* FrameRenderer::listMemory(FramePool& pool, SceSize requested, SceSize* size)
+{
+    uint32_t granted = 0;
+    void* memory = pool.take(requested, &granted);
+    *size = granted;
+    return memory;
+}
+
+void* FrameRenderer::vdmMemory(void* worker, SceSize requested, SceSize* size)
+{
+    return listMemory(static_cast<Worker*>(worker)->vdm, requested, size);
+}
+
+void* FrameRenderer::vertexMemory(void* worker, SceSize requested, SceSize* size)
+{
+    return listMemory(static_cast<Worker*>(worker)->vertex, requested, size);
+}
+
+void* FrameRenderer::fragmentMemory(void* worker, SceSize requested, SceSize* size)
+{
+    return listMemory(static_cast<Worker*>(worker)->fragment, requested, size);
+}
+
+bool FrameRenderer::createWorker(Worker& w)
+{
+    w.owner = this;
+    w.hostMem = malloc(WorkerHostMem);
+    SceGxmDeferredContextParams params;
+    memset(&params, 0, sizeof(params));
+    params.hostMem = w.hostMem;
+    params.hostMemSize = WorkerHostMem;
+    params.vdmCallback = &vdmMemory;
+    params.vertexCallback = &vertexMemory;
+    params.fragmentCallback = &fragmentMemory;
+    params.callbackData = &w;
+    uint32_t size = 0;
+    params.vdmRingBufferMem = w.vdm.take(0, &size);
+    params.vdmRingBufferMemSize = size;
+    params.vertexRingBufferMem = w.vertex.take(0, &size);
+    params.vertexRingBufferMemSize = size;
+    params.fragmentRingBufferMem = w.fragment.take(0, &size);
+    params.fragmentRingBufferMemSize = size;
+    const int error = sceGxmCreateDeferredContext(&params, &w.recorder.context);
+    if (error < 0)
+    {
+        logError("gxm: sceGxmCreateDeferredContext failed: 0x%08x", error);
+        w.recorder.context = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void FrameRenderer::initLists()
+{
+    if (!Config::getBool("gxm_lists", true))
+    {
+        logInfo("gxm: command lists off (gxm_lists=0)");
+        return;
+    }
+    // The render thread records too and takes whatever the helpers have not claimed.
+    std::vector<int> cores;
+    if (cores::hasCore3())
+        cores.push_back(3);
+    if (Config::getBool("gxm_core2", true))
+        cores.push_back(2);
+    for (size_t i = 0; i <= cores.size(); ++i)
+    {
+        Worker* w = new Worker();
+        if (!createWorker(*w))
+        {
+            delete w;
+            break;
+        }
+        m_workers.push_back(w);
+    }
+    if (m_workers.empty())
+    {
+        logError("gxm: command lists off: no deferred context");
+        return;
+    }
+    m_jobLock = new Mutex("gxm_jobs", false);
+    m_jobsDone = new CondVar("gxm_jobs_done", *m_jobLock);
+    m_wake = new Semaphore("gxm_wake", 0);
+    static const char* const names[] = { "gxm_list_core3", "gxm_list_core2" };
+    for (size_t i = 1; i < m_workers.size(); ++i)
+    {
+        Worker* w = m_workers[i];
+        const int core = cores[i - 1];
+        w->thread = new Thread(core == 3 ? names[0] : names[1], &workerEntry, w, ListWorkerPriority,
+                               64 * 1024, Thread::Cpu0 << core);
+        w->thread->start();
+    }
+    char where[32] = "render core";
+    for (size_t i = 1; i < m_workers.size(); ++i)
+        snprintf(where + strlen(where), sizeof(where) - strlen(where), ", core %d", cores[i - 1]);
+    logInfo("gxm: command lists recorded by %u thread(s): %s", uint32_t(m_workers.size()), where);
+}
+
+void FrameRenderer::shutdownLists()
+{
+    if (m_jobLock)
+    {
+        {
+            LockGuard guard(*m_jobLock);
+            m_stop = true;
+        }
+        m_wake->post(int(m_workers.size()));
+    }
+    for (Worker* w : m_workers)
+    {
+        if (w->thread)
+        {
+            w->thread->join();
+            delete w->thread;
+        }
+        if (w->recorder.context)
+            sceGxmDestroyDeferredContext(w->recorder.context);
+        free(w->hostMem);
+        delete w;
+    }
+    m_workers.clear();
+    delete m_jobsDone;
+    delete m_jobLock;
+    delete m_wake;
+    m_jobsDone = nullptr;
+    m_jobLock = nullptr;
+    m_wake = nullptr;
+}
+
+int FrameRenderer::workerEntry(void* worker)
+{
+    Worker& w = *static_cast<Worker*>(worker);
+    FrameRenderer& r = *w.owner;
+    while (true)
+    {
+        r.m_wake->wait();
+        {
+            LockGuard guard(*r.m_jobLock);
+            if (r.m_stop)
+                break;
+        }
+        r.runJobs(w);
+    }
+    return 0;
+}
+
+// Claims jobs until none is left. A worker woken late finds the current frame's jobs, or none.
+void FrameRenderer::runJobs(Worker& w)
+{
+    while (true)
+    {
+        const render::Frame* frame;
+        uint32_t index;
+        {
+            LockGuard guard(*m_jobLock);
+            if (m_stop || m_nextJob >= m_jobs.size())
+                return;
+            index = m_nextJob++;
+            frame = m_jobFrame;
+        }
+        if (w.frame != frame->index)
+        {
+            w.frame = frame->index;
+            w.recorder.data.begin(frame->index, &finished, this);
+            w.vdm.begin(frame->index, &finished, this);
+            w.vertex.begin(frame->index, &finished, this);
+            w.fragment.begin(frame->index, &finished, this);
+            w.recorder.words.reset();
+        }
+        const bool ok = recordJob(w, *frame, m_jobs[index]);
+        LockGuard guard(*m_jobLock);
+        m_jobs[index].ok = ok;
+        if (++m_doneJobs == m_jobs.size())
+            m_jobsDone->signal();
+    }
+}
+
+bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& job)
+{
+    SceGxmContext* context = w.recorder.context;
+    const ScenePlan& p = m_plan[job.scene];
+    int error = sceGxmBeginCommandList(context);
+    if (error < 0)
+    {
+        logError("gxm: sceGxmBeginCommandList failed: 0x%08x", error);
+        return false;
+    }
+    // A list starts from a reset GPU state.
+    sceGxmSetDefaultRegionClipAndViewport(context, p.width - 1, p.height - 1);
+    sceGxmSetViewportEnable(context, SCE_GXM_VIEWPORT_ENABLED);
+    sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_NONE, 0, 0, p.width - 1, p.height - 1);
+    sceGxmSetTwoSidedEnable(context, SCE_GXM_TWO_SIDED_DISABLED);
+    w.recorder.state.reset(p.scaleX, p.scaleY);
+    for (uint32_t n = job.begin; n < job.end; ++n)
+        draw(w.recorder, frame, m_order[n]);
+    SceGxmCommandList list;
+    error = sceGxmEndCommandList(context, &list);
+    if (error < 0)
+    {
+        logError("gxm: sceGxmEndCommandList failed: 0x%08x", error);
+        return false;
+    }
+    const_cast<Job&>(job).list = list;
+    return true;
+}
+
+// Splits the frame's scenes into jobs and records them on the workers and this thread; false: draw immediately.
+bool FrameRenderer::recordLists(const render::Frame& frame)
+{
+    if (m_workers.empty() || m_order.size() < ListMinimumDraws)
+        return false;
+    const uint32_t threads = uint32_t(m_workers.size());
+    {
+        LockGuard guard(*m_jobLock);
+        m_jobs.clear();
+        for (uint32_t i = 0; i < frame.sceneCount; ++i)
+        {
+            ScenePlan& p = m_plan[i];
+            p.firstJob = uint32_t(m_jobs.size());
+            if (p.skipped || !p.orderCount)
+                continue;
+            // About two ranges per thread, so that a late helper leaves less to wait for.
+            const uint32_t size = std::max(JobMinimumDraws, (p.orderCount + 2 * threads - 1) / (2 * threads));
+            for (uint32_t begin = 0; begin < p.orderCount; begin += size)
+            {
+                const uint32_t end = std::min(p.orderCount, begin + size);
+                m_jobs.push_back(Job{ i, p.firstOrder + begin, p.firstOrder + end, false, {} });
+            }
+            p.jobCount = uint32_t(m_jobs.size()) - p.firstJob;
+        }
+        m_jobFrame = &frame;
+        m_nextJob = 0;
+        m_doneJobs = 0;
+    }
+    if (threads > 1)
+        m_wake->post(int(threads - 1));
+    runJobs(*m_workers[0]);
+    LockGuard guard(*m_jobLock);
+    while (m_doneJobs < m_jobs.size())
+        m_jobsDone->wait();
+    return true;
 }
 
 }}

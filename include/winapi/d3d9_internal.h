@@ -453,14 +453,90 @@ private:
     uint8_t                         m_layoutId = 0;
 };
 
-// ---- Effect binding: what an effect pass sets for a draw (d3dx9.cpp) -------------------------------------------------
+// ---- Recording: the game thread records state changes and draws; the render thread resolves them -----------------
+
+// Commands of a frame's stream: a header word (Command in bits 0-7, arguments above) and payload words.
+enum Command : uint8_t
+{
+    CmdRenderState,         // header: state << 8; value
+    CmdStageState,          // header: stage << 8 | type << 16; value
+    CmdSamplerState,        // header: sampler << 8 | type << 16; value
+    CmdTransform,           // header: transform << 8 (Transform); 16 floats
+    CmdViewport,            // D3DVIEWPORT9
+    CmdFixedState,          // FixedState, whole
+    CmdValues,              // header: block << 8; offset | count << 16; count floats
+    CmdDraw                 // DrawRecord
+};
+
+enum Transform : uint8_t
+{
+    TransformWorld, TransformView, TransformProjection, TransformTexture0, TransformCount
+};
+
+// Growing word buffer, one per frame in flight.
+struct Stream
+{
+    uint32_t*   data = nullptr;
+    uint32_t    size = 0, capacity = 0;
+
+    uint32_t* append(uint32_t words)
+    {
+        if (size + words > capacity)
+            grow(words);
+        uint32_t* p = data + size;
+        size += words;
+        return p;
+    }
+    void grow(uint32_t words);
+};
+
+// The stream of a frame index; game thread. Waits for nothing: the frame slots keep it free.
+Stream& frameStream(uint32_t frameIndex);
+// Render thread: completes the draws of a frame from its stream (Frame::resolve).
+void resolveFrame(render::Frame& frame);
+
+// Device state the draws read, mirrored on the render thread.
+struct FixedState
+{
+    DWORD           renderStates[256];
+    DWORD           stageStates[8][33];
+    DWORD           samplerStates[16][14];
+    D3DMATRIX       transforms[TransformCount];
+    D3DVIEWPORT9    viewport;
+};
+
+enum : uint16_t
+{
+    NoBlock = 0xffff
+};
+enum : uint8_t
+{
+    NoEffect = 0xff
+};
+
+// The active effect pass of a draw: its kind and value blocks (parameters, shared parameters of its pool).
+struct EffectDraw
+{
+    uint16_t    own, shared;
+    uint8_t     kind, pass;     // kind NoEffect: fixed function
+    uint8_t     pad[2];
+};
+
+struct DrawRecord
+{
+    uint32_t                        draw;       // index in Frame::draws; the game thread filled its geometry
+    uint8_t                         primitive, layout, texComponents, positionT;
+    EffectDraw                      effect;
+    const render::TextureStorage*   textures[render::MaxSamplers];  // stage 0, or the pass's samplers
+};
+
+// ---- Effects (d3dx9.cpp) -------------------------------------------------------------------------------------------
 
 struct EffectBinding
 {
     uint8_t         vertexProgram;          // render::VertexProgram
     uint8_t         fragmentProgram;
     uint8_t         samplerCount;
-    const Object*   textures[render::MaxSamplers];
     render::Sampler samplers[render::MaxSamplers];
     bool            cullNone;
     bool            depthOff;
@@ -474,13 +550,17 @@ class EffectPass
 {
 public:
     virtual ~EffectPass() {}
-    virtual void bind(EffectBinding& binding) const = 0;
-    // Changes whenever a parameter changes.
-    virtual uint32_t version() const = 0;
-    // Constant blocks of the pass programs (render::*Constants).
-    virtual void vertexConstants(float* out) const = 0;
-    virtual void fragmentConstants(float* out) const = 0;
+    // Game thread, per draw: the pass and the storages of its samplers (the rest null).
+    virtual void record(EffectDraw& effect, const render::TextureStorage* textures[render::MaxSamplers]) const = 0;
 };
+
+// Game thread: value blocks changed while no frame recorded, sent whole.
+void syncEffectValues(Stream& stream);
+// Render thread: floats of a value block, and what a pass draws with from mirrored blocks (shared may be null).
+uint32_t effectBlockFloats();
+void effectBinding(const EffectDraw& effect, const float* own, const float* shared, EffectBinding& binding);
+void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
+void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
 
 // ---- Fixed-function resolution (d3d9_state.cpp, pure) ----------------------------------------------------------------
 
@@ -554,6 +634,8 @@ public:
 
     void setEffectPass(const EffectPass* pass)  { m_effectPass = pass; }
     const EffectPass* effectPass() const        { return m_effectPass; }
+    // The stream of the frame being recorded; null between frames.
+    Stream* stream() const                      { return m_stream; }
 
     HRESULT TestCooperativeLevel(WinApplication* app, x86::CPU& cpu);
     UINT GetAvailableTextureMem(WinApplication* app, x86::CPU& cpu);
@@ -649,14 +731,9 @@ public:
     HRESULT GetPixelShader(WinApplication* app, x86::CPU& cpu, x86::reg32* shader);
 
 private:
-    struct State
+    struct State : FixedState
     {
-        DWORD               renderStates[MaxRenderStates];
-        DWORD               stageStates[MaxStages][D3DTSS_COUNT];
-        DWORD               samplerStates[MaxSamplerStages][MaxSamplerStates];
         Object*             textures[MaxSamplerStages];
-        D3DMATRIX           world, view, projection, texture0;
-        D3DVIEWPORT9        viewport;
         VertexDeclaration*  declaration;
         DWORD               fvf;
         Buffer*             stream;
@@ -672,9 +749,10 @@ private:
     render::Frame* frame(WinApplication* app, x86::CPU& cpu);
     render::Scene* scene();
     uint16_t viewportIndex(render::Frame& frame, const render::Viewport& viewport);
-    bool fillState(render::DrawState& state, render::DrawCall& draw, render::Frame& frame, uint8_t layout,
-                   uint32_t texComponents, bool positionT);
-    void use(render::Frame& frame, const render::DrawState& state);
+    // Records a state change for the render thread (header and one value word).
+    void record(uint32_t header, DWORD value);
+    void recordWords(uint32_t header, const void* payload, uint32_t words);
+    void submit();
     HRESULT draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primitives, const void* vertices,
                  const uint16_t* indices, uint32_t vertexCount, uint8_t layout, uint32_t texComponents,
                  bool positionT, render::BufferStorage* vertexStorage, render::BufferStorage* indexStorage);
@@ -699,11 +777,8 @@ private:
     bool                    m_sceneOpen = false;    // m_frame's last scene is the current target
     uint32_t                m_vblanks;
     bool                    m_frameFull = false;
-    // Constants of the last draw, reused while nothing changes.
-    const void*             m_constantsKey = nullptr;
-    uint32_t                m_constantsVersion = ~0u;
-    uint32_t                m_vertexConstants = render::NoConstants, m_fragmentConstants = render::NoConstants;
-    uint32_t                m_fixedVersion = 0;     // bumped by fixed-function state changes
+    Stream*                 m_stream = nullptr;
+    bool                    m_stateDirty = true;    // changed while no frame recorded: sent whole before a draw
 };
 
 }}
