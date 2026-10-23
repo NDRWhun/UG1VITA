@@ -65,29 +65,6 @@ void drawFrameDone()
     s_drawCalls = s_drawFrames = 0;
 }
 
-uint8_t address(DWORD mode)
-{
-    switch (mode)
-    {
-    case 2:  return render::AddressMirror;
-    case 3:
-    case 4:  return render::AddressClamp;
-    case 5:  return render::AddressMirror;
-    default: return render::AddressWrap;
-    }
-}
-
-render::Sampler sampler(const DWORD* states)
-{
-    render::Sampler s;
-    s.addressU = address(states[D3DSAMP_ADDRESSU]);
-    s.addressV = address(states[D3DSAMP_ADDRESSV]);
-    s.filter = uint8_t((states[D3DSAMP_MINFILTER] >= 2 ? 1 : 0) | (states[D3DSAMP_MAGFILTER] >= 2 ? 2 : 0));
-    s.mip = uint8_t(states[D3DSAMP_MIPFILTER] >= 2 ? render::MipLinear
-                  : states[D3DSAMP_MIPFILTER] == 1 ? render::MipPoint : render::MipNone);
-    return s;
-}
-
 void color(DWORD argb, float out[4])
 {
     out[0] = float((argb >> 16) & 255) / 255.0f;
@@ -235,12 +212,13 @@ void Device::defaults()
         ss[D3DSAMP_MAGFILTER] = ss[D3DSAMP_MINFILTER] = 1;         // POINT
         ss[10] = 1;                                                 // MAXANISOTROPY
     }
-    m_state.world = m_state.view = m_state.projection = m_state.texture0 = s_identity;
+    for (D3DMATRIX& m : m_state.transforms)
+        m = s_identity;
     hold(m_state.target, m_backBuffer);
     hold(m_state.depth, m_autoDepth);
     m_state.viewport = D3DVIEWPORT9{ 0, 0, m_params.BackBufferWidth, m_params.BackBufferHeight, 0.0f, 1.0f };
     m_sceneOpen = false;
-    ++m_fixedVersion;
+    m_stateDirty = true;
 }
 
 // ---- Recording -----------------------------------------------------------------------------------------------------
@@ -254,9 +232,44 @@ render::Frame* Device::frame(WinApplication* app, x86::CPU& cpu)
         app->lockContext(cpu);
         m_sceneOpen = false;
         m_frameFull = false;
-        m_constantsKey = nullptr;
+        m_stream = &frameStream(m_frame->index);
     }
     return m_frame;
+}
+
+// Hands the recorded frame to the device.
+void Device::submit()
+{
+    m_frame->resolve = &resolveFrame;
+    m_frame->commands = m_stream->data;
+    m_frame->commandCount = m_stream->size;
+    gpu().submitFrame(m_frame, m_vblanks);
+    m_frame = nullptr;
+    m_stream = nullptr;
+}
+
+void Device::record(uint32_t header, DWORD value)
+{
+    if (!m_stream)
+    {
+        m_stateDirty = true;
+        return;
+    }
+    uint32_t* w = m_stream->append(2);
+    w[0] = header;
+    w[1] = value;
+}
+
+void Device::recordWords(uint32_t header, const void* payload, uint32_t words)
+{
+    if (!m_stream)
+    {
+        m_stateDirty = true;
+        return;
+    }
+    uint32_t* w = m_stream->append(1 + words);
+    w[0] = header;
+    memcpy(w + 1, payload, words * 4);
 }
 
 render::Scene* Device::scene()
@@ -311,201 +324,8 @@ uint16_t Device::viewportIndex(render::Frame& f, const render::Viewport& viewpor
     return uint16_t(f.viewportCount++);
 }
 
-void Device::use(render::Frame& f, const render::DrawState& state)
-{
-    for (const render::TextureStorage* t : state.textures)
-    {
-        if (t)
-            const_cast<render::TextureStorage*>(t)->lastUse = f.index;
-    }
-}
-
-namespace
-{
-
-// What the constants of a draw depend on; equal keys reuse the previous constants.
-struct ConstantsKey
-{
-    const void* source;
-    uint32_t    version;
-    DWORD       alphaFunc, alphaRef;
-    float       blendFactor[4];
-    uint8_t     vertexProgram, fragmentProgram, texComponents, alphaTest;
-};
-
-}
-
-bool Device::fillState(render::DrawState& state, render::DrawCall& draw, render::Frame& f, uint8_t layout,
-                       uint32_t texComponents, bool positionT)
-{
-    memset(&state, 0, sizeof(state));
-    const DWORD* rs = m_state.renderStates;
-    state.layout = layout;
-    state.colorMask = uint8_t(rs[D3DRS_COLORWRITEENABLE] & 0xf);
-    state.depthEnable = rs[D3DRS_ZENABLE] ? 1 : 0;
-    state.depthWrite = rs[D3DRS_ZWRITEENABLE] ? 1 : 0;
-    state.depthFunc = uint8_t(rs[D3DRS_ZFUNC]);
-    state.cullMode = uint8_t(rs[D3DRS_CULLMODE]);
-    if (rs[D3DRS_BLENDOP] != 1)
-        D3D_LOG_ONCE("d3d9: blend operation %u approximated by ADD", rs[D3DRS_BLENDOP]);
-
-    bool alphaEnabled = rs[D3DRS_ALPHATESTENABLE] != 0;
-    DWORD alphaRef = rs[D3DRS_ALPHAREF];
-    const void* source = this;
-    uint32_t version = m_fixedVersion;
-    FixedResult fixed = {};
-
-    if (m_effectPass)
-    {
-        EffectBinding b;
-        memset(&b, 0, sizeof(b));
-        m_effectPass->bind(b);
-        state.vertexProgram = b.vertexProgram;
-        state.fragmentProgram = b.fragmentProgram;
-        for (uint32_t i = 0; i < b.samplerCount && i < render::MaxSamplers; ++i)
-        {
-            state.textures[i] = storageOf(b.textures[i]);
-            state.samplers[i] = b.samplers[i];
-        }
-        if (b.cullNone)
-            state.cullMode = 1;
-        if (b.depthOff)
-            state.depthEnable = state.depthWrite = 0;
-        state.blendEnable = b.blend ? 1 : 0;
-        state.srcBlend = uint8_t(b.srcBlend);
-        state.dstBlend = uint8_t(b.dstBlend);
-        alphaEnabled = b.alphaTest;
-        alphaRef = b.alphaRef;
-        source = m_effectPass;
-        version = m_effectPass->version();
-    }
-    else
-    {
-        if (rs[D3DRS_LIGHTING] && !positionT)
-            D3D_LOG_ONCE("d3d9: fixed-function lighting is not emulated (vertex colours used)");
-        if (rs[D3DRS_FOGENABLE])
-            D3D_LOG_ONCE("d3d9: fixed-function fog is not emulated");
-        const DWORD* tss = m_state.stageStates[0];
-        const render::TextureStorage* texture = storageOf(m_state.textures[0]);
-        if (texture && texture->desc.cube)
-        {
-            D3D_LOG_ONCE("d3d9: cube texture on fixed-function stage 0 ignored");
-            texture = nullptr;
-        }
-        if (m_state.stageStates[1][D3DTSS_COLOROP] != D3DTOP_DISABLE)
-            D3D_LOG_ONCE("d3d9: fixed-function stages after 0 are not emulated");
-        FixedStage stage = { tss[D3DTSS_COLOROP], tss[D3DTSS_COLORARG1], tss[D3DTSS_COLORARG2], tss[D3DTSS_ALPHAOP],
-                             tss[D3DTSS_ALPHAARG1], tss[D3DTSS_ALPHAARG2], tss[D3DTSS_TEXTURETRANSFORMFLAGS],
-                             texture != nullptr };
-        fixed = resolveFixed(stage);
-        state.vertexProgram = positionT ? render::VpFixedScreen : render::VpFixed;
-        state.fragmentProgram = fixed.fragmentProgram;
-        if (fixed.fragmentProgram != render::FpFixedColor)
-        {
-            state.textures[0] = texture;
-            state.samplers[0] = sampler(m_state.samplerStates[0]);
-        }
-        state.blendEnable = rs[D3DRS_ALPHABLENDENABLE] ? 1 : 0;
-        state.srcBlend = uint8_t(rs[D3DRS_SRCBLEND]);
-        state.dstBlend = uint8_t(rs[D3DRS_DESTBLEND]);
-    }
-
-    float test[2] = { 0.0f, 0.0f };
-    state.alphaTest = alphaEnabled && alphaTest(rs[D3DRS_ALPHAFUNC], alphaRef, test) ? 1 : 0;
-
-    const render::FragmentProgramInfo& fragment =
-        render::fragmentProgram(render::FragmentProgram(state.fragmentProgram));
-    BlendFactorDraw factor = {};
-    if (state.blendEnable)
-    {
-        factor = resolveBlendFactor(state.srcBlend, state.dstBlend, rs[D3DRS_BLENDOP], rs[D3DRS_BLENDFACTOR],
-                                    fragment.blendFactor && !state.alphaTest, (state.colorMask & 8) != 0);
-        state.srcBlend = uint8_t(factor.src);
-        state.dstBlend = uint8_t(factor.dst);
-        state.factorOutput = factor.output;
-    }
-
-    ConstantsKey key;
-    memset(&key, 0, sizeof(key));
-    key.source = source;
-    key.version = version;
-    key.alphaFunc = rs[D3DRS_ALPHAFUNC];
-    key.alphaRef = alphaRef;
-    memcpy(key.blendFactor, factor.factor, sizeof(key.blendFactor));
-    key.vertexProgram = state.vertexProgram;
-    key.fragmentProgram = state.fragmentProgram;
-    key.texComponents = uint8_t(texComponents | (positionT ? 0x80 : 0));
-    key.alphaTest = state.alphaTest;
-    static ConstantsKey s_last;
-    if (m_constantsKey && memcmp(&key, &s_last, sizeof(key)) == 0)
-    {
-        draw.vertexConstants = m_vertexConstants;
-        draw.fragmentConstants = m_fragmentConstants;
-        return true;
-    }
-
-    const uint32_t vertexFloats = render::vertexProgram(render::VertexProgram(state.vertexProgram)).constantFloats;
-    const uint32_t fragmentFloats = fragment.constantFloats;
-    float* vc = nullptr;
-    float* fc = nullptr;
-    draw.vertexConstants = draw.fragmentConstants = render::NoConstants;
-    if (vertexFloats && !(vc = render::allocateConstants(f, vertexFloats, &draw.vertexConstants)))
-        return false;
-    if (fragmentFloats && !(fc = render::allocateConstants(f, fragmentFloats, &draw.fragmentConstants)))
-        return false;
-
-    if (m_effectPass)
-    {
-        if (vc)
-            m_effectPass->vertexConstants(vc);
-        if (fc)
-            m_effectPass->fragmentConstants(fc);
-    }
-    else
-    {
-        render::FixedVertexConstants& v = *reinterpret_cast<render::FixedVertexConstants*>(vc);
-        float wv[16];
-        multiply(m_state.world.m, m_state.view.m, wv);
-        multiply(wv, m_state.projection.m, v.wvp);
-        // Window coordinates of the viewport to clip space.
-        const D3DVIEWPORT9& vp = m_state.viewport;
-        const float w = float(vp.Width ? vp.Width : 1), h = float(vp.Height ? vp.Height : 1);
-        v.screen[0] = 2.0f / w;
-        v.screen[1] = -2.0f / h;
-        v.screen[2] = -1.0f - 2.0f * float(vp.X) / w;
-        v.screen[3] = 1.0f + 2.0f * float(vp.Y) / h;
-        const DWORD flags = m_state.stageStates[0][D3DTSS_TEXTURETRANSFORMFLAGS];
-        memcpy(v.texMatrix, (flags & 0xff) ? m_state.texture0.m : s_identity.m, sizeof(v.texMatrix));
-        if ((flags & D3DTTFF_PROJECTED) && (flags & 0xff) == D3DTTFF_COUNT4)
-        {
-            // Divided by the fourth coordinate: move it to the third, which the program divides by.
-            for (int row = 0; row < 4; ++row)
-                v.texMatrix[row * 4 + 2] = v.texMatrix[row * 4 + 3];
-        }
-        texturePad(texComponents, v.texPad);
-        memcpy(v.diffuseMask, fixed.diffuseMask, sizeof(v.diffuseMask));
-        memcpy(v.factorMask, fixed.factorMask, sizeof(v.factorMask));
-        color(m_state.renderStates[D3DRS_TEXTUREFACTOR], v.factor);
-        render::FixedFragmentConstants& p = *reinterpret_cast<render::FixedFragmentConstants*>(fc);
-        memset(&p, 0, sizeof(p));
-        memcpy(p.textureMask, fixed.textureMask, sizeof(p.textureMask));
-        memcpy(p.scale, fixed.scale, sizeof(p.scale));
-        memcpy(p.addMask, fixed.addMask, sizeof(p.addMask));
-    }
-    if (fc && fragmentFloats >= 2)
-    {
-        fc[0] = test[0];
-        fc[1] = test[1];
-    }
-    if (fc && state.factorOutput)
-        memcpy(fc + fragment.blendFactor, factor.factor, sizeof(factor.factor));
-    s_last = key;
-    m_constantsKey = source;
-    m_vertexConstants = draw.vertexConstants;
-    m_fragmentConstants = draw.fragmentConstants;
-    return true;
-}
-
+// The state resolution of a draw happens on the render thread (d3d9_record.cpp); the game thread records the
+// geometry, the textures as they are now (marking them read by this frame) and the active effect pass.
 HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primitives, const void* vertices,
                      const uint16_t* indices, uint32_t count, uint8_t layout, uint32_t texComponents, bool positionT,
                      render::BufferStorage* vertexStorage, render::BufferStorage* indexStorage)
@@ -529,14 +349,14 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
         m_frameFull = true;
         return D3D_OK;
     }
-    render::DrawCall& d = f->draws[f->drawCount];
-    if (!fillState(d.state, d, *f, layout, texComponents, positionT))
+    if (m_stateDirty)
     {
-        pf::logError("d3d9: frame %u: constant arena full, draws dropped", f->index);
-        m_frameFull = true;
-        return D3D_OK;
+        recordWords(CmdFixedState, static_cast<const FixedState*>(&m_state), sizeof(FixedState) / 4);
+        m_stateDirty = false;
     }
-    d.state.primitive = primitive(type);
+    syncEffectValues(*m_stream);
+
+    render::DrawCall& d = f->draws[f->drawCount];
     d.vertices = vertices;
     d.indices = indices;
     d.count = inputs;
@@ -544,7 +364,30 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     const D3DVIEWPORT9& vp = m_state.viewport;
     d.viewport = viewportIndex(*f, render::Viewport{ float(vp.X), float(vp.Y), float(vp.Width), float(vp.Height),
                                                      vp.MinZ, vp.MaxZ });
-    use(*f, d.state);
+
+    uint32_t* w = m_stream->append(1 + sizeof(DrawRecord) / 4);
+    w[0] = CmdDraw;
+    DrawRecord& r = *reinterpret_cast<DrawRecord*>(w + 1);
+    r.draw = f->drawCount;
+    r.primitive = primitive(type);
+    r.layout = layout;
+    r.texComponents = uint8_t(texComponents);
+    r.positionT = positionT ? 1 : 0;
+    if (m_effectPass)
+    {
+        m_effectPass->record(r.effect, r.textures);
+    }
+    else
+    {
+        r.effect = EffectDraw{ NoBlock, NoBlock, NoEffect, 0, { 0, 0 } };
+        r.textures[0] = storageOf(m_state.textures[0]);
+        r.textures[1] = r.textures[2] = r.textures[3] = nullptr;
+    }
+    for (const render::TextureStorage* t : r.textures)
+    {
+        if (t)
+            const_cast<render::TextureStorage*>(t)->lastUse = f->index;
+    }
     if (vertexStorage)
         vertexStorage->lastUse = f->index;
     if (indexStorage)
@@ -668,10 +511,7 @@ HRESULT Device::Reset(WinApplication* app, x86::CPU& cpu, D3DPRESENT_PARAMETERS*
     if (!params)
         return D3DERR_INVALIDCALL;
     if (m_frame)
-    {
-        gpu().submitFrame(m_frame, m_vblanks);
-        m_frame = nullptr;
-    }
+        submit();
     RC_USE(app);
     RC_USE(cpu);
     resetBackBuffer(*params);
@@ -692,9 +532,8 @@ HRESULT Device::Present(WinApplication* app, x86::CPU& cpu, const RECT* source, 
     if (source || dest)
         D3D_LOG_ONCE("d3d9: Present rectangles ignored");
     // A frame without draws still shows (black), so the pacing stays the same.
-    render::Frame* f = frame(app, cpu);
-    gpu().submitFrame(f, m_vblanks);
-    m_frame = nullptr;
+    frame(app, cpu);
+    submit();
     m_sceneOpen = false;
     drawFrameDone();
     return D3D_OK;
@@ -950,7 +789,7 @@ HRESULT Device::SetRenderTarget(WinApplication* app, x86::CPU& cpu, DWORD index,
     hold(m_state.target, surface);
     // A new render target resets the viewport to the whole target.
     m_state.viewport = D3DVIEWPORT9{ 0, 0, surface->width(), surface->height(), 0.0f, 1.0f };
-    ++m_fixedVersion;
+    recordWords(CmdViewport, &m_state.viewport, sizeof(D3DVIEWPORT9) / 4);
     return D3D_OK;
 }
 
@@ -1099,15 +938,19 @@ HRESULT Device::SetTransform(WinApplication* app, x86::CPU& cpu, DWORD state, co
     RC_USE(cpu);
     if (!matrix)
         return D3DERR_INVALIDCALL;
+    uint32_t t;
     switch (state)
     {
-    case D3DTS_WORLD:       m_state.world = *matrix; break;
-    case D3DTS_VIEW:        m_state.view = *matrix; break;
-    case D3DTS_PROJECTION:  m_state.projection = *matrix; break;
-    case D3DTS_TEXTURE0:    m_state.texture0 = *matrix; break;
+    case D3DTS_WORLD:       t = TransformWorld; break;
+    case D3DTS_VIEW:        t = TransformView; break;
+    case D3DTS_PROJECTION:  t = TransformProjection; break;
+    case D3DTS_TEXTURE0:    t = TransformTexture0; break;
     default:                D3D_LOG_ONCE("d3d9: transform %u ignored", state); return D3D_OK;
     }
-    ++m_fixedVersion;
+    if (memcmp(&m_state.transforms[t], matrix, sizeof(D3DMATRIX)) == 0)
+        return D3D_OK;
+    m_state.transforms[t] = *matrix;
+    recordWords(CmdTransform | t << 8, matrix, 16);
     return D3D_OK;
 }
 
@@ -1119,10 +962,10 @@ HRESULT Device::GetTransform(WinApplication* app, x86::CPU& cpu, DWORD state, D3
         return D3DERR_INVALIDCALL;
     switch (state)
     {
-    case D3DTS_WORLD:       *matrix = m_state.world; break;
-    case D3DTS_VIEW:        *matrix = m_state.view; break;
-    case D3DTS_PROJECTION:  *matrix = m_state.projection; break;
-    case D3DTS_TEXTURE0:    *matrix = m_state.texture0; break;
+    case D3DTS_WORLD:       *matrix = m_state.transforms[TransformWorld]; break;
+    case D3DTS_VIEW:        *matrix = m_state.transforms[TransformView]; break;
+    case D3DTS_PROJECTION:  *matrix = m_state.transforms[TransformProjection]; break;
+    case D3DTS_TEXTURE0:    *matrix = m_state.transforms[TransformTexture0]; break;
     default:                *matrix = s_identity; break;
     }
     return D3D_OK;
@@ -1145,8 +988,10 @@ HRESULT Device::SetViewport(WinApplication* app, x86::CPU& cpu, const D3DVIEWPOR
     RC_USE(cpu);
     if (!viewport)
         return D3DERR_INVALIDCALL;
+    if (memcmp(&m_state.viewport, viewport, sizeof(D3DVIEWPORT9)) == 0)
+        return D3D_OK;
     m_state.viewport = *viewport;
-    ++m_fixedVersion;
+    recordWords(CmdViewport, viewport, sizeof(D3DVIEWPORT9) / 4);
     return D3D_OK;
 }
 
@@ -1236,8 +1081,10 @@ HRESULT Device::SetRenderState(WinApplication* app, x86::CPU& cpu, DWORD state, 
     RC_USE(cpu);
     if (state >= MaxRenderStates)
         return D3DERR_INVALIDCALL;
+    if (m_state.renderStates[state] == value)
+        return D3D_OK;
     m_state.renderStates[state] = value;
-    ++m_fixedVersion;
+    record(CmdRenderState | state << 8, value);
     return D3D_OK;
 }
 
@@ -1276,7 +1123,6 @@ HRESULT Device::SetTexture(WinApplication* app, x86::CPU& cpu, DWORD stage, Obje
     if (texture && texture->kind() != KindTexture && texture->kind() != KindCubeTexture)
         return D3DERR_INVALIDCALL;
     hold(m_state.textures[stage], texture);
-    ++m_fixedVersion;
     return D3D_OK;
 }
 
@@ -1296,8 +1142,10 @@ HRESULT Device::SetTextureStageState(WinApplication* app, x86::CPU& cpu, DWORD s
     RC_USE(cpu);
     if (stage >= MaxStages || type >= D3DTSS_COUNT)
         return D3DERR_INVALIDCALL;
+    if (m_state.stageStates[stage][type] == value)
+        return D3D_OK;
     m_state.stageStates[stage][type] = value;
-    ++m_fixedVersion;
+    record(CmdStageState | stage << 8 | type << 16, value);
     return D3D_OK;
 }
 
@@ -1317,8 +1165,10 @@ HRESULT Device::SetSamplerState(WinApplication* app, x86::CPU& cpu, DWORD sample
     RC_USE(cpu);
     if (sampler >= MaxSamplerStages || type >= MaxSamplerStates)
         return D3D_OK;
+    if (m_state.samplerStates[sampler][type] == value)
+        return D3D_OK;
     m_state.samplerStates[sampler][type] = value;
-    ++m_fixedVersion;
+    record(CmdSamplerState | sampler << 8 | type << 16, value);
     return D3D_OK;
 }
 
@@ -1468,7 +1318,6 @@ HRESULT Device::SetVertexDeclaration(WinApplication* app, x86::CPU& cpu, VertexD
     RC_USE(cpu);
     hold(m_state.declaration, declaration);
     m_state.fvf = 0;
-    ++m_fixedVersion;
     return D3D_OK;
 }
 
@@ -1490,7 +1339,6 @@ HRESULT Device::SetFVF(WinApplication* app, x86::CPU& cpu, DWORD fvf)
     RC_USE(cpu);
     hold(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
     m_state.fvf = fvf;
-    ++m_fixedVersion;
     return D3D_OK;
 }
 

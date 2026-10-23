@@ -5,6 +5,7 @@
 #include <winapi/d3d9_internal.h>
 #include <platform/log.h>
 #include <platform/sha256.h>
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -128,7 +129,6 @@ enum : x86::reg32
 
 uint32_t s_offsets[ParamCount];
 uint32_t s_totalFloats = 0;
-uint32_t s_version = 1;         // bumped by every parameter change
 
 void initOffsets()
 {
@@ -141,20 +141,85 @@ void initOffsets()
     }
 }
 
+struct Values;
+// Value blocks by id (the render thread mirrors their floats), and the blocks to send whole.
+std::vector<Values*>    s_blocks;
+std::vector<uint16_t>   s_dirty;
+
 // Parameter values: floats (ints stored as their bits) and textures.
 struct Values
 {
     std::vector<float>  floats;
     Object*             textures[ParamCount] = {};
+    uint16_t            id;
+    bool                dirty = false;
 
-    Values() { initOffsets(); floats.assign(s_totalFloats, 0.0f); }
+    Values()
+    {
+        initOffsets();
+        floats.assign(s_totalFloats, 0.0f);
+        id = uint16_t(std::find(s_blocks.begin(), s_blocks.end(), nullptr) - s_blocks.begin());
+        if (id == s_blocks.size())
+            s_blocks.push_back(this);
+        else
+            s_blocks[id] = this;
+        markDirty();
+    }
     ~Values()
     {
         for (Object* t : textures)
             if (t)
                 t->release();
+        s_blocks[id] = nullptr;
+        if (dirty)
+            s_dirty.erase(std::find(s_dirty.begin(), s_dirty.end(), id));
+    }
+    void markDirty()
+    {
+        if (!dirty)
+            s_dirty.push_back(id);
+        dirty = true;
     }
 };
+
+// Value blocks as a pass reads them (render thread, mirrored blocks).
+struct View
+{
+    EffectKind      kind;
+    uint32_t        pass;
+    const float*    own;
+    const float*    shared;     // null without a pool
+
+    View(const EffectDraw& effect, const float* own, const float* shared)
+        :   kind(effect.kind < EffectCount ? EffectKind(effect.kind) : EffectFilter), pass(effect.pass), own(own)
+        ,   shared(shared) {}
+    const float* floats(int p) const    { return (s_params[p].shared && shared ? shared : own) + s_offsets[p]; }
+    int intValue(int p) const           { x86::sreg32 v; memcpy(&v, floats(p), 4); return v; }
+};
+
+// Texture parameters of each kind's samplers.
+const int8_t s_samplerParams[EffectCount][render::MaxSamplers] = {
+    { PDiffusemap, -1, -1, -1 },
+    { PDiffusemap, PHeadlightTex, PHeadlightClipTex, -1 },
+    { PDiffusemap, PReflectedTex, -1, -1 },
+    { PDiffusemap, PHeadlightTex, PHeadlightClipTex, PReflectedTex },
+    { PDiffusemap, -1, -1, -1 },
+    { PDiffusemap, PEnvMapTex, -1, -1 },
+    { PFilterTexture0, PFilterTexture1, PFilterTexture2, PFilterTexture3 },
+};
+
+uint32_t samplerCount(EffectKind kind, uint32_t pass)
+{
+    switch (kind)
+    {
+    case EffectWorldHeadlight:          return 3;
+    case EffectWorldHeadlightReflect:   return 4;
+    case EffectWorldReflect:
+    case EffectCar:                     return 2;
+    case EffectFilter:                  return pass < 4 ? pass + 1 : 4;
+    default:                            return 1;
+    }
+}
 
 }
 
@@ -185,10 +250,7 @@ public:
     }
 
     // EffectPass
-    void bind(EffectBinding& b) const override;
-    uint32_t version() const override       { return s_version; }
-    void vertexConstants(float* out) const override;
-    void fragmentConstants(float* out) const override;
+    void record(EffectDraw& effect, const render::TextureStorage* textures[render::MaxSamplers]) const override;
 
     HRESULT GetDesc(WinApplication* app, x86::CPU& cpu, DWORD* desc);
     x86::reg32 GetParameterByName(WinApplication* app, x86::CPU& cpu, x86::reg32 parent, const char* name);
@@ -237,6 +299,8 @@ private:
     const float* floats(int p) const        { return values(p).floats.data() + s_offsets[p]; }
     int intValue(int p) const               { x86::sreg32 v; memcpy(&v, floats(p), 4); return v; }
     HRESULT setFloats(x86::reg32 handle, const float* data, uint32_t count, Type type);
+    // Writes n floats of a parameter; a change is sent to the render thread.
+    void store(int p, const void* data, uint32_t n);
     const EffectInfo& info() const          { return s_effects[m_kind]; }
 
     Device*     m_device;
@@ -296,81 +360,124 @@ HRESULT Effect::setFloats(x86::reg32 handle, const float* data, uint32_t count, 
     if (p < 0 || !data || s_params[p].type != type)
         return D3DERR_INVALIDCALL;
     const uint32_t n = count < s_params[p].floats ? count : s_params[p].floats;
-    memcpy(floats(p), data, n * sizeof(float));
-    ++s_version;
+    store(p, data, n);
     return D3D_OK;
 }
 
-void Effect::bind(EffectBinding& b) const
+void Effect::store(int p, const void* data, uint32_t n)
 {
-    auto texture = [this](int p) -> const Object* { return values(p).textures[p]; };
+    if (memcmp(floats(p), data, n * 4) == 0)
+        return;
+    memcpy(floats(p), data, n * 4);
+    Values& v = values(p);
+    Stream* stream = m_device->stream();
+    if (!stream || v.dirty)
+    {
+        v.markDirty();
+        return;
+    }
+    uint32_t* w = stream->append(2 + n);
+    w[0] = CmdValues | uint32_t(v.id) << 8;
+    w[1] = s_offsets[p] | n << 16;
+    memcpy(w + 2, floats(p), n * 4);
+}
+
+void Effect::record(EffectDraw& effect, const render::TextureStorage* textures[render::MaxSamplers]) const
+{
+    effect.own = m_values.id;
+    effect.shared = m_pool ? m_pool->values.id : uint16_t(NoBlock);
+    effect.kind = uint8_t(m_kind);
+    effect.pass = uint8_t(m_pass);
+    effect.pad[0] = effect.pad[1] = 0;
+    const uint32_t count = samplerCount(m_kind, m_pass);
+    for (uint32_t i = 0; i < render::MaxSamplers; ++i)
+    {
+        const int p = s_samplerParams[m_kind][i];
+        const Object* t = i < count && p >= 0 ? values(p).textures[p] : nullptr;
+        textures[i] = t && (t->kind() == KindTexture || t->kind() == KindCubeTexture)
+                    ? static_cast<const Texture*>(t)->storage() : nullptr;
+    }
+}
+
+void syncEffectValues(Stream& stream)
+{
+    if (s_dirty.empty())
+        return;
+    for (uint16_t id : s_dirty)
+    {
+        Values* v = s_blocks[id];
+        uint32_t* w = stream.append(2 + s_totalFloats);
+        w[0] = CmdValues | uint32_t(id) << 8;
+        w[1] = s_totalFloats << 16;
+        memcpy(w + 2, v->floats.data(), s_totalFloats * 4);
+        v->dirty = false;
+    }
+    s_dirty.clear();
+}
+
+uint32_t effectBlockFloats()
+{
+    initOffsets();
+    return s_totalFloats;
+}
+
+void effectBinding(const EffectDraw& effect, const float* own, const float* shared, EffectBinding& b)
+{
+    const View v(effect, own, shared);
     const bool wrapMip = true;
-    b.cullNone = m_kind != EffectCar;
-    b.depthOff = m_kind == EffectFilter;
-    b.alphaTest = intValue(PBaseAlphaTestEnable) != 0;
-    b.alphaRef = DWORD(intValue(PBaseAlphaRef));
-    b.blend = intValue(PBaseAlphaBlendEnable) != 0;
-    b.srcBlend = DWORD(intValue(PBaseSrcBlend));
-    b.dstBlend = DWORD(intValue(PBaseDestBlend));
-    b.textures[0] = texture(PDiffusemap);
+    b.cullNone = v.kind != EffectCar;
+    b.depthOff = v.kind == EffectFilter;
+    b.alphaTest = v.intValue(PBaseAlphaTestEnable) != 0;
+    b.alphaRef = DWORD(v.intValue(PBaseAlphaRef));
+    b.blend = v.intValue(PBaseAlphaBlendEnable) != 0;
+    b.srcBlend = DWORD(v.intValue(PBaseSrcBlend));
+    b.dstBlend = DWORD(v.intValue(PBaseDestBlend));
     b.samplers[0] = samplerOf(render::AddressWrap, wrapMip);
-    switch (m_kind)
+    b.samplerCount = uint8_t(samplerCount(v.kind, v.pass));
+    switch (v.kind)
     {
     case EffectWorld:
         b.vertexProgram = render::VpWorld;
         b.fragmentProgram = render::FpWorld;
-        b.samplerCount = 1;
         break;
     case EffectWorldBone:
         b.vertexProgram = render::VpWorldBone;
         b.fragmentProgram = render::FpWorldBone;
-        b.samplerCount = 1;
         break;
     case EffectWorldHeadlight:
     case EffectWorldHeadlightReflect:
-        b.vertexProgram = m_kind == EffectWorldHeadlight ? render::VpWorldHeadlight : render::VpWorldHeadlightReflect;
-        b.fragmentProgram = m_kind == EffectWorldHeadlight ? render::FpWorldHeadlight
+        b.vertexProgram = v.kind == EffectWorldHeadlight ? render::VpWorldHeadlight : render::VpWorldHeadlightReflect;
+        b.fragmentProgram = v.kind == EffectWorldHeadlight ? render::FpWorldHeadlight
                                                            : render::FpWorldHeadlightReflect;
-        b.textures[1] = texture(PHeadlightTex);
         b.samplers[1] = samplerOf(render::AddressClamp, true);
-        b.textures[2] = texture(PHeadlightClipTex);
         b.samplers[2] = samplerOf(render::AddressClamp, true);
-        b.textures[3] = texture(PReflectedTex);
         b.samplers[3] = samplerOf(render::AddressWrap, true);
-        b.samplerCount = m_kind == EffectWorldHeadlight ? 3 : 4;
         break;
     case EffectWorldReflect:
         b.vertexProgram = render::VpWorldReflect;
         b.fragmentProgram = render::FpWorldReflect;
-        b.textures[1] = texture(PReflectedTex);
         b.samplers[1] = samplerOf(render::AddressWrap, true);
-        b.samplerCount = 2;
         break;
     case EffectCar:
         b.vertexProgram = render::VpCar;
         b.fragmentProgram = render::FpCar;
-        b.textures[1] = texture(PEnvMapTex);
         b.samplers[1] = samplerOf(render::AddressClamp, true);
-        b.samplerCount = 2;
         break;
     case EffectFilter:
     default:
         b.vertexProgram = render::VpFilter;
-        b.fragmentProgram = uint8_t(render::FpFilter1 + (m_pass < 4 ? m_pass : 3));
+        b.fragmentProgram = uint8_t(render::FpFilter1 + (v.pass < 4 ? v.pass : 3));
         for (int i = 0; i < 4; ++i)
-        {
-            b.textures[i] = texture(PFilterTexture0 + i);
             b.samplers[i] = samplerOf(render::AddressClamp, false);
-        }
-        b.samplerCount = uint8_t(m_pass < 4 ? m_pass + 1 : 4);
         break;
     }
 }
 
-void Effect::vertexConstants(float* out) const
+void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
 {
-    auto copy = [this](float* to, int p) { memcpy(to, floats(p), s_params[p].floats * sizeof(float)); };
-    switch (m_kind)
+    const View v(effect, own, shared);
+    auto copy = [&v](float* to, int p) { memcpy(to, v.floats(p), s_params[p].floats * sizeof(float)); };
+    switch (v.kind)
     {
     case EffectWorld:
     {
@@ -420,8 +527,8 @@ void Effect::vertexConstants(float* out) const
         copy(c.diffuseRange, PDiffuseRange);
         copy(c.specularMin, PSpecularMin);
         copy(c.specularRange, PSpecularRange);
-        c.powers[0] = floats(PSpecularPower)[0];
-        c.powers[1] = floats(PEnvmapPower)[0];
+        c.powers[0] = v.floats(PSpecularPower)[0];
+        c.powers[1] = v.floats(PEnvmapPower)[0];
         c.powers[2] = c.powers[3] = 0.0f;
         break;
     }
@@ -430,21 +537,22 @@ void Effect::vertexConstants(float* out) const
     }
 }
 
-void Effect::fragmentConstants(float* out) const
+void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
 {
-    switch (m_kind)
+    const View v(effect, own, shared);
+    switch (v.kind)
     {
     case EffectWorldHeadlight:
     case EffectWorldHeadlightReflect:
         memcpy(reinterpret_cast<render::WorldHeadlightFragmentConstants*>(out)->headlightColor,
-               floats(PHeadlightColor), 16);
+               v.floats(PHeadlightColor), 16);
         break;
     case EffectCar:
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, floats(PEnvmapMin), 16);
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, floats(PEnvmapRange), 16);
+        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, v.floats(PEnvmapMin), 16);
+        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, v.floats(PEnvmapRange), 16);
         break;
     case EffectFilter:
-        memcpy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, floats(PFilterWeights), 64);
+        memcpy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, v.floats(PFilterWeights), 64);
         break;
     default:
         break;
@@ -527,8 +635,7 @@ HRESULT Effect::SetValue(WinApplication* app, x86::CPU& cpu, x86::reg32 handle, 
     if (s_params[p].type == TypeTexture)
         return D3DERR_INVALIDCALL;
     const uint32_t n = bytes / 4 < s_params[p].floats ? bytes / 4 : s_params[p].floats;
-    memcpy(floats(p), data, n * 4);
-    ++s_version;
+    store(p, data, n);
     return D3D_OK;
 }
 
@@ -557,12 +664,18 @@ HRESULT Effect::SetInt(WinApplication* app, x86::CPU& cpu, x86::reg32 handle, x8
     if (p < 0)
         return D3DERR_INVALIDCALL;
     if (s_params[p].type == TypeInt)
-        memcpy(floats(p), &value, 4);
+    {
+        store(p, &value, 1);
+    }
     else if (s_params[p].type == TypeFloat)
-        floats(p)[0] = float(value);
+    {
+        const float f = float(value);
+        store(p, &f, 1);
+    }
     else
+    {
         return D3DERR_INVALIDCALL;
-    ++s_version;
+    }
     return D3D_OK;
 }
 
@@ -692,7 +805,6 @@ HRESULT Effect::SetTexture(WinApplication* app, x86::CPU& cpu, x86::reg32 handle
     if (slot)
         slot->release();
     slot = texture;
-    ++s_version;
     return D3D_OK;
 }
 
@@ -788,7 +900,6 @@ HRESULT Effect::Pass(WinApplication* app, x86::CPU& cpu, UINT pass)
     // Parameters keep applying while the pass is active (9.0b): draws read them as they are then.
     m_pass = pass;
     m_device->setEffectPass(this);
-    ++s_version;
     return D3D_OK;
 }
 
