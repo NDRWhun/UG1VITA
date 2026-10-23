@@ -101,17 +101,17 @@ const VertexProgramInfo s_vertexPrograms[VpCount] = {
 };
 
 const FragmentProgramInfo s_fragmentPrograms[FpCount] = {
-    { "ff_color_f", FLOATS(FixedFragmentConstants), COUNT(s_fixedFragment), s_fixedFragment, 0 },
-    { "ff_tex_f", FLOATS(FixedFragmentConstants), COUNT(s_fixedFragment), s_fixedFragment, 1 },
-    { "ff_proj_f", FLOATS(FixedFragmentConstants), COUNT(s_fixedFragment), s_fixedFragment, 1 },
-    { "world_f", FLOATS(WorldFragmentConstants), COUNT(s_worldFragment), s_worldFragment, 1 },
+    { "ff_color_f", FLOATS(FixedFragmentConstants), COUNT(s_fixedFragment), s_fixedFragment, 0, 0 },
+    { "ff_tex_f", FLOATS(FixedFragmentConstants), COUNT(s_fixedFragment), s_fixedFragment, 1, 0 },
+    { "ff_proj_f", FLOATS(FixedFragmentConstants), COUNT(s_fixedFragment), s_fixedFragment, 1, 0 },
+    { "world_f", FLOATS(WorldFragmentConstants), COUNT(s_worldFragment), s_worldFragment, 1, 0 },
     { "worldheadlight_f", FLOATS(WorldHeadlightFragmentConstants), COUNT(s_worldHeadlightFragment),
-      s_worldHeadlightFragment, 3 },
-    { "worldreflect_f", FLOATS(WorldFragmentConstants), COUNT(s_worldFragment), s_worldFragment, 2 },
+      s_worldHeadlightFragment, 3, 0 },
+    { "worldreflect_f", FLOATS(WorldFragmentConstants), COUNT(s_worldFragment), s_worldFragment, 2, 0 },
     { "worldheadlightreflect_f", FLOATS(WorldHeadlightFragmentConstants), COUNT(s_worldHeadlightFragment),
-      s_worldHeadlightFragment, 4 },
-    { "world_f", FLOATS(WorldFragmentConstants), COUNT(s_worldFragment), s_worldFragment, 1 },
-    { "car_f", FLOATS(CarFragmentConstants), COUNT(s_carFragment), s_carFragment, 2 },
+      s_worldHeadlightFragment, 4, 0 },
+    { "world_f", FLOATS(WorldFragmentConstants), COUNT(s_worldFragment), s_worldFragment, 1, 0 },
+    { "car_f", FLOATS(CarFragmentConstants), COUNT(s_carFragment), s_carFragment, 2, 0 },
     { "filter1_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 1,
       BLENDFACTOR(FilterFragmentConstants) },
     { "filter2_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 2,
@@ -120,7 +120,7 @@ const FragmentProgramInfo s_fragmentPrograms[FpCount] = {
       BLENDFACTOR(FilterFragmentConstants) },
     { "filter4_f", FLOATS(FilterFragmentConstants), COUNT(s_filterFragment), s_filterFragment, 4,
       BLENDFACTOR(FilterFragmentConstants) },
-    { "clear_f", FLOATS(ClearFragmentConstants), COUNT(s_clearFragment), s_clearFragment, 0 },
+    { "clear_f", FLOATS(ClearFragmentConstants), COUNT(s_clearFragment), s_clearFragment, 0, 0 },
 };
 
 const char* const s_inputNames[UsageCount] = {
