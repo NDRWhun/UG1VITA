@@ -16,6 +16,7 @@ namespace pf
 static char        s_logPathBuffer[256];
 static const char* s_logPath = nullptr;
 static SceUID      s_logMutex = -1;
+static bool        s_console = false;
 
 // Each line is appended with its own open/close so nothing is lost if the process dies; lines are infrequent (no
 // per-frame logging), so the cost does not matter.
@@ -34,7 +35,8 @@ static void writeLine(const char* level, const char* fmt, va_list args)
 
     if (s_logMutex >= 0)
         sceKernelLockMutex(s_logMutex, 1, nullptr);
-    sceClibPrintf("%s", buffer);
+    if (s_console)
+        sceClibPrintf("%s", buffer);
     if (s_logPath)
     {
         int file = open(s_logPath, O_WRONLY | O_CREAT | O_APPEND, 0666);
@@ -62,6 +64,11 @@ void logInit(const char* logFilePath)
         if (file >= 0)
             close(file);
     }
+}
+
+void logSetConsole(bool enabled)
+{
+    s_console = enabled;
 }
 
 void logShutdown()

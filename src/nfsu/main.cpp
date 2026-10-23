@@ -209,6 +209,7 @@ int main(int, char**)
     x86::mmxSelfTest();
     x86::fpuSelfTest();
     pf::Config::load(dataPath("nfsug1vita.cfg").c_str());
+    pf::logSetConsole(pf::Config::getBool("tty_log", false));
     pf::cores::init();
     pf::perf::init(pf::Config::getBool("perf_log", false));
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);

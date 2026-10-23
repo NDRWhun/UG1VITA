@@ -4,9 +4,12 @@
 namespace pf
 {
 
-// Console output plus an optional log file under the data directory.
+// A log file under the data directory, plus console output when enabled.
 void logInit(const char* logFilePath);
 void logShutdown();
+
+// Console output on or off (off by default).
+void logSetConsole(bool enabled);
 
 void logDebug(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void logInfo(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
