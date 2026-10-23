@@ -259,6 +259,7 @@ void initEffectInterfaces(WinApplication* app);
 
 class Device;
 class Texture;
+struct KeptLevel;
 class Surface;
 class Buffer;
 class VertexDeclaration;
@@ -309,6 +310,8 @@ public:
     void fillDesc(UINT level, D3DSURFACE_DESC* desc) const;
     // The surface of a level (and face), kept while the texture lives; one reference added for the caller.
     Surface* surface(WinApplication* app, uint32_t face, uint32_t level);
+    // Game thread, once per frame: drops kept linear copies over the byte cap whose uploads are finished.
+    static void trimKept();
 
     HRESULT GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* device);
     DWORD SetPriority(WinApplication* app, x86::CPU& cpu, DWORD priority);
@@ -333,16 +336,22 @@ public:
 private:
     HRESULT lock(uint32_t face, uint32_t level, D3DLOCKED_RECT* locked, const RECT* rect, DWORD flags);
     HRESULT unlock(uint32_t face, uint32_t level);
+    // The level's kept linear copy, taken out of the cache; null when there is none.
+    MemMap* takeKept(uint32_t index, uint32_t* ticket);
+    void keep(uint32_t index, MemMap* memory, uint32_t ticket);
+
+    friend struct KeptLevels;
 
     Device*                 m_device;
     render::TextureDesc     m_desc;
     DWORD                   m_format, m_usage, m_pool;
     render::TextureStorage* m_storage;
     std::vector<MemMap*>    m_locks;        // per face * levels + level: the guest buffer of a lock
+    std::vector<uint32_t>   m_tickets;      // the upload reading a locked buffer (0: none)
     std::vector<DWORD>      m_lockFlags;
     std::vector<bool>       m_written;      // the level has been written since creation
     std::vector<uint8_t>    m_lockCounts;   // locks so far, saturating at 2
-    std::vector<MemMap*>    m_shadows;      // linear copy kept for levels locked repeatedly (movie frames)
+    std::vector<KeptLevel*> m_kept;         // the linear copy kept after the last unlock (KeptLevels lock)
     std::vector<Surface*>   m_surfaces;
 };
 

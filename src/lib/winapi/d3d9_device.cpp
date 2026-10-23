@@ -246,6 +246,7 @@ void Device::submit()
     gpu().submitFrame(m_frame, m_vblanks);
     m_frame = nullptr;
     m_stream = nullptr;
+    Texture::trimKept();
 }
 
 void Device::record(uint32_t header, DWORD value)
