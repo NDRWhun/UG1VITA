@@ -141,6 +141,8 @@ uint32_t s_frames = 0;
 uint32_t s_drawCalls = 0;
 uint32_t s_triangles = 0;
 uint32_t s_peakTriangles = 0;
+uint32_t s_lastPresent = 0;
+uint32_t s_frameMax = 0;
 
 }
 
@@ -234,6 +236,9 @@ void framePresented(uint32_t drawCalls, uint32_t triangles)
     if (triangles > s_peakTriangles)
         s_peakTriangles = triangles;
     const uint32_t time = now();
+    if (s_lastPresent && time - s_lastPresent > s_frameMax)
+        s_frameMax = time - s_lastPresent;
+    s_lastPresent = time;
     const uint32_t elapsed = time - s_intervalStart;
     if (elapsed < LogIntervalUs)
         return;
@@ -251,10 +256,11 @@ void framePresented(uint32_t drawCalls, uint32_t triangles)
     const uint32_t preemptMax = s_preemptMax.exchange(0, std::memory_order_relaxed);
     const uint32_t gpuBusyCount = s_gpuBusyCount.exchange(0, std::memory_order_relaxed);
     const uint32_t gpuBusySum = s_gpuBusySum.exchange(0, std::memory_order_relaxed);
-    logInfo("perf: %.1f fps | frame %.1f ms = game %.1f (preempted %.1f) + wait %.1f (fence %.1f) + gil %.1f"
+    logInfo("perf: %.1f fps | frame %.1f ms (max %.1f) = game %.1f (preempted %.1f) + wait %.1f (fence %.1f) + gil %.1f"
             " | render %.1f (queue %.1f) | gpu %.1f flip %.1f busy %.1f (%u%%) | %u calls %u tris (peak %u)"
             " | preempt %.0f/s wait %.2f max %.1f ms",
-            double(frames) * 1000000.0 / double(elapsed), frame, game, msPerFrame(sums[Preempted], frames), wait,
+            double(frames) * 1000000.0 / double(elapsed), frame, double(s_frameMax) / 1000.0, game,
+            msPerFrame(sums[Preempted], frames), wait,
             msPerFrame(sums[FenceWait], frames), gil,
             msPerFrame(sums[Render], frames), msPerFrame(sums[QueueWait], frames),
             msPerFrame(sums[GpuLatency], frames), msPerFrame(sums[FlipWait], frames),
@@ -267,6 +273,7 @@ void framePresented(uint32_t drawCalls, uint32_t triangles)
         reporter(elapsed);
     s_intervalStart = time;
     s_frames = 0;
+    s_frameMax = 0;
     s_drawCalls = 0;
     s_triangles = 0;
     s_peakTriangles = 0;
