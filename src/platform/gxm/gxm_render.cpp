@@ -2,6 +2,7 @@
 
 #include "gxm_render.h"
 #include <platform/config.h>
+#include <platform/cores.h>
 #include <platform/log.h>
 #include <platform/texture.h>
 #include <algorithm>
@@ -454,11 +455,13 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     memset(m_black->data, 0, m_black->bytes);
     for (uint32_t i = 0; i < 64; ++i)
         static_cast<uint8_t*>(m_black->data)[i * 4 + 3] = 0xff;
+    initLists();
     return true;
 }
 
 void FrameRenderer::shutdown()
 {
+    shutdownLists();
     for (auto& v : m_vertexCache)
         sceGxmShaderPatcherReleaseVertexProgram(m_patcher, v.second.program);
     for (auto& f : m_fragmentCache)
@@ -1013,7 +1016,7 @@ void FrameRenderer::draw(Recorder& r, const render::Frame& frame, uint32_t index
         logError("gxm: draw of %u vertices without indices skipped", d.count);
         return;
     }
-    if (m_precomputed)
+    if (m_precomputed.load(std::memory_order_relaxed))
     {
         drawPrecomputed(r, frame, index);
         return;
@@ -1151,7 +1154,7 @@ void FrameRenderer::drawPrecomputed(Recorder& r, const render::Frame& frame, uin
     {
         // Not expected; the immediate path takes over from here.
         logError("gxm: precomputed objects failed (0x%08x): immediate draws from now on", error);
-        m_precomputed = false;
+        m_precomputed.store(false, std::memory_order_relaxed);
         c.valid = false;
         this->draw(r, frame, index);
         return;
@@ -1264,36 +1267,62 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
     m_main.data.begin(frame.index, &finished, this);
     m_main.words.reset();
     const bool lastWritesDone = !presentScene(frame);
+
+    // Where each scene draws, and its draws in order: the colour clears carried to it first.
+    m_order.clear();
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
-        if (m_plan[i].skipped)
-            continue;
+        ScenePlan& p = m_plan[i];
         const render::Scene& scene = frame.scenes[i];
-        const SceGxmColorSurface* color = display;
-        SceGxmSyncObject* sync = nullptr;
-        uint32_t width = scene.width, height = scene.height;
-        float scaleX = 1.0f, scaleY = 1.0f;
+        p.color = display;
+        p.sync = nullptr;
+        p.width = scene.width;
+        p.height = scene.height;
+        p.scaleX = p.scaleY = 1.0f;
         if (scene.target.color)
         {
             const Texture* t = static_cast<const Texture*>(scene.target.color);
-            color = &t->surfaces[scene.target.face < 6 ? scene.target.face : 0];
+            p.color = &t->surfaces[scene.target.face < 6 ? scene.target.face : 0];
         }
         else if (slot.direct)
         {
-            sync = displaySync;
-            width = 960;
-            height = 544;
-            scaleX = 960.0f / float(scene.width);
-            scaleY = 544.0f / float(scene.height);
+            p.sync = displaySync;
+            p.width = 960;
+            p.height = 544;
+            p.scaleX = 960.0f / float(scene.width);
+            p.scaleY = 544.0f / float(scene.height);
         }
         else if (slot.offscreen)
         {
-            color = &slot.offscreen->surfaces[0];
+            p.color = &slot.offscreen->surfaces[0];
         }
         else
         {
-            sync = displaySync;
+            p.sync = displaySync;
         }
+        p.firstOrder = uint32_t(m_order.size());
+        p.firstJob = p.jobCount = 0;
+        if (!p.skipped)
+        {
+            for (uint32_t c = 0; c < i; ++c)
+            {
+                if (m_plan[c].skipped && m_plan[c].carriedTo == i)
+                    for (uint32_t n = 0; n < frame.scenes[c].drawCount; ++n)
+                        m_order.push_back(frame.scenes[c].firstDraw + n);
+            }
+            for (uint32_t n = 0; n < scene.drawCount; ++n)
+                m_order.push_back(scene.firstDraw + n);
+        }
+        p.orderCount = uint32_t(m_order.size()) - p.firstOrder;
+    }
+    const bool lists = recordLists(frame);
+
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const ScenePlan& p = m_plan[i];
+        if (p.skipped)
+            continue;
+        const render::Scene& scene = frame.scenes[i];
         // Scenes whose draws never test depth (filter passes, the HUD) neither load nor store it.
         SceGxmDepthStencilSurface depth;
         const Depth* d = m_plan[i].depthUsed ? static_cast<const Depth*>(scene.target.depth) : nullptr;
@@ -1317,25 +1346,291 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
             sceGxmDepthStencilSurfaceSetForceStoreMode(&depth, store ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED
                                                                      : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
         }
-        sceGxmBeginScene(m_context, 0, renderTarget(width, height), nullptr, nullptr, sync, color, d ? &depth : nullptr);
-        sceGxmSetViewportEnable(m_context, SCE_GXM_VIEWPORT_ENABLED);
-        sceGxmSetRegionClip(m_context, SCE_GXM_REGION_CLIP_NONE, 0, 0, width - 1, height - 1);
-        sceGxmSetTwoSidedEnable(m_context, SCE_GXM_TWO_SIDED_DISABLED);
-        m_main.state.reset(scaleX, scaleY);
-        for (uint32_t c = 0; c < i; ++c)
+        sceGxmBeginScene(m_context, 0, renderTarget(p.width, p.height), nullptr, nullptr, p.sync, p.color,
+                         d ? &depth : nullptr);
+        bool recorded = lists && p.jobCount;
+        for (uint32_t j = 0; j < p.jobCount && recorded; ++j)
+            recorded = m_jobs[p.firstJob + j].ok;
+        if (recorded)
         {
-            if (m_plan[c].skipped && m_plan[c].carriedTo == i)
-                for (uint32_t n = 0; n < frame.scenes[c].drawCount; ++n)
-                    draw(m_main, frame, frame.scenes[c].firstDraw + n);
+            for (uint32_t j = 0; j < p.jobCount; ++j)
+            {
+                const int error = sceGxmExecuteCommandList(m_context, &m_jobs[p.firstJob + j].list);
+                if (error < 0)
+                    logError("gxm: sceGxmExecuteCommandList failed: 0x%08x", error);
+            }
         }
-        for (uint32_t n = 0; n < scene.drawCount; ++n)
-            draw(m_main, frame, scene.firstDraw + n);
+        else
+        {
+            sceGxmSetViewportEnable(m_context, SCE_GXM_VIEWPORT_ENABLED);
+            sceGxmSetRegionClip(m_context, SCE_GXM_REGION_CLIP_NONE, 0, 0, p.width - 1, p.height - 1);
+            sceGxmSetTwoSidedEnable(m_context, SCE_GXM_TWO_SIDED_DISABLED);
+            m_main.state.reset(p.scaleX, p.scaleY);
+            for (uint32_t n = 0; n < p.orderCount; ++n)
+                draw(m_main, frame, m_order[p.firstOrder + n]);
+        }
         const bool last = i + 1 == frame.sceneCount;
         sceGxmEndScene(m_context, nullptr, last && lastWritesDone ? &slot.done : nullptr);
     }
     // The present pass draws with the context's own state again.
     sceGxmSetPrecomputedVertexState(m_context, nullptr);
     sceGxmSetPrecomputedFragmentState(m_context, nullptr);
+}
+
+// ---- Command lists -------------------------------------------------------------------------------------------------
+
+namespace
+{
+
+const uint32_t ListMinimumDraws = 96;   // smaller frames are drawn on the immediate context
+const uint32_t JobMinimumDraws = 32;    // smallest range a list records
+const uint32_t WorkerHostMem = 16 * 1024;
+
+}
+
+// Memory callbacks of the deferred contexts: a whole chunk of the worker's pool, kept until every frame that used it
+// is finished. The chunk a context writes into is its pool's current one.
+void* FrameRenderer::listMemory(FramePool& pool, SceSize requested, SceSize* size)
+{
+    uint32_t granted = 0;
+    void* memory = pool.take(requested, &granted);
+    *size = granted;
+    return memory;
+}
+
+void* FrameRenderer::vdmMemory(void* worker, SceSize requested, SceSize* size)
+{
+    return listMemory(static_cast<Worker*>(worker)->vdm, requested, size);
+}
+
+void* FrameRenderer::vertexMemory(void* worker, SceSize requested, SceSize* size)
+{
+    return listMemory(static_cast<Worker*>(worker)->vertex, requested, size);
+}
+
+void* FrameRenderer::fragmentMemory(void* worker, SceSize requested, SceSize* size)
+{
+    return listMemory(static_cast<Worker*>(worker)->fragment, requested, size);
+}
+
+bool FrameRenderer::createWorker(Worker& w)
+{
+    w.owner = this;
+    w.hostMem = malloc(WorkerHostMem);
+    SceGxmDeferredContextParams params;
+    memset(&params, 0, sizeof(params));
+    params.hostMem = w.hostMem;
+    params.hostMemSize = WorkerHostMem;
+    params.vdmCallback = &vdmMemory;
+    params.vertexCallback = &vertexMemory;
+    params.fragmentCallback = &fragmentMemory;
+    params.callbackData = &w;
+    uint32_t size = 0;
+    params.vdmRingBufferMem = w.vdm.take(0, &size);
+    params.vdmRingBufferMemSize = size;
+    params.vertexRingBufferMem = w.vertex.take(0, &size);
+    params.vertexRingBufferMemSize = size;
+    params.fragmentRingBufferMem = w.fragment.take(0, &size);
+    params.fragmentRingBufferMemSize = size;
+    const int error = sceGxmCreateDeferredContext(&params, &w.recorder.context);
+    if (error < 0)
+    {
+        logError("gxm: sceGxmCreateDeferredContext failed: 0x%08x", error);
+        w.recorder.context = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void FrameRenderer::initLists()
+{
+    if (!Config::getBool("gxm_lists", true))
+    {
+        logInfo("gxm: command lists off (gxm_lists=0)");
+        return;
+    }
+    // The render thread records too; helpers run below guest thread priority, so they only take idle time and
+    // the render thread takes whatever they have not claimed.
+    std::vector<int> cores;
+    if (cores::hasCore3())
+        cores.push_back(3);
+    if (Config::getBool("gxm_core2", true))
+        cores.push_back(2);
+    for (size_t i = 0; i <= cores.size(); ++i)
+    {
+        Worker* w = new Worker();
+        if (!createWorker(*w))
+        {
+            delete w;
+            break;
+        }
+        m_workers.push_back(w);
+    }
+    if (m_workers.empty())
+    {
+        logError("gxm: command lists off: no deferred context");
+        return;
+    }
+    m_jobLock = new Mutex("gxm_jobs", false);
+    m_jobsDone = new CondVar("gxm_jobs_done", *m_jobLock);
+    m_wake = new Semaphore("gxm_wake", 0);
+    static const char* const names[] = { "gxm_list_core3", "gxm_list_core2" };
+    for (size_t i = 1; i < m_workers.size(); ++i)
+    {
+        Worker* w = m_workers[i];
+        const int core = cores[i - 1];
+        w->thread = new Thread(core == 3 ? names[0] : names[1], &workerEntry, w, Thread::PriorityNormal + 4,
+                               64 * 1024, Thread::Cpu0 << core);
+        w->thread->start();
+    }
+    logInfo("gxm: command lists recorded by %u thread(s): render core%s%s", uint32_t(m_workers.size()),
+            m_workers.size() > 1 && cores[0] == 3 ? ", core 3" : "",
+            (m_workers.size() > 2 || (m_workers.size() > 1 && cores[0] == 2)) ? ", core 2" : "");
+}
+
+void FrameRenderer::shutdownLists()
+{
+    if (m_jobLock)
+    {
+        {
+            LockGuard guard(*m_jobLock);
+            m_stop = true;
+        }
+        m_wake->post(int(m_workers.size()));
+    }
+    for (Worker* w : m_workers)
+    {
+        if (w->thread)
+        {
+            w->thread->join();
+            delete w->thread;
+        }
+        if (w->recorder.context)
+            sceGxmDestroyDeferredContext(w->recorder.context);
+        free(w->hostMem);
+        delete w;
+    }
+    m_workers.clear();
+    delete m_jobsDone;
+    delete m_jobLock;
+    delete m_wake;
+    m_jobsDone = nullptr;
+    m_jobLock = nullptr;
+    m_wake = nullptr;
+}
+
+int FrameRenderer::workerEntry(void* worker)
+{
+    Worker& w = *static_cast<Worker*>(worker);
+    FrameRenderer& r = *w.owner;
+    while (true)
+    {
+        r.m_wake->wait();
+        {
+            LockGuard guard(*r.m_jobLock);
+            if (r.m_stop)
+                break;
+        }
+        r.runJobs(w);
+    }
+    return 0;
+}
+
+// Claims jobs until none is left. A worker woken late finds the current frame's jobs, or none.
+void FrameRenderer::runJobs(Worker& w)
+{
+    while (true)
+    {
+        const render::Frame* frame;
+        uint32_t index;
+        {
+            LockGuard guard(*m_jobLock);
+            if (m_stop || m_nextJob >= m_jobs.size())
+                return;
+            index = m_nextJob++;
+            frame = m_jobFrame;
+        }
+        if (w.frame != frame->index)
+        {
+            w.frame = frame->index;
+            w.recorder.data.begin(frame->index, &finished, this);
+            w.vdm.begin(frame->index, &finished, this);
+            w.vertex.begin(frame->index, &finished, this);
+            w.fragment.begin(frame->index, &finished, this);
+            w.recorder.words.reset();
+        }
+        const bool ok = recordJob(w, *frame, m_jobs[index]);
+        LockGuard guard(*m_jobLock);
+        m_jobs[index].ok = ok;
+        if (++m_doneJobs == m_jobs.size())
+            m_jobsDone->signal();
+    }
+}
+
+bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& job)
+{
+    SceGxmContext* context = w.recorder.context;
+    const ScenePlan& p = m_plan[job.scene];
+    int error = sceGxmBeginCommandList(context);
+    if (error < 0)
+    {
+        logError("gxm: sceGxmBeginCommandList failed: 0x%08x", error);
+        return false;
+    }
+    // A list starts from a reset GPU state.
+    sceGxmSetDefaultRegionClipAndViewport(context, p.width - 1, p.height - 1);
+    sceGxmSetViewportEnable(context, SCE_GXM_VIEWPORT_ENABLED);
+    sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_NONE, 0, 0, p.width - 1, p.height - 1);
+    sceGxmSetTwoSidedEnable(context, SCE_GXM_TWO_SIDED_DISABLED);
+    w.recorder.state.reset(p.scaleX, p.scaleY);
+    for (uint32_t n = job.begin; n < job.end; ++n)
+        draw(w.recorder, frame, m_order[n]);
+    SceGxmCommandList list;
+    error = sceGxmEndCommandList(context, &list);
+    if (error < 0)
+    {
+        logError("gxm: sceGxmEndCommandList failed: 0x%08x", error);
+        return false;
+    }
+    const_cast<Job&>(job).list = list;
+    return true;
+}
+
+// Splits the frame's scenes into jobs and records them on the workers and this thread; false: draw immediately.
+bool FrameRenderer::recordLists(const render::Frame& frame)
+{
+    if (m_workers.empty() || m_order.size() < ListMinimumDraws)
+        return false;
+    const uint32_t threads = uint32_t(m_workers.size());
+    {
+        LockGuard guard(*m_jobLock);
+        m_jobs.clear();
+        for (uint32_t i = 0; i < frame.sceneCount; ++i)
+        {
+            ScenePlan& p = m_plan[i];
+            p.firstJob = uint32_t(m_jobs.size());
+            if (p.skipped || !p.orderCount)
+                continue;
+            // About two ranges per thread, so that a late helper leaves less to wait for.
+            const uint32_t size = std::max(JobMinimumDraws, (p.orderCount + 2 * threads - 1) / (2 * threads));
+            for (uint32_t begin = 0; begin < p.orderCount; begin += size)
+            {
+                const uint32_t end = std::min(p.orderCount, begin + size);
+                m_jobs.push_back(Job{ i, p.firstOrder + begin, p.firstOrder + end, false, {} });
+            }
+            p.jobCount = uint32_t(m_jobs.size()) - p.firstJob;
+        }
+        m_jobFrame = &frame;
+        m_nextJob = 0;
+        m_doneJobs = 0;
+    }
+    if (threads > 1)
+        m_wake->post(int(threads - 1));
+    runJobs(*m_workers[0]);
+    LockGuard guard(*m_jobLock);
+    while (m_doneJobs < m_jobs.size())
+        m_jobsDone->wait();
+    return true;
 }
 
 }}

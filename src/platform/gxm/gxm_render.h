@@ -5,8 +5,10 @@
 // drawing of a frame's scenes (render thread). Used by gxm_device.cpp.
 
 #include <platform/render.h>
+#include <platform/sync.h>
 #include <psp2/gxm.h>
 #include <psp2/kernel/sysmem.h>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <unordered_map>
@@ -169,6 +171,13 @@ private:
         bool        depthUsed;      // cleared or tested by a draw
         bool        skipped;        // only colour clears: drawn at the start of scene carriedTo instead
         uint32_t    carriedTo;
+        // Where it draws.
+        const SceGxmColorSurface*   color;
+        SceGxmSyncObject*           sync;
+        uint32_t                    width, height;
+        float                       scaleX, scaleY;
+        uint32_t                    firstOrder, orderCount;     // its draws in m_order
+        uint32_t                    firstJob, jobCount;
     };
     void planFrame(const render::Frame& frame, bool stretchDirect);
     struct Pending
@@ -236,6 +245,25 @@ private:
         FramePool               data{"gxm_draws", 512 * 1024};
         HostArena               words;
     };
+    // A thread recording command lists: a deferred context and the pools its memory callbacks draw from.
+    struct Worker
+    {
+        FrameRenderer*          owner = nullptr;
+        Recorder                recorder;
+        FramePool               vdm{"gxm_list_vdm", 64 * 1024};
+        FramePool               vertex{"gxm_list_vertex", 256 * 1024};
+        FramePool               fragment{"gxm_list_fragment", 64 * 1024};
+        void*                   hostMem = nullptr;
+        uint32_t                frame = 0;      // frame its pools were begun for
+        Thread*                 thread = nullptr;
+    };
+    // A range of a scene's draws recorded into one command list.
+    struct Job
+    {
+        uint32_t                scene, begin, end;  // m_order range
+        bool                    ok;
+        SceGxmCommandList       list;
+    };
 
     void freePending();
     void destroy(int kind, void* object);
@@ -252,6 +280,19 @@ private:
     SceGxmTexture samplerTexture(const render::DrawState& s, uint32_t i) const;
     void upload(void* buffer, const render::UniformField* fields, uint8_t count,
                 const std::vector<const SceGxmProgramParameter*>& parameters, const float* constants);
+    // Command lists (setting gxm_lists): workers on the render core, core 3 and core 2 record the frame's scenes in
+    // ranges; the immediate context executes the lists in order.
+    void initLists();
+    void shutdownLists();
+    bool createWorker(Worker& worker);
+    static int workerEntry(void* worker);
+    static void* listMemory(FramePool& pool, SceSize requested, SceSize* size);
+    static void* vdmMemory(void* worker, SceSize requested, SceSize* size);
+    static void* vertexMemory(void* worker, SceSize requested, SceSize* size);
+    static void* fragmentMemory(void* worker, SceSize requested, SceSize* size);
+    bool recordLists(const render::Frame& frame);
+    void runJobs(Worker& worker);
+    bool recordJob(Worker& worker, const render::Frame& frame, const Job& job);
 
     SceGxmContext*          m_context = nullptr;
     SceGxmShaderPatcher*    m_patcher = nullptr;
@@ -272,11 +313,22 @@ private:
     std::unordered_map<uint64_t, FragmentEntry>            m_fragmentCache;
     std::map<uint32_t, SceGxmRenderTarget*>                 m_targets;
 
-    // Render thread.
-    bool                        m_precomputed = true;   // precomputed states and draws (setting gxm_precomputed)
+    // Render thread (and workers, read only while they record).
+    std::atomic<bool>           m_precomputed{true};    // precomputed states and draws (setting gxm_precomputed)
     Recorder                    m_main;                 // the immediate context
     std::vector<DrawPrograms>   m_programs;             // per draw of the frame being drawn
-    std::vector<ScenePlan>  m_plan;
+    std::vector<ScenePlan>      m_plan;
+    std::vector<uint32_t>       m_order;                // draw indices of the scenes, carried clears first
+
+    // Command lists. m_workers[0] is the render thread's own deferred context.
+    std::vector<Worker*>        m_workers;
+    Mutex*                      m_jobLock = nullptr;
+    CondVar*                    m_jobsDone = nullptr;
+    Semaphore*                  m_wake = nullptr;
+    std::vector<Job>            m_jobs;                 // guarded by m_jobLock while workers run
+    const render::Frame*        m_jobFrame = nullptr;
+    uint32_t                    m_nextJob = 0, m_doneJobs = 0;
+    bool                        m_stop = false;
 };
 
 }}
