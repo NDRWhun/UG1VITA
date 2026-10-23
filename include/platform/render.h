@@ -404,6 +404,12 @@ struct Frame
     uint32_t    constantCount, constantCapacity;   // floats
     uint8_t*    vertices;                           // GPU-visible arena for user-pointer draws
     uint32_t    vertexBytes, vertexCapacity;
+
+    // The layer's recording of the frame: resolve (render thread, before the frame is drawn) completes the
+    // draws from it. Null: the draws are complete.
+    void        (*resolve)(Frame& frame);
+    const uint32_t* commands;
+    uint32_t    commandCount;                       // words
 };
 
 // Arena helpers: null when the arena is full.

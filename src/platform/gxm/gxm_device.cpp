@@ -556,6 +556,8 @@ void Device::Impl::run()
 
         const bool timed = perf::enabled() && queued;
         const uint32_t start = timed ? perf::now() : 0;
+        if (frame && frame->resolve)
+            frame->resolve(*frame);
         uint32_t calls = 0, triangles = 0;
         if (frame && timed)
         {

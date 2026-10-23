@@ -422,6 +422,9 @@ render::Frame* FrameRenderer::beginFrame(uint32_t width, uint32_t height)
     f.vertices = static_cast<uint8_t*>(s.vertices);
     f.vertexBytes = 0;
     f.vertexCapacity = SlotVertexBytes;
+    f.resolve = nullptr;
+    f.commands = nullptr;
+    f.commandCount = 0;
     return &f;
 }
 
@@ -790,6 +793,8 @@ void FrameRenderer::upload(void* buffer, const render::UniformField* fields, uin
 
 void FrameRenderer::draw(const render::Frame& frame, const render::DrawCall& d)
 {
+    if (!d.count)
+        return;     // dropped by the layer
     const render::DrawState& s = d.state;
     const bool first = !m_lastValid;
     const bool programs = first || s.vertexProgram != m_last.vertexProgram || s.fragmentProgram != m_last.fragmentProgram
