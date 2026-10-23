@@ -70,6 +70,11 @@ NATIVE_OVERRIDES = [
     # computed on worker threads; the box against frustum test is native for every caller.
     0x446620,   # scenery culler: every view, every visible section
     0x40db20,   # bounding box against the view frustum: 0 outside, 1 partial, 2 inside
+    # Track topology queries (src/nfsu/coll.cpp): ground height and polygon tests for wheels, cameras, AI and
+    # effects, and the polygon cache rebuild around a point.
+    0x440a40,   # ground height under a point from a topology coordinate's polygon cache
+    0x4400e0,   # distance of a point outside a track polygon
+    0x4407b0,   # interest box and polygon cache of a topology coordinate
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
