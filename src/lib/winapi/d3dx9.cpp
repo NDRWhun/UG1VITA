@@ -415,6 +415,13 @@ void syncEffectValues(Stream& stream)
     s_dirty.clear();
 }
 
+void markEffectValuesDirty()
+{
+    for (Values* v : s_blocks)
+        if (v)
+            v->markDirty();
+}
+
 uint32_t effectBlockFloats()
 {
     initOffsets();

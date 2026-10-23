@@ -1,17 +1,12 @@
 // Native track topology queries: the ground height under a point (guest 0x440a40), the distance of a point outside
 // a track polygon (0x4400e0) and the rebuild of a topology coordinate's polygon cache around a point (0x4407b0 with
 // its callees 0x567600, 0x441c10, 0x441500, 0x441530, 0x441660, 0x441b90, 0x441b20, 0x4400d0, 0x43ff30, 0x43fd20,
-// 0x43fe70, 0x566ed0, 0x567370). Wheels, cameras, AI, effects and car rendering query the ground through these.
+// 0x43fe70, 0x566ed0, 0x567370).
 //
-// Bit-exact with the translated guest code: every x87 chain is evaluated in double in the guest's order and
-// rounded to float where the guest stores a dword, stack temporaries included. Guest memory is written in the
-// guest's order; stores to the guest's own stack frames (dead after the return) are not made. The returned
-// registers and flags, the x87 status word (C0, C2, C3 of the last compare the translated code makes) and the
-// x87 slot above the stack are reproduced. Compares of 0x441660 and 0x441530 are not tracked: 0x441c10 always
-// compares again after them.
-//
-// The queries are made one at a time from sequential game code and the cache rebuild changes shared state (the
-// track polygon slot pool and list), so this runs on the calling thread.
+// Every x87 chain is evaluated in double in the guest's order and rounded to float where the guest stores a dword,
+// stack temporaries included. Guest memory is written in the guest's order, the guest's own stack frames excepted.
+// The outputs are guest memory, esp, the x87 stack and the registers the callers read: eax, ecx and edx of
+// 0x440a40, ecx and the upper half of eax of 0x4400e0, ecx and edx of 0x4407b0. Runs on the calling thread.
 
 #include <platform/config.h>
 #include <platform/log.h>
@@ -74,7 +69,6 @@ const int MaxPolygons = 0xa0;           // a coordinate's polygon cache
 inline double ld(reg32 address) { return double(rc::ldf32(address)); }
 inline double asDouble(reg32 bits) { float f; memcpy(&f, &bits, 4); return double(f); }
 inline reg32 bits(float value) { reg32 r; memcpy(&r, &value, 4); return r; }
-inline bool parityFlag(reg32 value) { return !x86::parity8(reg8(value)); }
 // A track polygon's int16 grid coordinate at p (scaled by 2^13, then to world units).
 inline double fixedCoordinate(reg32 p, double scale)
 {
@@ -98,26 +92,6 @@ const Settings& settings()
     }();
     return s;
 }
-
-// The x87 state guest code leaves behind: the operands of its last compare and the last value it left in the
-// register slot above the stack.
-struct X87
-{
-    bool compared = false;
-    bool slotSet = false;
-    double a = 0, b = 0;
-    double slot = 0;
-
-    void compare(double x, double y) { compared = true; a = x; b = y; }
-    void setSlot(double x) { slotSet = true; slot = x; }
-    void apply(x86::CPU& cpu) const
-    {
-        if (compared)
-            cpu.fpu.compare(a, b);
-        if (slotSet)
-            cpu.fpu.regs[(cpu.fpu.count + 1) & 7] = slot;
-    }
-};
 
 // Guest stores. Shadow mode records the old values to undo them.
 struct Writer
@@ -162,16 +136,14 @@ inline double edgeSide(reg32 p, reg32 q, reg32 a, reg32 b, float& stored)
 
 // Largest edge value of point q against polygon p (vertices at +0x30, three or four by [p+9]), -1 at least; it
 // returns as soon as one is positive. stored: the last edge value in the guest's slot, which it pops into ecx.
-double amountOutside(reg32 p, reg32 q, X87& x, float& stored)
+double amountOutside(reg32 p, reg32 q, float& stored)
 {
     const double zero = ld(Zero);
     double v = ld(MinusOne);
     const double s0 = edgeSide(p, q, 0x30, 0x40, stored);
-    x.compare(v, s0);
     if (!(v > s0))
     {
         v = s0;
-        x.compare(v, zero);
         if (v > zero)
             return v;
     }
@@ -179,17 +151,14 @@ double amountOutside(reg32 p, reg32 q, X87& x, float& stored)
     for (const auto& e : edges)
     {
         const double s = edgeSide(p, q, e[0], e[1], stored);
-        x.compare(v, s);
         if (!(v > s))
             v = s;
-        x.compare(v, zero);
         if (v > zero)
             return v;
     }
     if (rc::ld8(p + 9) != 4)
         return v;
     const double s = edgeSide(p, q, 0x50, 0x60, stored);
-    x.compare(v, s);
     if (!(v > s))
         v = s;
     return v;
@@ -209,26 +178,22 @@ inline double planeHeight(reg32 p, reg32 q)
 
 // Grows the box lo..hi (float2 each) to hold the square of half size r around (px, py) (0x567600). Returns the
 // guest's ecx: its stack slot, last holding hi.x.
-reg32 expandBox(double px, double py, reg32 lo, reg32 hi, double r, X87& x, Writer& w)
+reg32 expandBox(double px, double py, reg32 lo, reg32 hi, double r, Writer& w)
 {
     double a = px - r;
     const double lx = ld(lo);
-    x.compare(lx, a);
     if (lx < a)
         a = lx;
     double b = py - r;
     const double ly = ld(lo + 4);
-    x.compare(ly, b);
     if (ly < b)
         b = ly;
     double c = r + px;
     const double hx = ld(hi);
-    x.compare(hx, c);
     if (hx > c)
         c = hx;
     double d = r + py;
     const double hy = ld(hi + 4);
-    x.compare(hy, d);
     if (hy > d)
         d = hy;
     w.stf32(lo, float(a));
@@ -238,11 +203,10 @@ reg32 expandBox(double px, double py, reg32 lo, reg32 hi, double r, X87& x, Writ
     return bits(float(hx));
 }
 
-// A coordinate rounded down to the grid of 32 units, through _ftol2, which leaves its input in the slot.
-double gridCorner(double value, X87& x)
+// A coordinate rounded down to the grid of 32 units, through _ftol2.
+double gridCorner(double value)
 {
     const double scaled = value * ld(ToFixed);
-    x.setSlot(scaled);
     const reg32 fixed = reg32(x86::fistInteger<sreg64>(std::trunc(scaled))) & 0xffe00000u;
     return double(sreg32(fixed)) * ld(FromFixed);
 }
@@ -338,8 +302,7 @@ reg32 slotIndex(reg32 pool, reg32 address)
     return 0xffffffffu;
 }
 
-// Frees up to 101 unused track polygons of the tree's list into the pool (0x441b20); the guest breaks when there
-// is none.
+// Frees up to 101 unused track polygons of the tree's list into the pool (0x441b20); int3 when there is none.
 void flushUnused(reg32 tree, Writer& w)
 {
     const reg32 head = tree + 0x50;
@@ -376,7 +339,7 @@ void flushUnused(reg32 tree, Writer& w)
 
 // A track polygon at p built from topology polygon t: bounds, vertices, normal, plane distance (0x43ff30 with
 // 0x43fd20 and 0x567370).
-void buildTrackPolygon(reg32 p, reg32 t, X87& x, Writer& w)
+void buildTrackPolygon(reg32 p, reg32 t, Writer& w)
 {
     w.st8(p + 0xb, rc::ld8(t + 2));
     w.st8(p + 0xa, rc::ld8(t + 3));
@@ -420,7 +383,6 @@ void buildTrackPolygon(reg32 p, reg32 t, X87& x, Writer& w)
     length += ny * ny;
     length += nz * nz;
     length = std::sqrt(length);
-    x.compare(length, ld(Zero));
     reg32 n[3];
     if (length == ld(Zero))
     {
@@ -448,7 +410,7 @@ void buildTrackPolygon(reg32 p, reg32 t, X87& x, Writer& w)
 
 // The track polygon of topology polygon t, made from a free pool slot and appended to the tree's list if it has
 // none; its use count goes up (0x441b90).
-reg32 assignTrackPolygon(reg32 t, reg32 tree, X87& x, Writer& w)
+reg32 assignTrackPolygon(reg32 t, reg32 tree, Writer& w)
 {
     const sreg32 slot = sreg32(sreg16(rc::ld16(t + 6)));
     if (slot >= 0)
@@ -470,7 +432,7 @@ reg32 assignTrackPolygon(reg32 t, reg32 tree, X87& x, Writer& w)
             w.st32(pool + 0x1c, used);
         w.st32(pool + 0x18, used);
         w.st32(pool + 0x10, next);
-        buildTrackPolygon(freeSlot, t, x, w);
+        buildTrackPolygon(freeSlot, t, w);
         p = freeSlot;
     }
     const reg32 head = tree + 0x50, tail = rc::ld32(tree + 0x54);
@@ -483,37 +445,29 @@ reg32 assignTrackPolygon(reg32 t, reg32 tree, X87& x, Writer& w)
 }
 
 // The track polygons of every grid square that the box lo..hi touches, at most capacity (0x441c10).
-sreg32 buildTrackPolygons(reg32 lo, reg32 hi, reg32 tree, reg32* out, sreg32 capacity, X87& x, Writer& w)
+sreg32 buildTrackPolygons(reg32 lo, reg32 hi, reg32 tree, reg32* out, sreg32 capacity, Writer& w)
 {
     reg32 found[MaxPolygons];
     sreg32 n = 0;
     const double gridMin = ld(GridMin), gridMax = ld(GridMax), cell = ld(Cell);
     const double minX = ld(lo), maxX = ld(hi), minY = ld(lo + 4), maxY = ld(hi + 4);
-    x.compare(minX, gridMin);
     if (!(minX > gridMin))
         return 0;
-    x.compare(maxX, gridMax);
     if (!(maxX < gridMax))
         return 0;
-    x.compare(minY, gridMin);
     if (!(minY > gridMin))
         return 0;
-    x.compare(maxY, gridMax);
     if (!(maxY < gridMax))
         return 0;
-    // 0x441500 returns the corner in the slot.
-    const double firstY = gridCorner(minY, x);
-    x.setSlot(firstY);
+    const double firstY = gridCorner(minY);
     float y = float(firstY);
-    x.compare(firstY, maxY);
     if (firstY <= maxY)
     {
         double nextY;
         do
         {
-            const double firstX = gridCorner(minX, x);
+            const double firstX = gridCorner(minX);
             float xf = float(firstX);
-            x.compare(firstX, maxX);
             if (firstX <= maxX)
             {
                 double nextX;
@@ -524,58 +478,39 @@ sreg32 buildTrackPolygons(reg32 lo, reg32 hi, reg32 tree, reg32* out, sreg32 cap
                         n += squarePolygons(square, lo, hi, tree, found + n, capacity - n, w);
                     nextX = double(xf) + cell;
                     xf = float(nextX);
-                    x.compare(nextX, maxX);
                 } while (nextX <= maxX);
             }
             nextY = double(y) + cell;
             y = float(nextY);
-            x.compare(nextY, maxY);
         } while (nextY <= maxY);
     }
     for (sreg32 k = 0; k < n; ++k)
     {
         w.st8(found[k], 0);
-        out[k] = assignTrackPolygon(found[k], tree, x, w);
+        out[k] = assignTrackPolygon(found[k], tree, w);
     }
     return n;
 }
 
-// Registers the interest box rebuild returns. eaxStatus: eax holds the x87 status word in its low half.
+// Registers the interest box rebuild returns.
 struct BoxResult
 {
-    reg32 eax, ecx, edx;
-    bool eaxStatus;
-    bool cf, pf, zf;
+    reg32 ecx, edx;
 };
 
 // Sets the coordinate's interest box around pt (half size radius + 0.5, stretched along vel when given) and, if
 // it is not inside the old box, refills its polygon cache: plain, then flag 2, then flag 8 polygons (0x4407b0).
-BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, X87& x, Writer& w)
+BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, Writer& w)
 {
     w.st32(coord, FloatMax);
     w.st32(coord + 4, FloatMax);
     w.st32(coord + 8, FloatLowest);
     w.st32(coord + 0xc, FloatLowest);
     const double radius = asDouble(radiusBits);
-    const reg32 slot = expandBox(ld(pt), ld(pt + 4), coord, coord + 8, radius, x, w);
-    {
-        const double minX = ld(coord), maxX = ld(coord + 8), minY = ld(coord + 4), maxY = ld(coord + 0xc);
-        x.compare(minX, ld(coord + 0x10));
-        if (minX >= ld(coord + 0x10))
-        {
-            x.compare(maxX, ld(coord + 0x18));
-            if (maxX <= ld(coord + 0x18))
-            {
-                x.compare(minY, ld(coord + 0x14));
-                if (minY >= ld(coord + 0x14))
-                {
-                    x.compare(maxY, ld(coord + 0x1c));
-                    if (maxY <= ld(coord + 0x1c))
-                        return BoxResult{radiusBits & 0xffff0000u, slot, coord + 0x18, true, false, false, false};
-                }
-            }
-        }
-    }
+    const reg32 slot = expandBox(ld(pt), ld(pt + 4), coord, coord + 8, radius, w);
+    if (ld(coord) >= ld(coord + 0x10) && ld(coord + 8) <= ld(coord + 0x18) && ld(coord + 4) >= ld(coord + 0x14)
+        && ld(coord + 0xc) <= ld(coord + 0x1c))
+        return BoxResult{slot, coord + 0x18};
     const sreg32 previous = sreg32(rc::ld32(coord + 0x2a0));
     for (sreg32 k = 0; k < previous; ++k)
     {
@@ -597,7 +532,7 @@ BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, X87
     if (vel == 0)
     {
         resetBox();
-        expandBox(ld(pt), ld(pt + 4), lo, hi, r, x, w);
+        expandBox(ld(pt), ld(pt + 4), lo, hi, r, w);
     }
     else
     {
@@ -606,17 +541,16 @@ BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, X87
         for (int step = 0;;)
         {
             resetBox();
-            expandBox(ld(pt), ld(pt + 4), lo, hi, r, x, w);
+            expandBox(ld(pt), ld(pt + 4), lo, hi, r, w);
             double fx = double(t) * ld(vel);
             fx += ld(pt);
             double fy = double(t) * ld(vel + 4);
             fy += ld(pt + 4);
-            expandBox(double(float(fx)), double(float(fy)), lo, hi, r, x, w);
+            expandBox(double(float(fx)), double(float(fy)), lo, hi, r, w);
             const double dx = ld(lo) - ld(hi), dy = ld(lo + 4) - ld(hi + 4);
             double square = dx * dx;
             square += dy * dy;
             const double size = std::sqrt(square);
-            x.compare(size, ld(SettleDistance));
             if (size < ld(SettleDistance))
                 break;
             t = float(double(t) * ld(Shrink));
@@ -627,9 +561,7 @@ BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, X87
         }
     }
     reg32 polygons[MaxPolygons];
-    const sreg32 n = buildTrackPolygons(lo, hi, TopologyTree, polygons, MaxPolygons, x, w);
-    // pf follows the guest's last test: of n, or of a polygon's flags.
-    bool pf = parityFlag(reg32(n));
+    const sreg32 n = buildTrackPolygons(lo, hi, TopologyTree, polygons, MaxPolygons, w);
     reg32 ecx = 0;
     const auto append = [&](reg8 mask, bool set)
     {
@@ -637,7 +569,6 @@ BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, X87
         {
             const reg32 p = polygons[i];
             const reg8 r = rc::ld8(p + 0xa) & mask;
-            pf = parityFlag(r);
             if ((r != 0) == set)
             {
                 w.st32(coord + 0x20 + 4 * ecx, p);
@@ -648,21 +579,15 @@ BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, X87
     append(0xa, false);
     w.st32(coord + 0x2a4, ecx);
     if (ecx != reg32(n))
-    {
-        pf = parityFlag(reg32(n));
         append(2, true);
-    }
     w.st32(coord + 0x2a8, ecx - rc::ld32(coord + 0x2a4));
     if (ecx != reg32(n))
-    {
-        pf = parityFlag(reg32(n));
         append(8, true);
-    }
     const reg32 a = ecx - rc::ld32(coord + 0x2a4), b = rc::ld32(coord + 0x2a8);
     ecx = a - b;
     w.st32(coord + 0x2ac, ecx);
     w.st32(coord + 0x2a0, reg32(n));
-    return BoxResult{reg32(n), ecx, b, false, a < b, pf, a == b};
+    return BoxResult{ecx, b};
 }
 
 // ---- entries ----
@@ -670,11 +595,8 @@ BoxResult setInterestBox(reg32 coord, reg32 pt, reg32 radiusBits, reg32 vel, X87
 // 0x4400e0: ecx = polygon, edx = point; st0 = the distance.
 void amountOutsideNative(x86::CPU& cpu)
 {
-    X87 x;
     float stored;
-    const double v = amountOutside(cpu.ecx, cpu.edx, x, stored);
-    x.apply(cpu);
-    cpu.eax = (cpu.eax & 0xffff0000u) | cpu.fpu.status.word;
+    const double v = amountOutside(cpu.ecx, cpu.edx, stored);
     cpu.ecx = bits(stored);
     cpu.fpu.regs[(cpu.fpu.count + 1) & 7] = v;
     cpu.fpu.count += 1;
@@ -685,16 +607,10 @@ void amountOutsideNative(x86::CPU& cpu)
 void interestBoxNative(x86::CPU& cpu, Writer& w)
 {
     const reg32 esp = cpu.esp;
-    X87 x;
-    const BoxResult r = setInterestBox(cpu.edi, rc::ld32(esp + 4), rc::ld32(esp + 8), rc::ld32(esp + 0xc), x, w);
-    x.apply(cpu);
-    cpu.eax = r.eaxStatus ? r.eax | cpu.fpu.status.word : r.eax;
+    const BoxResult r = setInterestBox(cpu.edi, rc::ld32(esp + 4), rc::ld32(esp + 8), rc::ld32(esp + 0xc), w);
     cpu.ecx = r.ecx;
     cpu.edx = r.edx;
     cpu.esp = esp + 0x10;
-    cpu.flags.cf = r.cf;
-    cpu.flags.pf = r.pf;
-    cpu.flags.zf = r.zf;
 }
 
 // 0x440a40: stack: coordinate, point, terrain out, normal out, on-track flag out; st0 = the ground height. The
@@ -705,7 +621,6 @@ void elevationNative(x86::CPU& cpu, Writer& w)
     const reg32 esp = cpu.esp;
     const reg32 coord = rc::ld32(esp + 4), pt = rc::ld32(esp + 8);
     const reg32 terrain = rc::ld32(esp + 0xc), normal = rc::ld32(esp + 0x10), flag = rc::ld32(esp + 0x14);
-    X87 x;
     const double zero = ld(Zero);
     reg32 eax = 0, ecx = 0, edx = cpu.edx;
     double height = 0;
@@ -717,8 +632,7 @@ void elevationNative(x86::CPU& cpu, Writer& w)
     {
         edx = pt;
         float stored;
-        const double outside = amountOutside(last, pt, x, stored);
-        x.compare(outside, zero);
+        const double outside = amountOutside(last, pt, stored);
         if (outside < zero)
         {
             height = planeHeight(last, pt);
@@ -746,23 +660,8 @@ void elevationNative(x86::CPU& cpu, Writer& w)
     if (!done)
     {
         const double px = ld(pt), py = ld(pt + 4);
-        bool rebuild = true;
-        x.compare(px, ld(coord));
-        if (!(px < ld(coord)))
-        {
-            x.compare(px, ld(coord + 8));
-            if (!(px > ld(coord + 8)))
-            {
-                x.compare(py, ld(coord + 4));
-                if (!(py < ld(coord + 4)))
-                {
-                    x.compare(py, ld(coord + 0xc));
-                    rebuild = py > ld(coord + 0xc);
-                }
-            }
-        }
-        if (rebuild)
-            edx = setInterestBox(coord, pt, 0x41000000u, 0, x, w).edx;
+        if (px < ld(coord) || px > ld(coord + 8) || py < ld(coord + 4) || py > ld(coord + 0xc))
+            edx = setInterestBox(coord, pt, 0x41000000u, 0, w).edx;
         // Pass 0 takes polygons below z + 1, pass 1 any.
         float limit = float(ld(pt + 8) + ld(One));
         sreg32 index = -1;
@@ -773,35 +672,27 @@ void elevationNative(x86::CPU& cpu, Writer& w)
             for (sreg32 i = 0; i < sreg32(rc::ld32(coord + 0x2a4)); ++i)
             {
                 const reg32 p = rc::ld32(coord + 0x20 + 4 * reg32(i));
-                x.compare(px, ld(p + 0x14));
                 if (!(px >= ld(p + 0x14)))
                     continue;
-                x.compare(px, ld(p + 0x1c));
                 if (!(px <= ld(p + 0x1c)))
                     continue;
-                x.compare(py, ld(p + 0x18));
                 if (!(py >= ld(p + 0x18)))
                     continue;
-                x.compare(py, ld(p + 0x20));
                 if (!(py <= ld(p + 0x20)))
                     continue;
                 edx = pt;
                 float stored;
-                const double outside = amountOutside(p, pt, x, stored);
+                const double outside = amountOutside(p, pt, stored);
                 const float outsideStored = float(outside);
-                x.compare(outside, zero);
                 if (!(outside <= zero))
                     continue;
                 const double h = planeHeight(p, pt);
-                x.compare(h, double(best));
                 if (!(h > double(best)))
                     continue;
-                x.compare(h, double(limit));
                 if (!(h < double(limit)))
                     continue;
                 if (!(rc::ld8(p + 0xa) & 1))
                 {
-                    x.compare(double(outsideStored), zero);
                     if (double(outsideStored) < zero)
                     {
                         // Strictly inside a plain polygon: taken at once and remembered.
@@ -837,7 +728,7 @@ void elevationNative(x86::CPU& cpu, Writer& w)
         }
         else
         {
-            // Polygons found after the first four move to the front of the cache.
+            // A polygon found after the first five moves to the front of the cache.
             ecx = rc::ld32(coord + 0x20 + 4 * reg32(index));
             if (index > 4)
             {
@@ -865,15 +756,9 @@ void elevationNative(x86::CPU& cpu, Writer& w)
             }
         }
     }
-    x.apply(cpu);
     cpu.eax = eax;
     cpu.ecx = ecx;
     cpu.edx = edx;
-    // add esp, 0xc before the ret 0x14.
-    const reg32 frame = esp - 0xc;
-    cpu.flags.cf = frame + 0xc < frame;
-    cpu.flags.zf = frame + 0xc == 0;
-    cpu.flags.pf = parityFlag(normal);
     cpu.esp = esp + 0x18;
     cpu.fpu.regs[(cpu.fpu.count + 1) & 7] = height;
     cpu.fpu.count += 1;
@@ -881,8 +766,7 @@ void elevationNative(x86::CPU& cpu, Writer& w)
 
 // ---- shadow mode ----
 
-// NaN against NaN with another sign or payload is counted apart: the compilers may swap the operands of a
-// commutative operation, in the generated code as here, which picks the NaN that propagates.
+// Calls and differing calls per entry; NaN against NaN with another sign or payload counts as equal, in nanOnly.
 struct Shadow
 {
     uint32_t calls[3] = {}, differing[3] = {};
@@ -904,15 +788,19 @@ inline bool nanPair(reg32 g, reg32 n)
 }
 const uint32_t ShadowLogLimit = 20;
 const char* const EntryNames[3] = {"elevation", "outside", "interest box"};
+// The bits of eax, ecx and edx each entry's callers read.
+const reg32 OutputMasks[3][3] = {
+    {0xffffffffu, 0xffffffffu, 0xffffffffu}, {0xffff0000u, 0xffffffffu, 0}, {0, 0xffffffffu, 0xffffffffu}};
 
-bool compareRegisters(const x86::CPU& guest, const x86::CPU& native, char* text, size_t size)
+// The outputs: eax, ecx and edx as masked, the preserved registers, esp, the x87 depth and the x87 stack.
+bool compareRegisters(int entry, const x86::CPU& guest, const x86::CPU& native, char* text, size_t size)
 {
+    const reg32* mask = OutputMasks[entry];
     const struct { const char* name; reg32 g, n; } regs[] = {
-        {"eax", guest.eax, native.eax}, {"ecx", guest.ecx, native.ecx}, {"edx", guest.edx, native.edx},
-        {"ebx", guest.ebx, native.ebx}, {"esp", guest.esp, native.esp}, {"ebp", guest.ebp, native.ebp},
-        {"esi", guest.esi, native.esi}, {"edi", guest.edi, native.edi},
-        {"eflags", guest.flags.eflags, native.flags.eflags}, {"x87 depth", guest.fpu.count, native.fpu.count},
-        {"x87 status", guest.fpu.status.word, native.fpu.status.word},
+        {"eax", guest.eax & mask[0], native.eax & mask[0]}, {"ecx", guest.ecx & mask[1], native.ecx & mask[1]},
+        {"edx", guest.edx & mask[2], native.edx & mask[2]}, {"ebx", guest.ebx, native.ebx},
+        {"esp", guest.esp, native.esp}, {"ebp", guest.ebp, native.ebp}, {"esi", guest.esi, native.esi},
+        {"edi", guest.edi, native.edi}, {"x87 depth", guest.fpu.count, native.fpu.count},
     };
     for (const auto& r : regs)
     {
@@ -922,9 +810,9 @@ bool compareRegisters(const x86::CPU& guest, const x86::CPU& native, char* text,
             return false;
         }
     }
-    for (int i = 0; i < 8; ++i)
+    for (reg32 i = 0; i < std::min<reg32>(guest.fpu.count, 8); ++i)
     {
-        const double g = guest.fpu.regs[i], n = native.fpu.regs[i];
+        const double g = guest.fpu.regs[(guest.fpu.count - i) & 7], n = native.fpu.regs[(native.fpu.count - i) & 7];
         if (memcmp(&g, &n, sizeof(g)) != 0)
         {
             if (std::isnan(g) && std::isnan(n))
@@ -932,7 +820,7 @@ bool compareRegisters(const x86::CPU& guest, const x86::CPU& native, char* text,
                 ++s_shadow.nanOnly;
                 continue;
             }
-            snprintf(text, size, "x87 register slot %d guest %.17g native %.17g", i, g, n);
+            snprintf(text, size, "st(%u) guest %.17g native %.17g", unsigned(i), g, n);
             return false;
         }
     }
@@ -948,7 +836,7 @@ struct Region
 };
 
 // Runs the native entry with its stores recorded and undone, then the guest code (whose result stays), and logs
-// the first difference: registers, x87 state, every native store, and guest stores the native code did not make
+// the first difference: registers, the x87 stack, every native store, and guest stores the native code did not make
 // in the coordinate, the outputs and (when the cache was rebuilt) the polygon pool and list head.
 template< typename Native >
 void shadowRun(int entry, win32::WinApplication* app, x86::CPU& cpu, Native native,
@@ -1003,7 +891,7 @@ void shadowRun(int entry, win32::WinApplication* app, x86::CPU& cpu, Native nati
     guest(app, cpu);
     ++s.calls[entry];
     char text[200] = {};
-    bool same = compareRegisters(cpu, result, text, sizeof(text));
+    bool same = compareRegisters(entry, cpu, result, text, sizeof(text));
     for (const Store& st : stores)
     {
         for (Region& r : regions)

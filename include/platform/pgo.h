@@ -7,6 +7,8 @@ namespace pf { namespace pgo
 
 // Writes the profile to path every 30 seconds from a low-priority thread.
 void start(const char* path);
+// Stops the writer thread.
+void stop();
 // Writes the profile now.
 void write();
 

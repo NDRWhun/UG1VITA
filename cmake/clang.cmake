@@ -38,8 +38,8 @@ endif()
 if(NFSU_PGO_GENERATE)
   include(cmake/pgo-runtime.cmake)
   nfsu_pgo_runtime(NFSU_PGO_RUNTIME)
-  # IR-level instrumentation with value profiles.
-  set(NFSU_PGO_FLAGS -fprofile-generate)
+  # IR-level instrumentation with value profiles, atomic counter updates.
+  set(NFSU_PGO_FLAGS -fprofile-generate -fprofile-update=prefer-atomic)
   list(APPEND NFSU_CLANG_FLAGS ${NFSU_PGO_FLAGS})
   list(APPEND NFSU_CLANG_GAME_FLAGS ${NFSU_PGO_FLAGS})
   list(APPEND NFSU_RUNTIME_DEFINES NFSU_PGO_GENERATE)
@@ -54,7 +54,9 @@ elseif(NFSU_PGO_USE)
   set(NFSU_PGO_FLAGS "-fprofile-use=${NFSU_PGO_USE}" -Wno-backend-plugin)
   list(APPEND NFSU_CLANG_FLAGS ${NFSU_PGO_FLAGS})
   list(APPEND NFSU_CLANG_GAME_FLAGS ${NFSU_PGO_FLAGS})
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${NFSU_PGO_USE}")
+  # Sources compiled with the profile are rebuilt when it changes.
+  set_property(SOURCE ${NFSU_GENERATED_SOURCES} ${NFSU_RUNTIME_SOURCES} src/nfsu/main.cpp
+               APPEND PROPERTY OBJECT_DEPENDS "${NFSU_PGO_USE}")
 endif()
 
 message(STATUS "clang build: ThinLTO ${NFSU_LTO}, PGO generate ${NFSU_PGO_GENERATE}, PGO use '${NFSU_PGO_USE}'")

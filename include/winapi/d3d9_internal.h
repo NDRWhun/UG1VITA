@@ -490,7 +490,7 @@ struct Stream
     void grow(uint32_t words);
 };
 
-// The stream of a frame index; game thread. Waits for nothing: the frame slots keep it free.
+// The stream of a frame index, emptied; game thread.
 Stream& frameStream(uint32_t frameIndex);
 // Render thread: completes the draws of a frame from its stream (Frame::resolve).
 void resolveFrame(render::Frame& frame);
@@ -556,6 +556,8 @@ public:
 
 // Game thread: value blocks changed while no frame recorded, sent whole.
 void syncEffectValues(Stream& stream);
+// Game thread: every value block sent whole with the next frame.
+void markEffectValuesDirty();
 // Render thread: floats of a value block, and what a pass draws with from mirrored blocks (shared may be null).
 uint32_t effectBlockFloats();
 void effectBinding(const EffectDraw& effect, const float* own, const float* shared, EffectBinding& binding);

@@ -120,6 +120,9 @@ Device::Device(WinApplication* app, Direct3D* d3d, const D3DPRESENT_PARAMETERS& 
 
 Device::~Device()
 {
+    // Values recorded into a frame that is never submitted.
+    if (m_frame)
+        markEffectValuesDirty();
     hold(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
     hold(m_state.stream, static_cast<Buffer*>(nullptr));
     hold(m_state.indices, static_cast<Buffer*>(nullptr));
@@ -324,8 +327,8 @@ uint16_t Device::viewportIndex(render::Frame& f, const render::Viewport& viewpor
     return uint16_t(f.viewportCount++);
 }
 
-// The state resolution of a draw happens on the render thread (d3d9_record.cpp); the game thread records the
-// geometry, the textures as they are now (marking them read by this frame) and the active effect pass.
+// Records the geometry, the textures (marked read by this frame) and the active effect pass; the render thread
+// resolves the state (d3d9_record.cpp).
 HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primitives, const void* vertices,
                      const uint16_t* indices, uint32_t count, uint8_t layout, uint32_t texComponents, bool positionT,
                      render::BufferStorage* vertexStorage, render::BufferStorage* indexStorage)

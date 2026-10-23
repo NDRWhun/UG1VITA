@@ -243,6 +243,7 @@ int main(int, char**)
     }
     pf::logInfo("NFSUG1VITA exiting");
 #ifdef NFSU_PGO_GENERATE
+    pf::pgo::stop();
     pf::pgo::write();
 #endif
     pf::gxm::Device::get().shutdown();

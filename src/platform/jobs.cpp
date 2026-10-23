@@ -13,7 +13,8 @@ namespace pf { namespace jobs
 namespace
 {
 
-// Below the audio, render and timer threads (64, 64, 72), above every other guest thread (80 and lower).
+// 76: below the audio output and render threads (64) and the timer and guest threads at
+// THREAD_PRIORITY_TIME_CRITICAL (72), above the other guest threads (80 to 124).
 const int WorkerPriority = Thread::PriorityHigh + 12;
 const uint32_t WorkerStack = 64 * 1024;
 const int MaxWorkers = 2;
@@ -75,7 +76,7 @@ int workerEntry(void* argument)
     for (;;)
     {
         s_wake->wait();
-        // Counted before the phase is read: the caller closes a phase and then waits for s_busy to drain.
+        // Counted before the phase is read.
         s_busy.fetch_add(1, std::memory_order_seq_cst);
         if (Phase* phase = s_current.load(std::memory_order_seq_cst))
         {
@@ -116,7 +117,7 @@ void join()
         if (sceKernelGetProcessTimeLow() - start < JoinSpinUs)
             continue;
         s_waiter.store(1, std::memory_order_seq_cst);
-        // Either a worker sees the flag and posts, or the count is already 0 and the flag is taken back here.
+        // Waits for the post unless no worker is busy and the flag is taken back here.
         if (s_busy.load(std::memory_order_seq_cst) != 0 || s_waiter.exchange(0) == 0)
             s_done->wait();
         break;
