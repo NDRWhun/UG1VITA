@@ -93,6 +93,7 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/audio_mixer.cpp
   src/nfsu/bankcode.cpp
   src/nfsu/cull.cpp
+  src/nfsu/mathfn.cpp
   src/nfsu/movie_yuv.cpp
   src/nfsu/native.cpp
 )
