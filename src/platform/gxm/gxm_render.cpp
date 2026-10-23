@@ -1385,6 +1385,8 @@ namespace
 const uint32_t ListMinimumDraws = 96;   // smaller frames are drawn on the immediate context
 const uint32_t JobMinimumDraws = 32;    // smallest range a list records
 const uint32_t WorkerHostMem = 16 * 1024;
+// Above guest threads, like the job workers: a helper preempted inside a range would hold up the render thread.
+const int ListWorkerPriority = Thread::PriorityHigh + 16;
 
 }
 
@@ -1449,8 +1451,7 @@ void FrameRenderer::initLists()
         logInfo("gxm: command lists off (gxm_lists=0)");
         return;
     }
-    // The render thread records too; helpers run below guest thread priority, so they only take idle time and
-    // the render thread takes whatever they have not claimed.
+    // The render thread records too and takes whatever the helpers have not claimed.
     std::vector<int> cores;
     if (cores::hasCore3())
         cores.push_back(3);
@@ -1479,13 +1480,14 @@ void FrameRenderer::initLists()
     {
         Worker* w = m_workers[i];
         const int core = cores[i - 1];
-        w->thread = new Thread(core == 3 ? names[0] : names[1], &workerEntry, w, Thread::PriorityNormal + 4,
+        w->thread = new Thread(core == 3 ? names[0] : names[1], &workerEntry, w, ListWorkerPriority,
                                64 * 1024, Thread::Cpu0 << core);
         w->thread->start();
     }
-    logInfo("gxm: command lists recorded by %u thread(s): render core%s%s", uint32_t(m_workers.size()),
-            m_workers.size() > 1 && cores[0] == 3 ? ", core 3" : "",
-            (m_workers.size() > 2 || (m_workers.size() > 1 && cores[0] == 2)) ? ", core 2" : "");
+    char where[32] = "render core";
+    for (size_t i = 1; i < m_workers.size(); ++i)
+        snprintf(where + strlen(where), sizeof(where) - strlen(where), ", core %d", cores[i - 1]);
+    logInfo("gxm: command lists recorded by %u thread(s): %s", uint32_t(m_workers.size()), where);
 }
 
 void FrameRenderer::shutdownLists()
