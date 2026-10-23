@@ -437,7 +437,7 @@ class Ctx:
         if self.record:
             self.effects.flag_def |= FLAG_BIT['fc']
             return []
-        return lines if self.fn.flag_live_out(self.index, 'fc') else []
+        return lines if self.fn.writes_fc(self.index) else []
 
     def use_fc(self):
         if self.record:

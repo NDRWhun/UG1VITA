@@ -86,6 +86,19 @@ FPU_DELTAS = {}
 # Functions that save the caller's flags on entry (pushfd) and restore them before returning (popfd).
 FLAGS_PRESERVED = []
 
+# Entries that no indirect call reaches although a data dword points at them.
+NOT_INDIRECT = [
+    0x4e4f4e,   # 'NON\0' tag in the string table at 0x6b159c, inside code
+]
+
+# Targets of indirect jumps whose callers read flags (site -> entries).
+JUMP_TARGETS = {
+    # CRT x87 class dispatch: jmp [edx + 0x10 + class] through the descriptors 0x6ebe4a, 0x6ec04a
+    0x67a465: [0x67be80, 0x67a4fc, 0x67a512, 0x67bef4, 0x67daf1, 0x67a50d, 0x67dc31],
+    # and through descriptor 0x6eb490 (two operands)
+    0x67a4f1: [0x673824, 0x67a5a6, 0x67a53f, 0x67a504, 0x67a53d, 0x67a567],
+}
+
 # SIMD code exists only behind CPU feature tests (docs: cpu_threads.md 1.2); the runtime reports no MMX, SSE or
 # 3DNow!, so these ranges trap if reached. A SIMD instruction outside them counts as unsupported.
 SIMD_GATED = [
@@ -179,7 +192,7 @@ def sync_output(stage, out_dir):
 
 def report(discovery, module, program):
     """Statistics and every place the generated code traps. Returns the number of problems: unsupported
-    instructions in reachable code and SIMD outside the gated ranges."""
+    instructions in reachable code, SIMD outside the gated ranges and sites breaking the flag convention."""
     image = module.image
     origins = collections.Counter(discovery.origin[s.get_entry_point()] for s in module.subroutines)
     instructions = sum(len(s.instructions) for s in module.subroutines)
@@ -208,6 +221,21 @@ def report(discovery, module, program):
              calls.get(('inferred', 0), 0), 'yes' if program.indirect_fpu_checked else 'no',
              sum(n for (k, _), n in calls.items() if k == 'open'),
              sum(n for (k, _), n in calls.items() if k == 'unknown')))
+    problems = 0
+    if program.abi_flags:
+        flags = analysis.C.ALL_FLAGS
+        readers = sorted(a for a, m in program.live_in.items() if m & flags)
+        producers = sorted(a for a, m in program.ret_live.items() if m & flags)
+        contract = program.flag_contract()
+        print('flag convention: %d functions read flags at entry, %d return flags; indirect jumps with flags: %d '
+              '(%d functions write them back)' % (len(readers), len(producers), len(contract['indirect_tails']),
+                                                  len(program.indirect_returners)))
+        for kind, sites in contract.items():
+            if kind == 'indirect_tails':
+                continue
+            for a, m in sites:
+                print('FLAG CONVENTION BROKEN (%s): 0x%x %s' % (kind, a, analysis.state_names(m)))
+                problems += 1
     traps = collections.defaultdict(set)
     for fn in program.functions.values():
         for i in fn.reachable:
@@ -220,7 +248,6 @@ def report(discovery, module, program):
             continue
         sites = sorted(sites)
         print('trap: %-28s %4d site(s): %s' % (name, len(sites), ' '.join('0x%x' % a for a in sites[:12])))
-    problems = 0
     by_range = collections.Counter()
     for a, m, kind in sorted(set(codegen.simd_sites)):
         r = simd_range(a)
@@ -247,6 +274,8 @@ def main():
                         help='keep the x87 stack in cpu.fpu instead of C++ locals (for comparisons)')
     parser.add_argument('--memory-registers', action='store_true',
                         help='keep x86 registers in cpu instead of C++ locals (for comparisons)')
+    parser.add_argument('--flags-across-calls', action='store_true',
+                        help='pass flags through calls and returns as any code may read them (for comparisons)')
     parser.add_argument('--fpu-check', action='store_true',
                         help='assert the x87 depth after every call whose depth is known (finds leaking callees)')
     args = parser.parse_args()
@@ -263,10 +292,11 @@ def main():
     print('discovery took %.0f s' % (time.time() - started))
     subroutines = [discovery.subroutine(e) for e in sorted(discovery.entries)]
     module = GameModule(image, subroutines)
-    program = analysis.Program([module], THREAD_SEGMENTS, [], {}, FLAGS_PRESERVED, (), NATIVE_OVERRIDES,
+    program = analysis.Program([module], THREAD_SEGMENTS, [], {}, FLAGS_PRESERVED, NOT_INDIRECT, NATIVE_OVERRIDES,
                                local_registers=not args.memory_registers, local_x87=not args.memory_x87,
                                setjmp=SETJMP, longjmp_jumps=LONGJMP_JUMPS, fpu_check=args.fpu_check,
-                               fpu_deltas=FPU_DELTAS, preempt_loops=True, address_taken=discovery.address_taken)
+                               fpu_deltas=FPU_DELTAS, preempt_loops=True, address_taken=discovery.address_taken,
+                               abi_flags=not args.flags_across_calls, jump_targets=JUMP_TARGETS)
     program.analyze()
     # Every direct call and tail call must reach a generated function.
     missing = sorted(set(x.target for fn in program.functions.values() for i in fn.reachable for x in fn.exits[i]
@@ -281,7 +311,7 @@ def main():
     problems = report(discovery, module, program)
     print('generation took %.0f s' % (time.time() - started))
     if problems:
-        sys.exit('%d unsupported or ungated instruction(s) in reachable code' % problems)
+        sys.exit('%d unsupported or ungated instruction(s) or flag convention break(s) in reachable code' % problems)
 
 
 if __name__ == '__main__':
