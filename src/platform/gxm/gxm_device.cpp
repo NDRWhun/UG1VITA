@@ -990,6 +990,27 @@ void Device::copyTexture(render::TextureStorage* to, const render::TextureStorag
     m_impl->frames.copyTexture(to, from);
 }
 
+uint32_t Device::writeTextureAsync(render::TextureStorage* texture, uint32_t face, uint32_t level, const void* data,
+                                   uint32_t pitch)
+{
+    return m_impl->frames.writeTextureAsync(texture, face, level, data, pitch);
+}
+
+uint32_t Device::copyTextureAsync(render::TextureStorage* to, const render::TextureStorage* from)
+{
+    return m_impl->frames.copyTextureAsync(to, from);
+}
+
+bool Device::uploadDone(uint32_t ticket)
+{
+    return m_impl->frames.uploadDone(ticket);
+}
+
+void Device::waitUpload(uint32_t ticket)
+{
+    m_impl->frames.waitUpload(ticket);
+}
+
 render::DepthStorage* Device::createDepth(uint32_t width, uint32_t height)
 {
     return m_impl->frames.createDepth(width, height);

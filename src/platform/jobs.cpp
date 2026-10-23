@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <deque>
+#include <utility>
 
 namespace pf { namespace jobs
 {
@@ -16,6 +18,8 @@ namespace
 // 76: below the audio output and render threads (64) and the timer and guest threads at
 // THREAD_PRIORITY_TIME_CRITICAL (72), above the other guest threads (80 to 124).
 const int WorkerPriority = Thread::PriorityHigh + 12;
+// Posted tasks: below the GXM command list workers and THREAD_PRIORITY_HIGHEST guest threads (80).
+const int TaskPriority = Thread::PriorityHigh + 17;
 const uint32_t WorkerStack = 64 * 1024;
 const int MaxWorkers = 2;
 // The caller spins this long for workers still in their last batch before it sleeps.
@@ -44,6 +48,8 @@ Semaphore* s_done = nullptr;
 Thread* s_threads[MaxWorkers] = {};
 int s_workers = 0;
 bool s_started = false;
+LwMutex* s_taskLock = nullptr;
+std::deque<std::pair<Task, void*>> s_tasks;    // guarded by s_taskLock
 
 inline uint32_t readFpscr()
 {
@@ -70,6 +76,31 @@ void claim(Phase& phase, int thread)
     }
 }
 
+// Runs posted tasks until the queue is empty, at TaskPriority.
+void runTasks()
+{
+    bool lowered = false;
+    for (;;)
+    {
+        std::pair<Task, void*> task;
+        {
+            LwLockGuard guard(*s_taskLock);
+            if (s_tasks.empty())
+                break;
+            task = s_tasks.front();
+            s_tasks.pop_front();
+        }
+        if (!lowered)
+        {
+            Thread::setCurrentPriority(TaskPriority);
+            lowered = true;
+        }
+        task.first(task.second);
+    }
+    if (lowered)
+        Thread::setCurrentPriority(WorkerPriority);
+}
+
 int workerEntry(void* argument)
 {
     const int thread = int(reinterpret_cast<intptr_t>(argument));
@@ -86,6 +117,7 @@ int workerEntry(void* argument)
         }
         if (s_busy.fetch_sub(1, std::memory_order_seq_cst) == 1 && s_waiter.exchange(0) == 1)
             s_done->post();
+        runTasks();
     }
     return 0;
 }
@@ -96,6 +128,7 @@ void start()
     const int cores[MaxWorkers] = { 2, 3 };
     const int count = cores::hasCore3() ? 2 : 1;
     s_wake = new Semaphore("jobs_wake", 0);
+    s_taskLock = new LwMutex("jobs_tasks");
     s_done = new Semaphore("jobs_done", 0);
     static const char* const names[MaxWorkers] = { "jobs_core2", "jobs_core3" };
     for (int i = 0; i < count; ++i)
@@ -159,6 +192,22 @@ Stats run(int count, int batchSize, Batch batch, void* context)
     claim(phase, 0);
     join();
     return Stats{phase.batches.load(std::memory_order_relaxed), true};
+}
+
+void post(Task task, void* context)
+{
+    if (!s_started)
+        start();
+    if (s_workers == 0)
+    {
+        task(context);
+        return;
+    }
+    {
+        LwLockGuard guard(*s_taskLock);
+        s_tasks.push_back(std::make_pair(task, context));
+    }
+    s_wake->post();
 }
 
 }}

@@ -249,6 +249,7 @@ void Device::submit()
     gpu().submitFrame(m_frame, m_vblanks);
     m_frame = nullptr;
     m_stream = nullptr;
+    Texture::trimKept();
 }
 
 void Device::record(uint32_t header, DWORD value)
@@ -388,8 +389,11 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     }
     for (const render::TextureStorage* t : r.textures)
     {
-        if (t)
-            const_cast<render::TextureStorage*>(t)->lastUse = f->index;
+        if (!t)
+            continue;
+        const_cast<render::TextureStorage*>(t)->lastUse = f->index;
+        if (t->uploads.load(std::memory_order_relaxed))
+            f->uploads = true;
     }
     if (vertexStorage)
         vertexStorage->lastUse = f->index;

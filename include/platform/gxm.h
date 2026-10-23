@@ -67,10 +67,19 @@ public:
                      uint32_t pitch);
     // Every level and face of a texture of the same description.
     void copyTexture(render::TextureStorage* to, const render::TextureStorage* from);
+    // The same write and copy on a worker thread; the result is the upload's ticket (0: done at once). Uploads
+    // touching one texture run in the order they were queued, and the direct calls above wait for them. data must
+    // stay unchanged until uploadDone(ticket). TextureStorage::uploads counts a texture's queued writes; frames
+    // recorded while it is not 0 set Frame::uploads, and the render thread waits for them before drawing.
+    uint32_t writeTextureAsync(render::TextureStorage* texture, uint32_t face, uint32_t level, const void* data,
+                               uint32_t pitch);
+    uint32_t copyTextureAsync(render::TextureStorage* to, const render::TextureStorage* from);
+    bool uploadDone(uint32_t ticket);
+    void waitUpload(uint32_t ticket);
     render::DepthStorage* createDepth(uint32_t width, uint32_t height);
     // Vertex or index data; BufferStorage::data is written directly.
     render::BufferStorage* createBuffer(uint32_t size);
-    // Freed once the frames that may still read the resource are finished.
+    // Freed once the frames that may still read the resource and its queued uploads are finished.
     void release(render::TextureStorage* texture);
     void release(render::DepthStorage* depth);
     void release(render::BufferStorage* buffer);

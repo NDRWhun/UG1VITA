@@ -13,6 +13,7 @@
 // devices add the half pixel). Matrices are Direct3D row-vector matrices, stored as 4 rows of float4.
 
 #include <platform/texture.h>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -42,6 +43,7 @@ struct TextureDesc
 struct TextureStorage : Resource
 {
     TextureDesc desc;
+    std::atomic<uint32_t> uploads{0};   // writes into it queued on worker threads and not finished
 };
 
 struct DepthStorage : Resource
@@ -410,6 +412,7 @@ struct Frame
     void        (*resolve)(Frame& frame);
     const uint32_t* commands;
     uint32_t    commandCount;                       // words
+    bool        uploads;                            // a texture it reads had uploads when it was recorded
 };
 
 // Arena helpers: null when the arena is full.

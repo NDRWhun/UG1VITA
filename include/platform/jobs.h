@@ -8,6 +8,9 @@
 //
 // Only one thread may run phases (the game thread, holding the execution lock). Batches must not run guest code
 // or write guest memory; they read guest memory the caller does not change before run() returns.
+//
+// Tasks are posted and run later on a worker, between phases, at a priority below the phases and the render
+// thread's command list workers. They start in the order they were posted.
 
 namespace pf { namespace jobs
 {
@@ -28,6 +31,11 @@ int threads();
 // Splits [0, count) into batches of batchSize items and returns when all have run. With fewer than 2 batches,
 // or no workers, the caller runs everything inline. Workers run with the caller's FPSCR.
 Stats run(int count, int batchSize, Batch batch, void* context);
+
+typedef void (*Task)(void* context);
+
+// Queues task(context) for a worker; returns at once. Tasks must not run guest code or write guest memory.
+void post(Task task, void* context);
 
 }}
 
