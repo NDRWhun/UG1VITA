@@ -135,15 +135,19 @@ struct KeptLevels
             pf::perf::upload(pf::perf::UploadEvictions, 1);
     }
 
-    // Oldest first, only levels whose upload is done; mutex held.
+    // Oldest first, only levels whose upload is done: levels locked once before levels locked again. Game
+    // thread, mutex held.
     void trim()
     {
-        for (KeptLevel* level = oldest; level && bytes > cap; )
+        for (int pass = 0; pass < 2 && bytes > cap; ++pass)
         {
-            KeptLevel* newer = level->newer;
-            if (gpu().uploadDone(level->ticket))
-                drop(level, true);
-            level = newer;
+            for (KeptLevel* level = oldest; level && bytes > cap; )
+            {
+                KeptLevel* newer = level->newer;
+                if ((pass == 1 || level->owner->m_lockCounts[level->index] < 2) && gpu().uploadDone(level->ticket))
+                    drop(level, true);
+                level = newer;
+            }
         }
         report();
     }
