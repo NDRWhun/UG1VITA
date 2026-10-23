@@ -1016,7 +1016,7 @@ void FrameRenderer::draw(Recorder& r, const render::Frame& frame, uint32_t index
         logError("gxm: draw of %u vertices without indices skipped", d.count);
         return;
     }
-    if (m_precomputed.load(std::memory_order_relaxed))
+    if (r.precomputed)
     {
         drawPrecomputed(r, frame, index);
         return;
@@ -1152,10 +1152,13 @@ void FrameRenderer::drawPrecomputed(Recorder& r, const render::Frame& frame, uin
     }
     if (error)
     {
-        // Not expected; the immediate path takes over from here.
+        // Unbinds the precomputed states and draws this and the following draws immediately.
         logError("gxm: precomputed objects failed (0x%08x): immediate draws from now on", error);
         m_precomputed.store(false, std::memory_order_relaxed);
-        c.valid = false;
+        r.precomputed = false;
+        sceGxmSetPrecomputedVertexState(context, nullptr);
+        sceGxmSetPrecomputedFragmentState(context, nullptr);
+        c.reset(c.scaleX, c.scaleY);
         this->draw(r, frame, index);
         return;
     }
@@ -1266,6 +1269,9 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
     preparePrograms(frame);
     m_main.data.begin(frame.index, &finished, this);
     m_main.words.reset();
+    m_main.precomputed = m_precomputed.load(std::memory_order_relaxed);
+    for (Worker* w : m_workers)
+        w->recorder.precomputed = m_main.precomputed;
     const bool lastWritesDone = !presentScene(frame);
 
     // Where each scene draws, and its draws in order: the colour clears carried to it first.
@@ -1585,6 +1591,11 @@ bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& 
     sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_NONE, 0, 0, p.width - 1, p.height - 1);
     sceGxmSetTwoSidedEnable(context, SCE_GXM_TWO_SIDED_DISABLED);
     w.recorder.state.reset(p.scaleX, p.scaleY);
+    if (!w.recorder.precomputed)
+    {
+        sceGxmSetPrecomputedVertexState(context, nullptr);
+        sceGxmSetPrecomputedFragmentState(context, nullptr);
+    }
     for (uint32_t n = job.begin; n < job.end; ++n)
         draw(w.recorder, frame, m_order[n]);
     SceGxmCommandList list;

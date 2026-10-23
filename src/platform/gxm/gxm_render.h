@@ -242,6 +242,7 @@ private:
     {
         SceGxmContext*          context = nullptr;
         ContextState            state;
+        bool                    precomputed = false;    // m_precomputed at the start of the frame
         FramePool               data{"gxm_draws", 512 * 1024};
         HostArena               words;
     };
