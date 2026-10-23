@@ -92,6 +92,27 @@ The game folder can also come from `NFSU_GAME_DIR`; it is remembered for the nex
 `-DNFSU_RUNTIME_CHECK=ON` compiles the runtime alone. The shaders ship prebuilt in `shaders/gxp/`; the official PSP2
 SDK (`host_tools/bin/psp2cgc`, `SCE_PSP2_SDK_DIR`) is only needed to change them.
 
+### clang build (optional)
+
+VitaSDK's gcc is the default. With [LLVM](https://github.com/llvm/llvm-project/releases) (clang and lld; `NFSU_LLVM`
+is its root) the game also builds with clang, ThinLTO and profile-guided optimisation; VitaSDK still provides the
+libraries and the packaging tools.
+
+```powershell
+tools/build.ps1 -Compiler clang                 # -> build-release-clang/NFSUG1VITA.vpk (ThinLTO; -NoLto without)
+```
+
+Profile-guided optimisation, with a profile from your own runs:
+
+1. `tools/build.ps1 -Compiler clang -PgoGenerate` builds the instrumented game (`build-release-pgogen/`; slower, the
+   profile runtime is fetched for the LLVM version unless `NFSU_COMPILER_RT` names a compiler-rt source tree).
+2. Install it and play the scenes that matter (menus, races on several tracks, replays). The game writes its
+   counters to `ux0:data/NFSUG1VITA/nfsu.profraw` every 30 seconds and at exit; the file holds the whole session.
+   Copy it off after each session (FTP, USB) under its own name, e.g. `run1.profraw`, and start the next session.
+3. Merge the runs (each weighs the same) and build with the profile:
+   `& "$env:NFSU_LLVM/bin/llvm-profdata" merge -o nfsu.profdata run*.profraw`, then
+   `tools/build.ps1 -Compiler clang -PgoUse nfsu.profdata`.
+
 | Path | Contents |
 |------|----------|
 | `include/` | virtual x86 CPU (cpu/fpu/mmx), `lib/` runtime headers, `winapi/` shim headers, `platform/` |
