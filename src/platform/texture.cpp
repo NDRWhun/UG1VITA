@@ -73,6 +73,64 @@ uint32_t swizzleIndex(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
     return (tile << (2 * k)) | spread(y & mask) | (spread(x & mask) << 1);
 }
 
+namespace
+{
+
+template <uint32_t Unit>
+inline void copyUnit(uint8_t* to, const uint8_t* from)
+{
+    memcpy(to, from, Unit);
+}
+
+// Power-of-two levels: per row the y bits and tile, per texel the x bits by incrementing over the odd bit positions.
+template <uint32_t Unit, bool Swizzle>
+void convertPow2(uint32_t w, uint32_t h, uint8_t* linear, const uint8_t* linearIn, uint32_t pitch, uint8_t* swizzled,
+                 const uint8_t* swizzledIn)
+{
+    const uint32_t minSize = w < h ? w : h;
+    const uint32_t k = log2(minSize);
+    const uint32_t mask = minSize - 1;
+    const uint32_t tileUnits = minSize * minSize;
+    const uint32_t xBits = 0xAAAAAAAAu & (tileUnits - 1);
+    for (uint32_t y = 0; y < h; ++y)
+    {
+        const size_t rowOffset = size_t(y) * pitch;
+        const uint32_t yPart = spread(y & mask) | (w > h ? 0 : (y >> k) << (2 * k));
+        for (uint32_t x0 = 0; x0 < w; x0 += minSize)
+        {
+            const uint32_t tile = yPart | (w > h ? (x0 >> k) << (2 * k) : 0);
+            uint32_t xPart = 0;
+            for (uint32_t x = x0; x < x0 + minSize; ++x)
+            {
+                const size_t s = size_t(tile | xPart) * Unit;
+                const size_t l = rowOffset + size_t(x) * Unit;
+                if (Swizzle)
+                    copyUnit<Unit>(swizzled + s, linearIn + l);
+                else
+                    copyUnit<Unit>(linear + l, swizzledIn + s);
+                xPart = ((xPart | ~xBits) + 1) & xBits;
+            }
+        }
+    }
+}
+
+template <bool Swizzle>
+bool convertFast(uint32_t unit, uint32_t w, uint32_t h, uint8_t* linear, const uint8_t* linearIn, uint32_t pitch,
+                 uint8_t* swizzled, const uint8_t* swizzledIn)
+{
+    if ((w & (w - 1)) || (h & (h - 1)))
+        return false;
+    switch (unit)
+    {
+    case 4: convertPow2<4, Swizzle>(w, h, linear, linearIn, pitch, swizzled, swizzledIn); return true;
+    case 8: convertPow2<8, Swizzle>(w, h, linear, linearIn, pitch, swizzled, swizzledIn); return true;
+    case 16: convertPow2<16, Swizzle>(w, h, linear, linearIn, pitch, swizzled, swizzledIn); return true;
+    default: return false;
+    }
+}
+
+}
+
 void swizzleLevel(Format format, uint32_t width, uint32_t height, uint32_t level, const void* src, uint32_t pitch,
                   void* dst)
 {
@@ -80,6 +138,8 @@ void swizzleLevel(Format format, uint32_t width, uint32_t height, uint32_t level
     const uint32_t unit = unitBytes(format);
     const uint8_t* in = static_cast<const uint8_t*>(src);
     uint8_t* out = static_cast<uint8_t*>(dst);
+    if (convertFast<true>(unit, w, h, nullptr, in, pitch, out, nullptr))
+        return;
     for (uint32_t y = 0; y < h; ++y)
     {
         const uint8_t* row = in + size_t(y) * pitch;
@@ -95,6 +155,8 @@ void unswizzleLevel(Format format, uint32_t width, uint32_t height, uint32_t lev
     const uint32_t unit = unitBytes(format);
     const uint8_t* in = static_cast<const uint8_t*>(src);
     uint8_t* out = static_cast<uint8_t*>(dst);
+    if (convertFast<false>(unit, w, h, out, nullptr, pitch, nullptr, in))
+        return;
     for (uint32_t y = 0; y < h; ++y)
     {
         uint8_t* row = out + size_t(y) * pitch;
