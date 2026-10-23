@@ -72,6 +72,7 @@ def declarations(fn, body):
     for n in sorted(set(int(x) for x in re.findall(r'\bfp(\d+)\b', text))):
         lines.append('  [[maybe_unused]] x86::Float fp%d = 0;' % n)
     entry = fn.entry_loads()
+    lines += fn.audit_reload_lines(sum(C.FLAG_BIT[f] for f in entry if 'f_' + f in used), fn.entry_address)
     for f in C.CPU_FLAGS:
         name = 'f_' + f
         if name in used:

@@ -612,11 +612,26 @@ class Function:
         regs = self.reg_stores.get((i, edge), 0)
         lines = ['cpu.%s = %s;' % (r, r) for r in C.REGS if regs & C.REG_BIT[r]]
         lines += ['cpu.flags.%s = %s;' % (f, self.flag_source(i, f)) for f in C.CPU_FLAGS if mask & C.FLAG_BIT[f]]
+        if self.program.flag_audit:
+            lines += self.audit_store_lines(i, edge, mask)
         if fdepth is not None and edge != 'flags':
             for j in range(1, fdepth + 1):
                 lines.append('cpu.fpu.regs[(fpu_count + %d) & 7] = fp%d;' % (j, j))
             lines.append('cpu.fpu.count = fpu_count %s %d;' % ('+' if fdepth >= 0 else '-', abs(fdepth)))
         return lines
+
+    def audit_store_lines(self, i, edge, stored):
+        """Flag audit: marks the changed flags not stored at this edge unknown in cpu, the stored ones known;
+        pushfd then checks all of them."""
+        address = self.instructions[i].address
+        dirty = sum(C.FLAG_BIT[f] for f in C.CPU_FLAGS if self.dirty(i, f))
+        lines = ['cpu.flagsUnknown = (cpu.flagsUnknown & ~0x%xu) | 0x%xu;' % (stored, dirty & ~stored)]
+        if edge == 'flags':
+            lines.append('RC_FLAG_AUDIT(cpu, 0x%xu, 0x%xu);' % (C.CPU_FLAG_MASK, address))
+        return lines
+
+    def audit_reload_lines(self, mask, address):
+        return ['RC_FLAG_AUDIT(cpu, 0x%xu, 0x%xu);' % (mask, address)] if mask and self.program.flag_audit else []
 
     def reload_lines(self, i):
         regs = self.reg_reloads.get(i, 0)
@@ -624,6 +639,10 @@ class Function:
         delta = self.callee_delta(i) if self.local_registers else None
         if delta is not None:
             lines.append('esp = esp + %d;' % (delta + 4))
+        if self.program.flag_audit and self.instructions[i].mnemonic in MEMORY_DEFS:
+            lines.append('cpu.flagsUnknown &= ~0x%xu;' % C.CPU_FLAG_MASK)
+        reloaded = sum(C.FLAG_BIT[f] for f in C.CPU_FLAGS if (i, f) in self.reloads)
+        lines += self.audit_reload_lines(reloaded, self.instructions[i].address)
         lines += ['f_%s = cpu.flags.%s;' % (f, f) for f in C.CPU_FLAGS if (i, f) in self.reloads]
         d = self.fpu.depth[i]
         after = self.fpu_after_call(i)
@@ -695,7 +714,7 @@ class Program:
     def __init__(self, modules, thread_segments, skip_instructions, function_names, flags_preserved=(), not_code=(),
                  native_overrides=(), local_registers=True, memory_functions=(), local_x87=True, setjmp=None,
                  longjmp_jumps=None, fpu_check=False, fpu_deltas=None, preempt_loops=False, address_taken=None,
-                 abi_flags=False, jump_targets=None):
+                 abi_flags=False, jump_targets=None, flag_audit=False):
         self.functions = {}
         # Backward jumps are preemption points (WinApplication::allowPreemption).
         self.preempt_loops = preempt_loops
@@ -732,6 +751,8 @@ class Program:
         # Flags pass a direct call only where the code reads them (callee before writing them, caller after the
         # call) and no indirect call or indirect jump (except to jump_targets).
         self.abi_flags = abi_flags
+        # Generated code checks that every flag it reads from cpu was stored there (RC_FLAG_AUDIT).
+        self.flag_audit = flag_audit
         self.indirect_mask = ALL_REG_STATE if abi_flags else ALL_STATE
         self.flag_clobber = {}
         self.flag_must = {}

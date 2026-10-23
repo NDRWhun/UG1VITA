@@ -249,7 +249,8 @@ def cg_fnstsw(ctx, dst):
     if ctx.fn.fused.get(ctx.index) is not None and not ctx.record and not ctx.fn.writes_ax(ctx.index):
         return []
     ctx.use_fc()
-    return ctx.put(dst, 'cpu.fpu.status.word')
+    check = [] if ctx.record or ctx.fn.masks_condition_codes(ctx.index) else ctx.audit_fc()
+    return check + ctx.put(dst, 'cpu.fpu.status.word')
 
 
 cg_fstsw = cg_fnstsw

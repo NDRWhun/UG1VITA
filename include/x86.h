@@ -52,4 +52,17 @@ __attribute__((cold)) void fpuCallMismatch(CPU& cpu, reg32 expected, uint32_t si
     do { if (__builtin_expect((cpu).fpu.count != (expected), 0)) ::x86::fpuCallMismatch((cpu), (expected), (site)); } \
     while (0)
 
+namespace x86
+{
+
+// Logs the site once: it reads flags of cpu.flagsUnknown.
+__attribute__((cold)) void flagAuditFail(CPU& cpu, reg32 flags, uint32_t site);
+
+}
+
+// Flag audit builds (generate.py --flag-audit): checks that cpu holds the flags read at site.
+#define RC_FLAG_AUDIT(cpu, flags, site)                                                                  \
+    do { if (__builtin_expect(((cpu).flagsUnknown & (flags)) != 0, 0)) ::x86::flagAuditFail((cpu), (flags), (site)); } \
+    while (0)
+
 #endif /* !X86_H_ */

@@ -276,6 +276,8 @@ def main():
                         help='keep x86 registers in cpu instead of C++ locals (for comparisons)')
     parser.add_argument('--flags-across-calls', action='store_true',
                         help='pass flags through calls and returns as any code may read them (for comparisons)')
+    parser.add_argument('--flag-audit', action='store_true',
+                        help='check at run time that every flag read from cpu was stored there (logs the reader)')
     parser.add_argument('--fpu-check', action='store_true',
                         help='assert the x87 depth after every call whose depth is known (finds leaking callees)')
     args = parser.parse_args()
@@ -296,7 +298,8 @@ def main():
                                local_registers=not args.memory_registers, local_x87=not args.memory_x87,
                                setjmp=SETJMP, longjmp_jumps=LONGJMP_JUMPS, fpu_check=args.fpu_check,
                                fpu_deltas=FPU_DELTAS, preempt_loops=True, address_taken=discovery.address_taken,
-                               abi_flags=not args.flags_across_calls, jump_targets=JUMP_TARGETS)
+                               abi_flags=not args.flags_across_calls, jump_targets=JUMP_TARGETS,
+                               flag_audit=args.flag_audit)
     program.analyze()
     # Every direct call and tail call must reach a generated function.
     missing = sorted(set(x.target for fn in program.functions.values() for i in fn.reachable for x in fn.exits[i]
