@@ -195,7 +195,7 @@ static void padPollHook(x86::reg32* buttons, int* pov)
 
 int main(int, char**)
 {
-    scePowerSetArmClockFrequency(500);
+    const int clock500 = scePowerSetArmClockFrequency(500);
     scePowerSetBusClockFrequency(222);
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
@@ -204,6 +204,8 @@ int main(int, char**)
     mkdir(s_dataDirectory.c_str(), 0777);
     pf::logInit(dataPath("nfsug1vita.log").c_str());
     pf::logInfo("NFSUG1VITA starting");
+    pf::logInfo("arm clock: request 500 MHz returned 0x%08X, running at %d MHz", unsigned(clock500),
+                scePowerGetArmClockFrequency());
     x86::mmxSelfTest();
     x86::fpuSelfTest();
     pf::Config::load(dataPath("nfsug1vita.cfg").c_str());
