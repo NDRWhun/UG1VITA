@@ -3,7 +3,9 @@
 #include "gxm_render.h"
 #include <platform/config.h>
 #include <platform/cores.h>
+#include <platform/jobs.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <platform/texture.h>
 #include <algorithm>
 #include <cstdio>
@@ -70,6 +72,15 @@ SceGxmTextureFormat textureFormat(texture::Format format)
     case texture::FormatBC2: return SCE_GXM_TEXTURE_FORMAT_UBC2_ABGR;
     default:                 return SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB;
     }
+}
+
+// One level of a swizzled texture from rows of pitch bytes.
+void writeSwizzled(const Texture& t, uint32_t face, uint32_t level, const void* data, uint32_t pitch)
+{
+    const render::TextureDesc& d = t.desc;
+    uint8_t* base = static_cast<uint8_t*>(t.data) + face * t.faceStride;
+    texture::swizzleLevel(d.format, d.width, d.height, level, data, pitch,
+                          base + texture::levelOffset(d.format, d.width, d.height, level));
 }
 
 SceGxmBlendFactor blendFactor(uint8_t factor)
@@ -352,6 +363,8 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     m_context = context;
     m_patcher = patcher;
     m_main.context = context;
+    m_uploadLock = new Mutex("gxm_uploads");
+    m_uploadDone = new CondVar("gxm_uploads", *m_uploadLock);
     m_precomputed = Config::getBool("gxm_precomputed", true);
     logInfo("gxm: %s draws", m_precomputed ? "precomputed" : "immediate");
     m_textureHeap = new GpuHeap("gxm_textures", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 16 * 1024 * 1024,
@@ -461,6 +474,12 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
 
 void FrameRenderer::shutdown()
 {
+    if (m_uploadLock)
+    {
+        LockGuard guard(*m_uploadLock);
+        while (!m_uploading.empty())
+            m_uploadDone->wait();
+    }
     shutdownLists();
     for (auto& v : m_vertexCache)
         sceGxmShaderPatcherReleaseVertexProgram(m_patcher, v.second.program);
@@ -477,6 +496,8 @@ void FrameRenderer::shutdown()
                 sceGxmShaderPatcherUnregisterProgram(m_patcher, m_fragmentPrograms[f][v].id);
     delete m_textureHeap;
     delete m_bufferHeap;
+    delete m_uploadDone;
+    delete m_uploadLock;
     if (m_arenaUid >= 0)
         sceKernelFreeMemBlock(m_arenaUid);
     if (m_sequenceUid >= 0)
@@ -544,6 +565,7 @@ render::Frame* FrameRenderer::beginFrame(uint32_t width, uint32_t height)
     f.resolve = nullptr;
     f.commands = nullptr;
     f.commandCount = 0;
+    f.uploads = false;
     return &f;
 }
 
@@ -562,7 +584,9 @@ void FrameRenderer::freePending()
     size_t kept = 0;
     for (size_t i = 0; i < m_pending.size(); ++i)
     {
-        if (m_pending[i].after <= m_completed)
+        // A texture is freed once no queued upload touches it either.
+        if (m_pending[i].after <= m_completed
+            && (m_pending[i].kind != 0 || uploadDone(static_cast<Texture*>(m_pending[i].object)->lastTicket)))
             destroy(m_pending[i].kind, m_pending[i].object);
         else
             m_pending[kept++] = m_pending[i];
@@ -683,6 +707,12 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
     const render::TextureDesc& d = t->desc;
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return;
+    settle(t);
+    if (perf::enabled())
+    {
+        perf::upload(perf::UploadLevels, 1);
+        perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
+    }
     uint8_t* base = static_cast<uint8_t*>(t->data) + face * t->faceStride;
     if (t->stride)
     {
@@ -694,8 +724,7 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
                 memcpy(base + y * t->stride, static_cast<const uint8_t*>(data) + y * pitch, rowBytes);
         return;
     }
-    texture::swizzleLevel(d.format, d.width, d.height, level, data, pitch,
-                          base + texture::levelOffset(d.format, d.width, d.height, level));
+    writeSwizzled(*t, face, level, data, pitch);
 }
 
 void FrameRenderer::readTexture(const render::TextureStorage* storage, uint32_t face, uint32_t level, void* data,
@@ -705,6 +734,7 @@ void FrameRenderer::readTexture(const render::TextureStorage* storage, uint32_t 
     const render::TextureDesc& d = t->desc;
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return;
+    settle(t);
     const uint8_t* base = static_cast<const uint8_t*>(t->data) + face * t->faceStride;
     if (t->stride)
     {
@@ -721,8 +751,128 @@ void FrameRenderer::copyTexture(render::TextureStorage* to, const render::Textur
 {
     Texture* dst = static_cast<Texture*>(to);
     const Texture* src = static_cast<const Texture*>(from);
+    settle(dst);
+    settle(src);
     if (dst->bytes == src->bytes)
         memcpy(dst->data, src->data, dst->bytes);
+}
+
+uint32_t FrameRenderer::writeTextureAsync(render::TextureStorage* storage, uint32_t face, uint32_t level,
+                                          const void* data, uint32_t pitch)
+{
+    Texture* t = static_cast<Texture*>(storage);
+    const render::TextureDesc& d = t->desc;
+    if (level >= d.levels || face >= (d.cube ? 6u : 1u))
+        return 0;
+    if (t->stride)
+    {
+        writeTexture(storage, face, level, data, pitch);
+        return 0;
+    }
+    if (perf::enabled())
+    {
+        perf::upload(perf::UploadLevels, 1);
+        perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
+    }
+    t->uploads.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t ticket = queueUpload(new Upload{ this, 0, t->lastTicket, t, nullptr, face, level, pitch, data });
+    t->lastTicket = ticket;
+    return ticket;
+}
+
+uint32_t FrameRenderer::copyTextureAsync(render::TextureStorage* to, const render::TextureStorage* from)
+{
+    Texture* dst = static_cast<Texture*>(to);
+    Texture* src = const_cast<Texture*>(static_cast<const Texture*>(from));
+    if (dst->bytes != src->bytes)
+        return 0;
+    dst->uploads.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t ticket = queueUpload(new Upload{ this, 0, std::max(dst->lastTicket, src->lastTicket), dst, src,
+                                                    0, 0, 0, nullptr });
+    dst->lastTicket = ticket;
+    src->lastTicket = ticket;
+    return ticket;
+}
+
+uint32_t FrameRenderer::queueUpload(Upload* upload)
+{
+    const uint32_t ticket = m_nextTicket++;
+    upload->ticket = ticket;
+    {
+        LockGuard guard(*m_uploadLock);
+        m_uploading.push_back(ticket);
+        m_uploadCount.store(uint32_t(m_uploading.size()), std::memory_order_relaxed);
+    }
+    if (perf::enabled())
+        perf::upload(perf::UploadAsync, 1);
+    jobs::post(&runUpload, upload);
+    return ticket;
+}
+
+void FrameRenderer::runUpload(void* argument)
+{
+    Upload* u = static_cast<Upload*>(argument);
+    FrameRenderer* self = u->owner;
+    self->waitUpload(u->after);
+    const bool timed = perf::enabled();
+    const uint32_t start = timed ? perf::now() : 0;
+    if (u->from)
+        memcpy(u->to->data, u->from->data, u->to->bytes);
+    else
+        writeSwizzled(*u->to, u->face, u->level, u->data, u->pitch);
+    __asm__ volatile("dsb" : : : "memory");
+    if (timed)
+        perf::upload(perf::UploadWorkerUs, perf::now() - start);
+    {
+        LockGuard guard(*self->m_uploadLock);
+        const auto it = std::lower_bound(self->m_uploading.begin(), self->m_uploading.end(), u->ticket);
+        if (it != self->m_uploading.end() && *it == u->ticket)
+            self->m_uploading.erase(it);
+        self->m_uploadCount.store(uint32_t(self->m_uploading.size()), std::memory_order_release);
+        u->to->uploads.fetch_sub(1, std::memory_order_release);
+        self->m_uploadDone->broadcast();
+    }
+    delete u;
+}
+
+bool FrameRenderer::uploadDone(uint32_t ticket)
+{
+    if (!ticket || !m_uploadCount.load(std::memory_order_acquire))
+        return true;
+    LockGuard guard(*m_uploadLock);
+    return !std::binary_search(m_uploading.begin(), m_uploading.end(), ticket);
+}
+
+void FrameRenderer::waitUpload(uint32_t ticket)
+{
+    if (!ticket)
+        return;
+    LockGuard guard(*m_uploadLock);
+    while (std::binary_search(m_uploading.begin(), m_uploading.end(), ticket))
+        m_uploadDone->wait();
+}
+
+void FrameRenderer::waitWrites(const render::TextureStorage* texture)
+{
+    if (!texture->uploads.load(std::memory_order_acquire))
+        return;
+    LockGuard guard(*m_uploadLock);
+    while (texture->uploads.load(std::memory_order_acquire))
+        m_uploadDone->wait();
+}
+
+void FrameRenderer::settle(const Texture* texture)
+{
+    if (uploadDone(texture->lastTicket))
+        return;
+    const bool timed = perf::enabled();
+    const uint32_t start = timed ? perf::now() : 0;
+    waitUpload(texture->lastTicket);
+    if (timed)
+    {
+        perf::upload(perf::UploadGameWaits, 1);
+        perf::upload(perf::UploadGameWaitUs, perf::now() - start);
+    }
 }
 
 render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height)
@@ -1316,6 +1466,8 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         p.orderCount = uint32_t(m_order.size()) - p.firstOrder;
     }
     const bool lists = recordLists(frame);
+    if (frame.uploads)
+        waitFrameUploads(frame);
 
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
@@ -1375,6 +1527,26 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
     // The present pass draws with the context's own state again.
     sceGxmSetPrecomputedVertexState(m_context, nullptr);
     sceGxmSetPrecomputedFragmentState(m_context, nullptr);
+}
+
+void FrameRenderer::waitFrameUploads(const render::Frame& frame)
+{
+    const bool timed = perf::enabled();
+    for (uint32_t i = 0; i < frame.drawCount; ++i)
+    {
+        for (const render::TextureStorage* t : frame.draws[i].state.textures)
+        {
+            if (!t || !t->uploads.load(std::memory_order_acquire))
+                continue;
+            const uint32_t start = timed ? perf::now() : 0;
+            waitWrites(t);
+            if (timed)
+            {
+                perf::upload(perf::UploadRenderWaits, 1);
+                perf::upload(perf::UploadRenderWaitUs, perf::now() - start);
+            }
+        }
+    }
 }
 
 // ---- Command lists -------------------------------------------------------------------------------------------------

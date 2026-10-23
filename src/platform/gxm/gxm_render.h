@@ -99,6 +99,7 @@ struct Texture : render::TextureStorage
     uint32_t            stride;         // targets: row bytes of a 2D target
     SceGxmTexture       texture;
     SceGxmColorSurface  surfaces[6];    // targets: per face
+    uint32_t            lastTicket = 0; // game thread: the last queued upload that writes or reads it
 };
 
 struct Depth : render::DepthStorage
@@ -132,11 +133,22 @@ public:
     void writeTexture(render::TextureStorage* texture, uint32_t face, uint32_t level, const void* data, uint32_t pitch);
     void readTexture(const render::TextureStorage* texture, uint32_t face, uint32_t level, void* data, uint32_t pitch);
     void copyTexture(render::TextureStorage* to, const render::TextureStorage* from);
+    // The same write and copy on a job worker; the result is the upload's ticket. Uploads that touch one texture
+    // run in the order they were queued; data must stay unchanged until uploadDone(ticket).
+    uint32_t writeTextureAsync(render::TextureStorage* texture, uint32_t face, uint32_t level, const void* data,
+                               uint32_t pitch);
+    uint32_t copyTextureAsync(render::TextureStorage* to, const render::TextureStorage* from);
     render::DepthStorage* createDepth(uint32_t width, uint32_t height);
     render::BufferStorage* createBuffer(uint32_t size);
     void release(render::TextureStorage* texture);
     void release(render::DepthStorage* depth);
     void release(render::BufferStorage* buffer);
+
+    // Any thread. Ticket 0 is always done.
+    bool uploadDone(uint32_t ticket);
+    void waitUpload(uint32_t ticket);
+    // Until the queued writes into the texture are finished.
+    void waitWrites(const render::TextureStorage* texture);
 
     // Render thread. Back buffer scenes go to the display surface when the frame's back buffer has the display
     // size, or when stretchDirect (the back buffer fills the display, no gamma) and none of them uses depth;
@@ -265,6 +277,22 @@ private:
         SceGxmCommandList       list;
     };
 
+    // A queued write (from null) or copy.
+    struct Upload
+    {
+        FrameRenderer*      owner;
+        uint32_t            ticket, after;      // after: the upload it waits for, 0 for none
+        Texture*            to;
+        const Texture*      from;
+        uint32_t            face, level, pitch;
+        const void*         data;
+    };
+    uint32_t queueUpload(Upload* upload);
+    static void runUpload(void* upload);
+    // Game thread: before the CPU reads or writes a texture directly.
+    void settle(const Texture* texture);
+    // Render thread: before the frame's scenes are drawn.
+    void waitFrameUploads(const render::Frame& frame);
     void freePending();
     void destroy(int kind, void* object);
     const VertexEntry* vertexProgram(uint8_t program, uint8_t layout);
@@ -306,6 +334,11 @@ private:
     uint16_t*               m_sequence = nullptr;       // 0..65535
     SceUID                  m_arenaUid = -1;
     Texture*                m_black = nullptr;          // read by samplers without a texture
+    uint32_t                m_nextTicket = 1;
+    Mutex*                  m_uploadLock = nullptr;
+    CondVar*                m_uploadDone = nullptr;
+    std::vector<uint32_t>   m_uploading;                // tickets queued and not finished, ascending (m_uploadLock)
+    std::atomic<uint32_t>   m_uploadCount{0};           // m_uploading.size()
 
     VertexProgram           m_vertexPrograms[render::VpCount];
     FragmentProgram         m_fragmentPrograms[render::FpCount][Variants];

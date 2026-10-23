@@ -385,8 +385,11 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     }
     for (const render::TextureStorage* t : r.textures)
     {
-        if (t)
-            const_cast<render::TextureStorage*>(t)->lastUse = f->index;
+        if (!t)
+            continue;
+        const_cast<render::TextureStorage*>(t)->lastUse = f->index;
+        if (t->uploads.load(std::memory_order_relaxed))
+            f->uploads = true;
     }
     if (vertexStorage)
         vertexStorage->lastUse = f->index;
