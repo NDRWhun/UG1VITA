@@ -35,6 +35,9 @@ std::atomic<uint32_t> s_blocked[BlockCount];
 std::atomic<uint32_t> s_blockCount{0};
 std::atomic<uint32_t> s_relock{0};
 std::atomic<uint32_t> s_held[HolderCount];
+std::atomic<uint32_t> s_uploads[UploadCount];
+std::atomic<uint32_t> s_cacheBytes{0};
+std::atomic<uint32_t> s_cacheLevels{0};
 
 // Timer callbacks by guest address; written by the timer service thread.
 struct TimerStats
@@ -135,6 +138,26 @@ void logBlocking(uint32_t elapsed, uint32_t frames)
     logInfo("%s", line.text);
 }
 
+// Third log line, per interval: texture uploads, read-backs, the kept linear copies, waits for worker writes and
+// guest memory blocks.
+void logUploads()
+{
+    uint32_t u[UploadCount];
+    for (int i = 0; i < UploadCount; ++i)
+        u[i] = s_uploads[i].exchange(0, std::memory_order_relaxed);
+    const double mb = 1.0 / (1024.0 * 1024.0);
+    logInfo("perf: textures %u uploads %.1f MB (%u on workers, %.1f ms) | read-backs %u %.1f MB %.1f ms"
+            " | cache %u hits %u evictions, %.1f MB in %u levels | waits render %u %.1f ms game %u %.1f ms"
+            " | guest blocks %u %.1f ms",
+            unsigned(u[UploadLevels]), double(u[UploadBytes]) * mb, unsigned(u[UploadAsync]),
+            double(u[UploadWorkerUs]) / 1000.0, unsigned(u[UploadReadBacks]), double(u[UploadReadBackBytes]) * mb,
+            double(u[UploadReadBackUs]) / 1000.0, unsigned(u[UploadCacheHits]), unsigned(u[UploadEvictions]),
+            double(s_cacheBytes.load(std::memory_order_relaxed)) * mb,
+            unsigned(s_cacheLevels.load(std::memory_order_relaxed)), unsigned(u[UploadRenderWaits]),
+            double(u[UploadRenderWaitUs]) / 1000.0, unsigned(u[UploadGameWaits]), double(u[UploadGameWaitUs]) / 1000.0,
+            unsigned(u[UploadGuestBlocks]), double(u[UploadGuestBlockUs]) / 1000.0);
+}
+
 // Render thread only (set by init() before that thread starts).
 uint32_t s_intervalStart = 0;
 uint32_t s_frames = 0;
@@ -208,6 +231,17 @@ void held(Holder holder, uint32_t microseconds)
     s_held[holder].fetch_add(microseconds, std::memory_order_relaxed);
 }
 
+void upload(Upload counter, uint32_t value)
+{
+    s_uploads[counter].fetch_add(value, std::memory_order_relaxed);
+}
+
+void uploadCache(uint32_t bytes, uint32_t levels)
+{
+    s_cacheBytes.store(bytes, std::memory_order_relaxed);
+    s_cacheLevels.store(levels, std::memory_order_relaxed);
+}
+
 void timerFired(uint32_t callback, uint32_t microseconds)
 {
     for (TimerStats& timer : s_timers)
@@ -269,6 +303,7 @@ void framePresented(uint32_t drawCalls, uint32_t triangles)
             double(preempts) * 1000000.0 / double(elapsed), preempts ? msPerFrame(preemptSum, preempts) : 0.0,
             double(preemptMax) / 1000.0);
     logBlocking(elapsed, frames);
+    logUploads();
     if (Reporter reporter = s_reporter.load(std::memory_order_acquire))
         reporter(elapsed);
     s_intervalStart = time;

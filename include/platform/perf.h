@@ -43,6 +43,27 @@ enum Holder
     HolderCount
 };
 
+// Texture uploads and guest memory blocks: event counts and sums, logged as one line per interval.
+enum Upload
+{
+    UploadLevels,           // levels written to the GPU copy
+    UploadBytes,
+    UploadAsync,            // writes and copies run on the job workers
+    UploadWorkerUs,         // worker time of those
+    UploadReadBacks,        // locks that read a level back from the GPU copy
+    UploadReadBackBytes,
+    UploadReadBackUs,
+    UploadCacheHits,        // locks served from a kept linear copy
+    UploadEvictions,        // kept copies dropped (byte cap or guest memory pressure)
+    UploadRenderWaits,      // render thread waits for writes of textures its frame reads
+    UploadRenderWaitUs,
+    UploadGameWaits,        // game thread waits for writes (re-lock, read-back, eviction, release)
+    UploadGameWaitUs,
+    UploadGuestBlocks,      // guest memory blocks created (MemMap), any caller
+    UploadGuestBlockUs,
+    UploadCount
+};
+
 extern bool g_enabled;
 extern int g_nextBlock;
 
@@ -69,6 +90,16 @@ void preemptWait(uint32_t microseconds);
 // Display callback: GPU time of one frame, from the later of its sceGxmEndScene and the previous frame's
 // completion until its own completion; only reported for frames whose completion time is known.
 void gpuBusy(uint32_t microseconds);
+// Any thread: adds to an upload counter.
+void upload(Upload counter, uint32_t value);
+// Any thread: a guest memory block was created in this many microseconds.
+inline void guestBlock(uint32_t microseconds)
+{
+    upload(UploadGuestBlocks, 1);
+    upload(UploadGuestBlockUs, microseconds);
+}
+// Game thread: kept linear texture copies at the moment.
+void uploadCache(uint32_t bytes, uint32_t levels);
 // Render thread, after each game frame it queued; logs one line about every 5 s.
 void framePresented(uint32_t drawCalls, uint32_t triangles);
 // Called on the render thread after each log line with the interval length in microseconds.
