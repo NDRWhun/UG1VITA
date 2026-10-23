@@ -1,6 +1,7 @@
 #include <lib/memmap.h>
 #include <lib/mutex.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <nfsu_layout.h>
 #include <psp2/kernel/sysmem.h>
 #include <cstdlib>
@@ -25,6 +26,9 @@ x86::reg32 MemMap::s_blockCount = 0;
 x86::reg32 MemMap::s_blockSize = 0;
 x86::reg32 MemMap::s_sectionSize = 0;
 x86::reg32 MemMap::s_addressOffset = 0;
+x86::reg32 MemMap::s_lowFree = 0;
+x86::reg32 MemMap::s_highFree = 0;
+MemMap::Reclaim MemMap::s_reclaim = nullptr;
 Mutex*     MemMap::s_lock = nullptr;
 std::vector<MemMap*> MemMap::s_memMaps;
 
@@ -54,41 +58,90 @@ static void freeArena()
 
 x86::reg8* const g_guestBase = allocArena();
 
-MemMap::MemMap(x86::reg32 size)
+// Lowest b with [b, b + count) free: the same block plain first fit from block 0 finds.
+x86::reg32 MemMap::findLow(x86::reg32 count)
+{
+    x86::reg32 b = s_lowFree;
+    bool first = true;
+    while (b + count <= s_blockCount)
+    {
+        const void* free = memchr(s_blocks + b, 0, s_blockCount - b);
+        if (!free)
+            break;
+        b = x86::reg32(static_cast<const x86::reg8*>(free) - s_blocks);
+        if (first)
+        {
+            s_lowFree = b;
+            first = false;
+        }
+        const x86::reg32 end = b + count;
+        if (end > s_blockCount)
+            break;
+        x86::reg32 s = b;
+        while (s < end && !s_blocks[s])
+            ++s;
+        if (s == end)
+            return b;
+        b = s + 1;
+    }
+    return x86::reg32(-1);
+}
+
+// Highest b with [b, b + count) free.
+x86::reg32 MemMap::findHigh(x86::reg32 count)
+{
+    x86::reg32 e = s_highFree;
+    bool first = true;
+    while (e >= count)
+    {
+        while (e > 0 && s_blocks[e - 1])
+            --e;
+        if (first)
+        {
+            s_highFree = e;
+            first = false;
+        }
+        if (e < count)
+            break;
+        const x86::reg32 begin = e - count;
+        x86::reg32 s = e;
+        while (s > begin && !s_blocks[s - 1])
+            --s;
+        if (s == begin)
+            return begin;
+        e = s - 1;
+    }
+    return x86::reg32(-1);
+}
+
+MemMap::MemMap(x86::reg32 size, Placement placement)
     :   m_block(x86::reg32(-1))
     ,   m_blockCount(size / 4096 + (size % 4096 != 0))
 {
     RC_ASSERT(m_blockCount >= 1);
     if (m_blockCount > s_blockCount)
         pf::fatal("guest memory exhausted (requested %u bytes)", size);
-    s_lock->lock();
-    // First fit: after a used block the search resumes past it.
-    for (x86::reg32 b = 0; b + m_blockCount <= s_blockCount; /* nothing */)
+    const bool timed = pf::perf::enabled();
+    const uint32_t start = timed ? pf::perf::now() : 0;
+    for (;;)
     {
-        bool success = true;
-        for (x86::reg32 s = b; s < b + m_blockCount; ++s)
-        {
-            if (s_blocks[s])
-            {
-                success = false;
-                b = s + 1;
-                break;
-            }
-        }
-        if (success)
-        {
-            m_block = b;
+        s_lock->lock();
+        m_block = placement == High ? findHigh(m_blockCount) : findLow(m_blockCount);
+        if (m_block != x86::reg32(-1))
             break;
-        }
+        s_lock->unlock();
+        if (!s_reclaim || !s_reclaim())
+            pf::fatal("guest memory exhausted (requested %u bytes)", size);
     }
-    if (m_block == x86::reg32(-1))
-        pf::fatal("guest memory exhausted (requested %u bytes)", size);
-    for (x86::reg32 s = m_block; s < m_block + m_blockCount; ++s)
-    {
-        s_blocks[s] = 1;
-    }
+    memset(s_blocks + m_block, 1, m_blockCount);
+    if (m_block == s_lowFree)
+        s_lowFree = m_block + m_blockCount;
+    if (m_block + m_blockCount == s_highFree)
+        s_highFree = m_block;
     s_memMaps.push_back(this);
     s_lock->unlock();
+    if (timed)
+        pf::perf::guestBlock(pf::perf::now() - start);
 }
 
 MemMap::~MemMap()
@@ -102,11 +155,17 @@ MemMap::~MemMap()
             break;
         }
     }
-    for (x86::reg32 s = m_block; s < m_block + m_blockCount; ++s)
-    {
-        s_blocks[s] = 0;
-    }
+    memset(s_blocks + m_block, 0, m_blockCount);
+    if (m_block < s_lowFree)
+        s_lowFree = m_block;
+    if (m_block + m_blockCount > s_highFree)
+        s_highFree = m_block + m_blockCount;
     s_lock->unlock();
+}
+
+void MemMap::setReclaim(Reclaim reclaim)
+{
+    s_reclaim = reclaim;
 }
 
 // Null for an address outside every block.
@@ -141,6 +200,8 @@ void MemMap::init(x86::reg32 baseAddress, const std::vector<Section>& sections)
     pf::logInfo("guest memory: %u bytes at %p", s_arenaSize, static_cast<void*>(g_guestBase));
     s_blockCount = s_simulatedMemory / 4096;
     s_blockSize = s_blockMapSize;
+    s_lowFree = 0;
+    s_highFree = s_blockCount;
     x86::reg32 maxEnd = 0;
     for (std::vector<Section>::const_iterator it = sections.begin(); it != sections.end(); ++it)
     {
