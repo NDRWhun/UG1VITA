@@ -120,6 +120,9 @@ Device::Device(WinApplication* app, Direct3D* d3d, const D3DPRESENT_PARAMETERS& 
 
 Device::~Device()
 {
+    // Values recorded into a frame that is never submitted.
+    if (m_frame)
+        markEffectValuesDirty();
     hold(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
     hold(m_state.stream, static_cast<Buffer*>(nullptr));
     hold(m_state.indices, static_cast<Buffer*>(nullptr));
