@@ -7,7 +7,7 @@
 //   role     without core 3   with core 3   threads
 //   Game     0                0             guest game thread
 //   Render   1                1             GXM render thread
-//   Main     1                1             process main thread (guest message loop)
+//   Main     0                0             process main thread (guest message loop and game loop)
 //   Audio    2                2             SceAudioOut mixer, timer service (guest timer callbacks)
 //   Helper   2                3             other guest threads
 //   Io       2                3             guest file reading threads

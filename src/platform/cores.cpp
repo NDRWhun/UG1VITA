@@ -20,8 +20,8 @@ const char* const s_names[RoleCount] = { "game", "render", "main", "audio", "hel
 // Core of each role without and with core 3.
 const int s_layout[2][RoleCount] =
 {
-    { 0, 1, 1, 2, 2, 2 },
-    { 0, 1, 1, 2, 3, 3 },
+    { 0, 1, 0, 2, 2, 2 },
+    { 0, 1, 0, 2, 3, 3 },
 };
 
 bool s_core3 = false;
