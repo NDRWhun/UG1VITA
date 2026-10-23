@@ -9,6 +9,9 @@
 #include <platform/gxm.h>
 #include <platform/log.h>
 #include <platform/perf.h>
+#ifdef NFSU_PGO_GENERATE
+#include <platform/pgo.h>
+#endif
 #include <platform/sha256.h>
 #include <fpu.h>
 #include <mmx.h>
@@ -212,6 +215,9 @@ int main(int, char**)
     pf::logSetConsole(pf::Config::getBool("tty_log", false));
     pf::cores::init();
     pf::perf::init(pf::Config::getBool("perf_log", false));
+#ifdef NFSU_PGO_GENERATE
+    pf::pgo::start(dataPath("nfsu.profraw").c_str());
+#endif
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     std::vector<uint8_t> image;
@@ -236,6 +242,9 @@ int main(int, char**)
         app.execute();
     }
     pf::logInfo("NFSUG1VITA exiting");
+#ifdef NFSU_PGO_GENERATE
+    pf::pgo::write();
+#endif
     pf::gxm::Device::get().shutdown();
     pf::logShutdown();
     sceKernelExitProcess(0);

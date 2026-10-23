@@ -1,0 +1,48 @@
+# nfsu_pgo_runtime(<out-var>): adds the static library nfsu_profile (compiler-rt's bare-metal profile runtime with
+# value profiling, plus src/platform/pgo_writer.c) and returns its name. Sources from NFSU_COMPILER_RT, else
+# downloaded for the compiler's version.
+
+set(NFSU_COMPILER_RT "$ENV{NFSU_COMPILER_RT}" CACHE PATH "compiler-rt source tree for the PGO runtime (empty: download)")
+
+function(nfsu_pgo_runtime out_var)
+  set(sources InstrProfiling.c InstrProfilingInternal.c InstrProfilingBuffer.c InstrProfilingMerge.c
+      InstrProfilingMergeFile.c InstrProfilingNameVar.c InstrProfilingVersionVar.c InstrProfilingWriter.c
+      InstrProfilingPlatformLinux.c InstrProfilingValue.c)
+  set(headers lib/profile/InstrProfiling.h lib/profile/InstrProfilingInternal.h lib/profile/InstrProfilingPort.h
+      lib/profile/InstrProfilingUtil.h include/profile/InstrProfData.inc include/profile/instr_prof_interface.h)
+  if(NFSU_COMPILER_RT)
+    set(root "${NFSU_COMPILER_RT}")
+  else()
+    set(version "${CMAKE_CXX_COMPILER_VERSION}")
+    set(root "${CMAKE_BINARY_DIR}/compiler-rt-${version}")
+    set(url "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-${version}/compiler-rt")
+    set(files ${headers})
+    foreach(source ${sources})
+      list(APPEND files lib/profile/${source})
+    endforeach()
+    foreach(file ${files})
+      if(NOT EXISTS "${root}/${file}")
+        message(STATUS "PGO runtime: downloading compiler-rt ${version} ${file}")
+        file(DOWNLOAD "${url}/${file}" "${root}/${file}.part" TLS_VERIFY ON STATUS status)
+        list(GET status 0 code)
+        if(NOT code EQUAL 0)
+          file(REMOVE "${root}/${file}.part")
+          message(FATAL_ERROR "Download of ${url}/${file} failed (${status}); set NFSU_COMPILER_RT")
+        endif()
+        file(RENAME "${root}/${file}.part" "${root}/${file}")
+      endif()
+    endforeach()
+  endif()
+  set(paths "")
+  foreach(source ${sources})
+    if(NOT EXISTS "${root}/lib/profile/${source}")
+      message(FATAL_ERROR "${root}/lib/profile/${source} not found (NFSU_COMPILER_RT)")
+    endif()
+    list(APPEND paths "${root}/lib/profile/${source}")
+  endforeach()
+  add_library(nfsu_profile STATIC ${paths} src/platform/pgo_writer.c)
+  target_compile_options(nfsu_profile PRIVATE ${NFSU_ARCH_FLAGS} -O2 -fno-lto -w)
+  target_compile_definitions(nfsu_profile PRIVATE COMPILER_RT_PROFILE_BAREMETAL=1 COMPILER_RT_HAS_ATOMICS=1)
+  target_include_directories(nfsu_profile PRIVATE "${root}/lib" "${root}/include")
+  set(${out_var} nfsu_profile PARENT_SCOPE)
+endfunction()
