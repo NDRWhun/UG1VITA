@@ -2,7 +2,8 @@
 
 Usage: generate.py --binaries <dir> --out <dir> [--analysis <file.json>]
 
-<dir> must hold Speed.exe. Its SHA-256 is checked: the tables below fit only this file.
+<dir> must hold Speed.exe. Its SHA-256 is checked: the tables below fit only this file. The routines of the audio
+banks in <dir>/Sound are translated too (bankcode.py).
 
 Files in the output directory are replaced only when their content changes; generated files that are no longer
 produced are deleted, other files are left alone.
@@ -24,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dis
 import bootstrap  # noqa: E402
 bootstrap.ensure_capstone()
 import capstone  # noqa: E402
+import bankcode  # noqa: E402
 from disasm import analysis, codegen, discover, fpustack, image as pe_image, writer  # noqa: E402
 
 EXE_NAME = 'Speed.exe'
@@ -174,8 +176,8 @@ SIMD_GATED = [
     (0x682f00, 0x683100, 'D3DX MMX blitter (0x6ecd04)'),
 ]
 
-# Names of the generated files: <module>.cpp/.h, <module>.<bucket>.cpp and the layout header.
-GENERATED_FILE = re.compile(r'^%s(\.[0-9a-f]+)?\.(cpp|h)$|^%s_layout\.h$' % (MODULE, MODULE))
+# Names of the generated files: <module>.cpp/.h, <module>.<bucket>.cpp, the layout header and the bank routines.
+GENERATED_FILE = re.compile(r'^%s(\.[0-9a-f]+)?\.(cpp|h)$|^%s_layout\.h$|^%s_bank\.cpp$' % (MODULE, MODULE, MODULE))
 
 
 class GameModule:
@@ -366,6 +368,7 @@ def main():
         sys.exit('calls to addresses that are no function: %s' % ' '.join('0x%x' % a for a in missing[:20]))
     with tempfile.TemporaryDirectory(prefix='nfsugen-') as stage:
         writer.Writer(module, program, stage).write()
+        bankcode.write(args.binaries, image, capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32), stage)
         sync_output(stage, args.out)
     if args.analysis:
         write_analysis(args.analysis, program, module, discovery)

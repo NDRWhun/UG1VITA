@@ -2,8 +2,8 @@
 # Usage: tools/build.ps1 [-Game <the game folder>] [-Config Release|Debug] [-Clean] [-Reconfigure] [-Jobs N]
 #                        [-Regenerate] [-Compiler gcc|clang] [-NoLto] [-PgoGenerate] [-PgoUse <file.profdata>]
 # The game folder (with Speed.exe) comes from -Game, then NFSU_GAME_DIR, then the folder used last time; it is
-# remembered for the next run. Code is generated again when the executable or the recompiler changed, or with
-# -Regenerate. Only what changed is rebuilt.
+# remembered for the next run. Code is generated again when the executable, the audio banks (Sound/**/*.abk) or the
+# recompiler changed, or with -Regenerate. Only what changed is rebuilt.
 # -Compiler clang builds with clang and lld (NFSU_LLVM: the LLVM root) and ThinLTO (-NoLto: without) into
 # build-<config>-clang; -PgoGenerate makes the instrumented build (build-<config>-pgogen), -PgoUse optimises with a
 # merged profile (README).
@@ -43,9 +43,11 @@ function Resolve-GameDir {
     return $null
 }
 
-# Fingerprint of the generator inputs: the executable and every recompiler source.
+# Fingerprint of the generator inputs: the executable, the audio banks and every recompiler source.
 function Get-GeneratorStamp([string]$gameDir) {
-    $files = @(Get-Item (Join-Path $gameDir $exeName)) +
+    $sound = Join-Path $gameDir 'Sound'
+    $banks = if (Test-Path $sound) { @(Get-ChildItem $sound -Recurse -File -Filter '*.abk' | Sort-Object FullName) } else { @() }
+    $files = @(Get-Item (Join-Path $gameDir $exeName)) + $banks +
              @(Get-ChildItem (Join-Path $PSScriptRoot 'recompiler') -Recurse -File -Include '*.py', '*.txt' |
                Where-Object { $_.FullName -notmatch '__pycache__' } | Sort-Object FullName)
     $lines = $files | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
