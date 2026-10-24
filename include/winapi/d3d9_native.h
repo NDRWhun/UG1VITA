@@ -35,6 +35,14 @@ HRESULT lightEnable(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD inde
 HRESULT setRenderState(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD state, DWORD value);
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD stage, reg32 texture);
 HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 device, reg32 declaration);
+HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 device, UINT stream, reg32 buffer, UINT offset,
+                        UINT stride);
+HRESULT setIndices(WinApplication* app, x86::CPU& cpu, reg32 device, reg32 buffer);
+HRESULT drawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD type, LONG baseVertex,
+                             UINT minIndex, UINT vertices, UINT startIndex, UINT count);
+// data: the vertices in host memory (a capture records them by value).
+HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD type, UINT count, const void* data,
+                        UINT stride);
 
 // ---- ID3DXEffect ----
 
@@ -46,6 +54,11 @@ HRESULT effectSetVectorArray(WinApplication* app, x86::CPU& cpu, reg32 effect, r
 HRESULT effectSetMatrix(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrix);
 HRESULT effectSetMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrices,
                              UINT count);
+// SetMatrix of a * b (* c when c is not null), multiplied as matrixMultiply does. Outside a capture the product is
+// recorded unmultiplied and the render thread multiplies it with the caller's FPSCR (the same floats); under a
+// capture it is multiplied here and recorded as a SetMatrix.
+HRESULT effectSetMatrixProduct(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* a,
+                               const float* b, const float* c);
 HRESULT effectSetTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, reg32 texture);
 HRESULT effectBegin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags);
 HRESULT effectPass(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass);
@@ -62,7 +75,8 @@ void callGuest(WinApplication* app, x86::CPU& cpu, reg32 address);
 enum Method : uint8_t
 {
     MethodSetTransform, MethodSetMaterial, MethodSetLight, MethodLightEnable, MethodSetRenderState,
-    MethodSetTexture, MethodSetVertexDeclaration, MethodEffectSetInt, MethodEffectSetFloat, MethodEffectSetVector,
+    MethodSetTexture, MethodSetVertexDeclaration, MethodSetStreamSource, MethodSetIndices,
+    MethodDrawIndexedPrimitive, MethodDrawPrimitiveUP, MethodEffectSetInt, MethodEffectSetFloat, MethodEffectSetVector,
     MethodEffectSetVectorArray, MethodEffectSetMatrix, MethodEffectSetMatrixArray, MethodEffectSetTexture,
     MethodEffectBegin, MethodEffectPass, MethodEffectEnd, MethodGuestCall, MethodCount
 };
@@ -112,7 +126,7 @@ bool capturing();
 
 // While the guest run of a shadow compare is recorded, a guest call through one of these addresses is recorded as a
 // guest call to target and runs target with the capture paused. index < CalloutCount.
-enum { CalloutCount = 2 };
+enum { CalloutCount = 16 };
 reg32 calloutAddress(uint32_t index);
 void setCalloutTarget(uint32_t index, reg32 target);
 
@@ -133,6 +147,7 @@ HRESULT setMatrix(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle
 HRESULT setMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrices,
                        UINT count);
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, reg32 texture);
+HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UINT count);
 HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags);
 HRESULT pass(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass);
 HRESULT end(WinApplication* app, x86::CPU& cpu, reg32 effect);

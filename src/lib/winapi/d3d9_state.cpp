@@ -238,4 +238,18 @@ void multiply(const float* a, const float* b, float* out)
     memcpy(out, r, sizeof(r));
 }
 
+void matrixProduct(const float* matrices, uint32_t count, uint32_t fpscr, float* out)
+{
+    const uint32_t previous = readFpscr();
+    if (previous != fpscr)
+        writeFpscr(fpscr);
+    float r[16];
+    multiply(matrices, matrices + 16, r);
+    for (uint32_t i = 2; i < count; ++i)
+        multiply(r, matrices + 16 * i, r);
+    if (previous != fpscr)
+        writeFpscr(previous);
+    memcpy(out, r, sizeof(r));
+}
+
 }}
