@@ -575,19 +575,25 @@ void effectVertexConstants(const EffectDraw& effect, const float* own, const flo
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
 {
     const View v(effect, own, shared);
+    // ps_1_1 constant registers hold [-1, 1].
+    auto copy = [&v](float* to, int p, uint32_t n)
+    {
+        const float* from = v.floats(p);
+        for (uint32_t i = 0; i < n; ++i)
+            to[i] = from[i] < -1.0f ? -1.0f : from[i] > 1.0f ? 1.0f : from[i];
+    };
     switch (v.kind)
     {
     case EffectWorldHeadlight:
     case EffectWorldHeadlightReflect:
-        memcpy(reinterpret_cast<render::WorldHeadlightFragmentConstants*>(out)->headlightColor,
-               v.floats(PHeadlightColor), 16);
+        copy(reinterpret_cast<render::WorldHeadlightFragmentConstants*>(out)->headlightColor, PHeadlightColor, 4);
         break;
     case EffectCar:
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, v.floats(PEnvmapMin), 16);
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, v.floats(PEnvmapRange), 16);
+        copy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, PEnvmapMin, 4);
+        copy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, PEnvmapRange, 4);
         break;
     case EffectFilter:
-        memcpy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, v.floats(PFilterWeights), 64);
+        copy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, PFilterWeights, 16);
         break;
     default:
         break;
