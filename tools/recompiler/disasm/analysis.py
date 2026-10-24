@@ -26,6 +26,10 @@ MEMORY_DEFS = ('popfd', 'popf')     # write cpu.flags directly
 # x86 (integer arithmetic) without the generator modelling it.
 X86_SETS = {'pf': X.X86_EFLAGS_MODIFY_PF | X.X86_EFLAGS_RESET_PF | X.X86_EFLAGS_SET_PF,
             'af': X.X86_EFLAGS_MODIFY_AF | X.X86_EFLAGS_RESET_AF | X.X86_EFLAGS_SET_AF}
+# Every way an instruction may write a flag on x86 (undefined results included).
+X86_WRITES = dict((f, sum(getattr(X, 'X86_EFLAGS_%s_%s' % (k, f.upper()))
+                          for k in ('MODIFY', 'RESET', 'SET', 'UNDEFINED', 'PRIOR')))
+                  for f in C.CPU_FLAGS)
 
 
 class Exit:
@@ -76,6 +80,7 @@ class Function:
         self.stores = {}            # (index, edge) -> flag mask stored to cpu.flags there
         self.reg_stores = {}        # (index, edge) -> registers stored to cpu there
         self.reg_reloads = {}       # call index -> registers reloaded from cpu after it
+        self.fc_needed = set()      # x87 condition code producers a later reader (or boundary) sees
 
     @property
     def local_registers(self):
@@ -205,6 +210,8 @@ class Function:
             for f, sets in X86_SETS.items():
                 if eflags & sets and not (e.flag_def | e.flag_maydef) & C.FLAG_BIT[f]:
                     self.unmodeled[i] |= C.FLAG_BIT[f]
+            if self.program.abi_flags:
+                self.kill[i] |= self.unmodeled[i]
             if self.is_fused_fnstsw(i) or self.masks_condition_codes(i):
                 self.use[i] &= ~C.FLAG_BIT['fc']    # fused: read only when eax is live (see liveness)
         # A failed assertion traps: nothing runs after an instruction the generator cannot translate.
@@ -250,6 +257,58 @@ class Function:
                     mask |= ALL_STATE
         return mask
 
+    def flag_writes_local(self):
+        """Flags this function may write on x86 before its callees, the ones the generator does not model too."""
+        mask = 0
+        for i in self.reachable:
+            e = self.effects[i]
+            mask |= e.flag_def | e.flag_maydef
+            if self.branch[i][0] != 'skip':
+                eflags = getattr(self.instructions[i], 'eflags', 0)
+                for f, bits in X86_WRITES.items():
+                    if eflags & bits:
+                        mask |= C.FLAG_BIT[f]
+            if self.instructions[i].mnemonic in MEMORY_DEFS:
+                mask |= C.ALL_FLAGS
+            for x in self.exits[i]:
+                if x.kind in ('dyncall', 'dyntail'):
+                    mask |= C.ALL_FLAGS
+        return mask
+
+    def flag_must_def(self):
+        """Flags written on every path from the entry to every exit, the callees' summaries included."""
+        must = self.program.flag_must
+        state = [None] * self.n
+        state[self.entry] = 0
+        work = [self.entry]
+        result = C.ALL_FLAGS
+        while work:
+            i = work.pop()
+            s = state[i] | self.effects[i].flag_def
+            if self.instructions[i].mnemonic in MEMORY_DEFS:
+                s |= C.ALL_FLAGS
+            if self.branch[i][0] == 'call':
+                s |= must.get(self.branch[i][1], 0)
+            for x in self.exits[i]:
+                if x.edge != 'call':
+                    result &= s | (must.get(x.target, 0) if x.kind == 'tail' else 0)
+            for j in self.succ[i]:
+                new = s if state[j] is None else state[j] & s
+                if new != state[j]:
+                    state[j] = new
+                    work.append(j)
+        return result
+
+    def call_clobber(self, x):
+        """Flags whose liveness ends at call x: the ones the callee may write and the x87 condition codes; every
+        flag at an indirect call."""
+        p = self.program
+        if not p.abi_flags:
+            return 0
+        if x.kind == 'call':
+            return p.flag_clobber.get(x.target, C.ALL_FLAGS) | C.FLAG_BIT['fc']
+        return C.ALL_FLAGS
+
     # ---- liveness -----------------------------------------------------------------------------------------
     def exit_use(self, x):
         p = self.program
@@ -280,15 +339,17 @@ class Function:
                 for s in self.succ[i]:
                     o |= live_in[s]
                 call_use = 0
+                clobber = 0
                 for x in self.exits[i]:
                     if x.edge == 'call':
                         call_use |= self.exit_use(x)
+                        clobber |= self.call_clobber(x)
                     else:
                         o |= self.exit_use(x)
                 use = self.use[i]
                 if (o & eax) and self.is_fused_fnstsw(i):
                     use |= fc
-                v = use | call_use | (o & ~self.kill[i])
+                v = use | call_use | (o & ~self.kill[i] & ~clobber)
                 out[i] = o
                 if v != live_in[i]:
                     live_in[i] = v
@@ -302,6 +363,10 @@ class Function:
 
     def flag_live_out(self, i, f):
         return bool(self.live_out[i] & C.FLAG_BIT[f])
+
+    def writes_fc(self, i):
+        """The x87 condition codes set at i are read later."""
+        return self.flag_live_out(i, 'fc') or i in self.fc_needed
 
     # ---- reaching definitions -----------------------------------------------------------------------------
     def callee_delta(self, i):
@@ -400,7 +465,14 @@ class Function:
         if x.edge == 'call':
             after = self.live_out[i]
             return (self.exit_use(x) | (after & self.callee_may_def(i))) & C.CPU_FLAG_MASK
-        return self.exit_use(x) & C.CPU_FLAG_MASK
+        return (self.exit_use(x) | self.indirect_return_use(x)) & C.CPU_FLAG_MASK
+
+    def indirect_return_use(self, x):
+        """Flags read at a return of a function an indirect jump may reach."""
+        p = self.program
+        if x.kind == 'ret' and self.entry_address in p.indirect_returners:
+            return p.indirect_tail_flags
+        return 0
 
     def need_valid(self, i, f):
         """Every producer reaching a read of f at i must provide a valid f_<flag>."""
@@ -418,6 +490,13 @@ class Function:
         return any(not self.is_memory_producer(q, f) for q in self.reaching(i, f))
 
     def decide(self):
+        fc = C.FLAG_BIT['fc']
+        for i in range(self.n):
+            read = self.use[i] | (fc if self.is_fused_fnstsw(i) and self.writes_ax(i) else 0)
+            for x in self.exits[i]:
+                read |= self.exit_use(x) | self.indirect_return_use(x)
+            if read & fc:
+                self.fc_needed.update(q for q in self.reaching(i, 'fc') if not self.is_memory_producer(q, 'fc'))
         for i in range(self.n):
             mask = self.effects[i].flag_use & C.CPU_FLAG_MASK
             for f in C.CPU_FLAGS:
@@ -473,7 +552,8 @@ class Function:
             for x in self.exits[i]:
                 stored = dirty & self.boundary_registers(i, x)
                 if x.edge != 'call':
-                    stored |= clobbered & preserved
+                    # A preserved register holds its entry value here, as cpu does unless clobbered.
+                    stored = (stored & ~preserved) | (clobbered & preserved)
                 if stored:
                     key = (i, x.edge)
                     self.reg_stores[key] = self.reg_stores.get(key, 0) | stored
@@ -533,11 +613,26 @@ class Function:
         regs = self.reg_stores.get((i, edge), 0)
         lines = ['cpu.%s = %s;' % (r, r) for r in C.REGS if regs & C.REG_BIT[r]]
         lines += ['cpu.flags.%s = %s;' % (f, self.flag_source(i, f)) for f in C.CPU_FLAGS if mask & C.FLAG_BIT[f]]
+        if self.program.flag_audit:
+            lines += self.audit_store_lines(i, edge, mask)
         if fdepth is not None and edge != 'flags':
             for j in range(1, fdepth + 1):
                 lines.append('cpu.fpu.regs[(fpu_count + %d) & 7] = fp%d;' % (j, j))
             lines.append('cpu.fpu.count = fpu_count %s %d;' % ('+' if fdepth >= 0 else '-', abs(fdepth)))
         return lines
+
+    def audit_store_lines(self, i, edge, stored):
+        """Flag audit: marks the changed flags not stored at this edge unknown in cpu, the stored ones known;
+        pushfd then checks all of them."""
+        address = self.instructions[i].address
+        dirty = sum(C.FLAG_BIT[f] for f in C.CPU_FLAGS if self.dirty(i, f))
+        lines = ['cpu.flagsUnknown = (cpu.flagsUnknown & ~0x%xu) | 0x%xu;' % (stored, dirty & ~stored)]
+        if edge == 'flags':
+            lines.append('RC_FLAG_AUDIT(cpu, 0x%xu, 0x%xu);' % (C.CPU_FLAG_MASK, address))
+        return lines
+
+    def audit_reload_lines(self, mask, address):
+        return ['RC_FLAG_AUDIT(cpu, 0x%xu, 0x%xu);' % (mask, address)] if mask and self.program.flag_audit else []
 
     def reload_lines(self, i):
         regs = self.reg_reloads.get(i, 0)
@@ -545,6 +640,10 @@ class Function:
         delta = self.callee_delta(i) if self.local_registers else None
         if delta is not None:
             lines.append('esp = esp + %d;' % (delta + 4))
+        if self.program.flag_audit and self.instructions[i].mnemonic in MEMORY_DEFS:
+            lines.append('cpu.flagsUnknown &= ~0x%xu;' % C.CPU_FLAG_MASK)
+        reloaded = sum(C.FLAG_BIT[f] for f in C.CPU_FLAGS if (i, f) in self.reloads)
+        lines += self.audit_reload_lines(reloaded, self.instructions[i].address)
         lines += ['f_%s = cpu.flags.%s;' % (f, f) for f in C.CPU_FLAGS if (i, f) in self.reloads]
         d = self.fpu.depth[i]
         after = self.fpu_after_call(i)
@@ -615,7 +714,8 @@ class Function:
 class Program:
     def __init__(self, modules, thread_segments, skip_instructions, function_names, flags_preserved=(), not_code=(),
                  native_overrides=(), local_registers=True, memory_functions=(), local_x87=True, setjmp=None,
-                 longjmp_jumps=None, fpu_check=False, fpu_deltas=None, preempt_loops=False, address_taken=None):
+                 longjmp_jumps=None, fpu_check=False, fpu_deltas=None, preempt_loops=False, address_taken=None,
+                 abi_flags=False, jump_targets=None, flag_audit=False):
         self.functions = {}
         # Backward jumps are preemption points (WinApplication::allowPreemption).
         self.preempt_loops = preempt_loops
@@ -649,6 +749,19 @@ class Program:
         self.ret_live = {}
         self.may_def = {}
         self.indirect_live_in = 0
+        # Flags pass a direct call only where the code reads them (callee before writing them, caller after the
+        # call) and no indirect call or indirect jump (except to jump_targets).
+        self.abi_flags = abi_flags
+        # Generated code checks that every flag it reads from cpu was stored there (RC_FLAG_AUDIT).
+        self.flag_audit = flag_audit
+        self.indirect_mask = ALL_REG_STATE if abi_flags else ALL_STATE
+        self.flag_clobber = {}
+        self.flag_must = {}
+        # Flags read by the callers of a function leaving through an indirect jump; the returns of the functions
+        # that jump reaches store them (jump_targets: site -> entries, else every address-taken function).
+        self.jump_targets = dict(jump_targets or {})
+        self.indirect_tail_flags = 0
+        self.indirect_returners = set()
 
     def find_address_taken(self, modules):
         """Entries that may be called indirectly, for an image with relocations: module entry points and every entry
@@ -665,17 +778,23 @@ class Program:
                     taken.add(value)
         return taken & entries
 
+    def kept(self, a, stack_infos=None):
+        """Registers direct callers of a keep in their locals across the call: the ones it restores before
+        returning, and esp when its change is known."""
+        stack_infos = self.stack if stack_infos is None else stack_infos
+        info = stack_infos.get(a) if stack_infos else None
+        if not info:
+            return 0
+        mask = info.preserved << REG_SHIFT
+        if info.delta is not None:
+            mask |= C.REG_BIT['esp'] << REG_SHIFT
+        return mask
+
     def compute_may_def(self, fns, stack_infos=None):
         """State each function may change, its callees included. With stack_infos, registers a function restores
         before returning and an esp change known to its callers do not count."""
         def kept(a):
-            info = stack_infos.get(a) if stack_infos else None
-            if not info:
-                return 0
-            mask = info.preserved << REG_SHIFT
-            if info.delta is not None:
-                mask |= C.REG_BIT['esp'] << REG_SHIFT
-            return mask
+            return self.kept(a, stack_infos or {})
         local = dict((fn.entry_address, fn.may_def_local() & ~kept(fn.entry_address)) for fn in fns)
         callees = dict((fn.entry_address, set(x.target for i in fn.reachable for x in fn.exits[i]
                                               if x.kind in ('call', 'tail'))) for fn in fns)
@@ -695,6 +814,113 @@ class Program:
                     changed = True
         self.may_def = may_def
 
+    def compute_flag_summaries(self, fns):
+        """Per function: the flags it may write on x86 (callees included) and the ones it writes on every path."""
+        clobber = dict((fn.entry_address, fn.flag_writes_local()) for fn in fns)
+        callees = dict((fn.entry_address, set(x.target for i in fn.reachable for x in fn.exits[i]
+                                              if x.kind in ('call', 'tail'))) for fn in fns)
+        changed = True
+        while changed:
+            changed = False
+            for a, targets in callees.items():
+                v = clobber[a]
+                for t in targets:
+                    v |= clobber.get(t, C.ALL_FLAGS)
+                if a in self.flags_preserved:
+                    v = 0
+                if v != clobber[a]:
+                    clobber[a] = v
+                    changed = True
+        self.flag_clobber = clobber
+        self.flag_must = dict((fn.entry_address, C.ALL_FLAGS) for fn in fns)
+        changed = True
+        while changed:
+            changed = False
+            for fn in fns:
+                v = fn.flag_must_def()
+                if v != self.flag_must[fn.entry_address]:
+                    self.flag_must[fn.entry_address] = v
+                    changed = True
+
+    def provided(self, fn, q, f):
+        """The value of flag f that producer q of fn leaves is where a reader after a later call finds it: in a
+        local (CPU flags), written to cpu.fpu (x87 condition codes), or in cpu because the caller or callee
+        provides it."""
+        bit = C.FLAG_BIT[f]
+        if q == fn.ENTRY:
+            return bool(self.live_in[fn.entry_address] & bit)
+        b = fn.branch[q]
+        if b[0] == 'call':
+            return bool(self.ret_live.get(b[1], 0) & bit)
+        if b[0] == 'dyncall':
+            return False
+        if fn.instructions[q].mnemonic in MEMORY_DEFS:
+            return True
+        return fn.writes_fc(q) if f == 'fc' else True
+
+    def tail_closure(self, entries):
+        """The functions and every function they reach by tail jumps."""
+        out = set(entries)
+        work = list(out)
+        while work:
+            fn = self.functions[work.pop()]
+            for i in fn.reachable:
+                for x in fn.exits[i]:
+                    if x.kind == 'tail' and x.target in self.functions and x.target not in out:
+                        out.add(x.target)
+                        work.append(x.target)
+        return out
+
+    def result_mask(self, a):
+        """State a function's return can publish: flags only when it may write them (a caller reading a flag the
+        callee leaves alone keeps its own value)."""
+        if not self.abi_flags:
+            return ALL_STATE
+        return ALL_REG_STATE | self.flag_clobber.get(a, C.ALL_FLAGS)
+
+    def flag_contract(self):
+        """Where this executable could break the flag convention the analysis assumes. Each entry is a site and
+        the flags concerned:
+        readers: address-taken functions that read flags at entry (an indirect caller passes none);
+        indirect_results: indirect calls followed by a read of the callee's flags;
+        indirect_returns: returns of functions an indirect jump with live flags may reach (fenced: they write those
+        flags back), where a flag comes from a call whose callee does not publish it;
+        partial: direct calls followed by a read of a flag the callee writes on some paths only, while the value
+        before the call is not where the reader finds it.
+        Also, not a violation: indirect_tails, the indirect jumps whose callers read flags (the fence)."""
+        out = {'readers': [], 'indirect_results': [], 'indirect_returns': [], 'partial': [], 'indirect_tails': []}
+        for a in sorted(self.address_taken):
+            if self.live_in[a] & C.ALL_FLAGS:
+                out['readers'].append((a, self.live_in[a] & C.ALL_FLAGS))
+        for a in sorted(self.functions):
+            fn = self.functions[a]
+            for i in sorted(fn.reachable):
+                after = fn.live_out[i] & C.ALL_FLAGS
+                for x in fn.exits[i]:
+                    extra = fn.indirect_return_use(x)
+                    if extra:
+                        mask = 0
+                        for f in C.FLAGS:
+                            if extra & C.FLAG_BIT[f] and any(q != fn.ENTRY and not self.provided(fn, q, f)
+                                                             for q in fn.reaching(i, f)):
+                                mask |= C.FLAG_BIT[f]
+                        if mask:
+                            out['indirect_returns'].append((fn.instructions[i].address, mask))
+                    if x.kind == 'dyncall' and after:
+                        out['indirect_results'].append((fn.instructions[i].address, after))
+                    elif x.kind == 'dyntail' and self.ret_live[a] & C.ALL_FLAGS:
+                        out['indirect_tails'].append((fn.instructions[i].address, self.ret_live[a] & C.ALL_FLAGS))
+                    elif x.kind == 'call':
+                        partial = after & self.flag_clobber.get(x.target, C.ALL_FLAGS) & \
+                            ~self.flag_must.get(x.target, 0)
+                        mask = 0
+                        for f in C.FLAGS:
+                            if partial & C.FLAG_BIT[f] and any(not self.provided(fn, q, f) for q in fn.reaching(i, f)):
+                                mask |= C.FLAG_BIT[f]
+                        if mask:
+                            out['partial'].append((fn.instructions[i].address, mask))
+        return out
+
     def analyze(self, log=print):
         fns = list(self.functions.values())
         for fn in fns:
@@ -710,6 +936,8 @@ class Program:
         if self.setjmp in self.functions:
             self.stack[self.setjmp] = stack.StackInfo()
             self.may_def[self.setjmp] = ALL_STATE
+        if self.abi_flags:
+            self.compute_flag_summaries(fns)
         for fn in fns:
             self.live_in[fn.entry_address] = 0
             self.ret_live[fn.entry_address] = 0
@@ -728,30 +956,40 @@ class Program:
                     changed = True
             indirect_live_in = ALL_REG_STATE
             for a in self.address_taken:
-                indirect_live_in |= self.live_in[a]
+                indirect_live_in |= self.live_in[a] & self.indirect_mask
             ret_live = dict((a, 0) for a in self.functions)
             indirect_ret = host_ret
+            tail_flags = 0
+            tail_targets = set()
             for fn in fns:
                 for i in fn.reachable:
                     for x in fn.exits[i]:
                         if x.kind == 'call':
                             if x.target in ret_live:
-                                ret_live[x.target] |= fn.live_out[i]
+                                ret_live[x.target] |= fn.live_out[i] & self.result_mask(x.target) & \
+                                    ~self.kept(x.target)
                         elif x.kind == 'dyncall':
-                            indirect_ret |= fn.live_out[i]
+                            indirect_ret |= fn.live_out[i] & self.indirect_mask
                         elif x.kind == 'tail':
                             if x.target in ret_live:
-                                ret_live[x.target] |= self.ret_live[fn.entry_address]
+                                ret_live[x.target] |= self.ret_live[fn.entry_address] & self.result_mask(x.target)
                         elif x.kind == 'dyntail':
-                            indirect_ret |= self.ret_live[fn.entry_address]
+                            indirect_ret |= self.ret_live[fn.entry_address] & self.indirect_mask
+                            flags = self.ret_live[fn.entry_address] & ~self.indirect_mask
+                            if flags:
+                                tail_flags |= flags
+                                site = fn.instructions[i].address
+                                tail_targets |= set(self.jump_targets.get(site, self.address_taken))
             for a in self.address_taken:
-                ret_live[a] |= indirect_ret
+                ret_live[a] |= indirect_ret & self.result_mask(a)
             if indirect_live_in != self.indirect_live_in or ret_live != self.ret_live:
                 changed = True
             self.indirect_live_in = indirect_live_in
             self.ret_live = ret_live
+            self.indirect_tail_flags = tail_flags
             if not changed:
                 break
+        self.indirect_returners = self.tail_closure(tail_targets & set(self.functions))
         log('liveness: %d iterations; %d address-taken functions; indirect live-in %s; indirect return %s'
             % (iteration, len(self.address_taken), state_names(self.indirect_live_in), state_names(indirect_ret)))
         for fn in fns:

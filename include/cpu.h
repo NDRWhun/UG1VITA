@@ -115,6 +115,7 @@ struct CPU
     {
         fpu.init();
         terminate = false;
+        flagsUnknown = 0;
         this->flags.eflags = 0x00200202;
         this->flags.cf = 0;
         this->flags.zf = 0;
@@ -136,6 +137,9 @@ struct CPU
     FPU fpu;
     MMX mmx;
     bool terminate;
+    // Flag audit builds: flags cpu.flags and cpu.fpu.status do not hold (cf 1, pf 2, af 4, zf 8, sf 16, of 32,
+    // x87 C0/C2/C3 64).
+    reg32 flagsUnknown;
 };
 
 }

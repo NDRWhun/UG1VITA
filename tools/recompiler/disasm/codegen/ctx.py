@@ -437,7 +437,18 @@ class Ctx:
         if self.record:
             self.effects.flag_def |= FLAG_BIT['fc']
             return []
-        return lines if self.fn.flag_live_out(self.index, 'fc') else []
+        written = self.fn.writes_fc(self.index)
+        if self.fn.program is not None and self.fn.program.flag_audit:
+            fc = FLAG_BIT['fc']
+            audit = 'cpu.flagsUnknown &= ~0x%xu;' % fc if written else 'cpu.flagsUnknown |= 0x%xu;' % fc
+            return (lines if written else []) + [audit]
+        return lines if written else []
+
+    def audit_fc(self):
+        """Flag audit: checks that cpu.fpu.status holds the x87 condition codes read here."""
+        if self.record or self.fn.program is None or not self.fn.program.flag_audit:
+            return []
+        return ['RC_FLAG_AUDIT(cpu, 0x%xu, 0x%xu);' % (FLAG_BIT['fc'], self.ins.address)]
 
     def use_fc(self):
         if self.record:

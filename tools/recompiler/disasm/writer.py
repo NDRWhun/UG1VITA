@@ -103,15 +103,19 @@ class Writer:
                 src.write('void %s%s;\n' % (self.function_name(fn.entry_address), PARAMETERS))
             src.write('\nApplication::Application(const char* appName, const std::vector<win32::Section>& sections)\n'
                       '    :   WinApplication(appName, layout::imageBase, sections)\n{\n')
-            for fn in functions:
-                name = self.function_name(fn.entry_address)
-                src.write('    registerMethod(0x%08x, {"%s", &%s});\n' % (fn.entry_address, name, name))
+            src.write('    reserveMethods(%d);\n' % (len(functions) + len(imports)))
             src.write('    // Imports: the import address table slots point at fake addresses with the shims behind them.\n')
             for i in imports:
                 function = 'win32::%s::%s' % (i.dll, cpp_name(i.name))
                 src.write('    getMemory<x86::reg32>(0x%08x) = 0x%08x;\n' % (i.iat_address, i.fake_address))
                 src.write('    registerMethod(0x%08x, {"<%s>%s", &win32::Wrapper<decltype(&%s), &%s>::stdcall});\n'
                           % (i.fake_address, i.dll, i.name, function, function))
+            # Indirect call targets first: they take the home slots of the method table.
+            taken = self.program.address_taken
+            for fn in [f for f in functions if f.entry_address in taken] + \
+                    [f for f in functions if f.entry_address not in taken]:
+                name = self.function_name(fn.entry_address)
+                src.write('    registerMethod(0x%08x, {"%s", &%s});\n' % (fn.entry_address, name, name))
             src.write('}\n\nvoid Application::execute()\n{\n    runThread(m_cpu, 0x%x);\n}\n\n}\n'
                       % self.module.entry_point)
 

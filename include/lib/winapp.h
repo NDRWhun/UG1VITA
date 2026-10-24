@@ -158,6 +158,8 @@ public:
     template< typename T >
     inline MemoryAccessor<T> getMemory(x86::reg32 address) { return MemoryAccessor<T>{g_guestBase + address}; }
 
+    // Sizes the method table so count methods fill at most a quarter of it (before registering them).
+    void reserveMethods(x86::reg32 count);
     void registerMethod(x86::reg32 pointer, Method method);
     // Replaces the method registered at a guest address and returns the previous one. Only before guest code
     // runs: dynamic_call reads the table without a lock.

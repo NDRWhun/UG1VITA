@@ -36,6 +36,30 @@ void fpuCallMismatch(CPU& cpu, reg32 expected, uint32_t site)
     cpu.fpu.count = expected;
 }
 
+void flagAuditFail(CPU& cpu, reg32 flags, uint32_t site)
+{
+    static uint32_t logged[256];
+    static uint32_t loggedCount = 0;
+    bool known = false;
+    for (uint32_t i = 0; i < loggedCount && !known; ++i)
+        known = logged[i] == site;
+    if (!known && loggedCount < 256)
+    {
+        logged[loggedCount++] = site;
+        static const char* const names[] = {"cf", "pf", "af", "zf", "sf", "of", "c0c2c3"};
+        char text[40] = "";
+        for (int i = 0; i < 7; ++i)
+        {
+            if (cpu.flagsUnknown & flags & (1u << i))
+            {
+                strcat(text, " ");
+                strcat(text, names[i]);
+            }
+        }
+        pf::logError("flag audit: 0x%08x reads flags that were not stored:%s", site, text);
+    }
+}
+
 void guestTrap(uint32_t address, const char* reason)
 {
     pf::logError("guest trap at 0x%08x: %s", address, reason);

@@ -1,6 +1,7 @@
 # One-step build of the VPK: finds the game, regenerates the recompiled code when needed, configures and builds.
 # Usage: tools/build.ps1 [-Game <the game folder>] [-Config Release|Debug] [-Clean] [-Reconfigure] [-Jobs N]
 #                        [-Regenerate] [-Compiler gcc|clang] [-NoLto] [-PgoGenerate] [-PgoUse <file.profdata>]
+#                        [-FlagAudit]
 # The game folder (with Speed.exe) comes from -Game, then NFSU_GAME_DIR, then the folder used last time; it is
 # remembered for the next run. Code is generated again when the executable, the audio banks (Sound/**/*.abk) or the
 # recompiler changed, or with -Regenerate. Only what changed is rebuilt.
@@ -13,6 +14,7 @@ param(
     [switch]$Clean,
     [switch]$Reconfigure,
     [switch]$Regenerate,
+    [switch]$FlagAudit,
     [int]$Jobs = [Environment]::ProcessorCount,
     [ValidateSet('gcc', 'clang')][string]$Compiler = 'gcc',
     [switch]$NoLto,
@@ -50,7 +52,8 @@ function Get-GeneratorStamp([string]$gameDir) {
     $files = @(Get-Item (Join-Path $gameDir $exeName)) + $banks +
              @(Get-ChildItem (Join-Path $PSScriptRoot 'recompiler') -Recurse -File -Include '*.py', '*.txt' |
                Where-Object { $_.FullName -notmatch '__pycache__' } | Sort-Object FullName)
-    $lines = $files | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
+    $lines = @($files | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash })
+    if ($FlagAudit) { $lines += 'flag-audit' }
     $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
     $sha = [Security.Cryptography.SHA256]::Create()
     return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '')
@@ -65,7 +68,7 @@ if ($gameDir) {
     $current = if (Test-Path $stampFile) { (Get-Content $stampFile -Raw).Trim() } else { '' }
     if ($Regenerate -or -not $haveCode -or $stamp -ne $current) {
         Write-Host "Generating the recompiled code from $(Join-Path $gameDir $exeName)..."
-        & (Join-Path $PSScriptRoot 'generate.ps1') -Binaries $gameDir
+        & (Join-Path $PSScriptRoot 'generate.ps1') -Binaries $gameDir -FlagAudit:$FlagAudit
         Set-Content -Path $stampFile -Value $stamp -Encoding ASCII
     }
 } elseif (-not $haveCode) {

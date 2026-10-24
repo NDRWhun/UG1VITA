@@ -1,12 +1,14 @@
 # Generates the C++ recompilation of the game into src/nfsu/generated with tools/recompiler.
 # Usage: tools/generate.ps1 -Binaries <dir with Speed.exe> [-Out <dir>] [-Analysis <file.json>] [-FpuCheck]
+#                           [-FlagAudit]
 # Needs Python 3; capstone is fetched by tools/recompiler/bootstrap.py when it is missing. Only files whose content
 # changed are replaced, so the build recompiles just those; generated files of earlier runs are deleted.
 param(
     [Parameter(Mandatory = $true)][string]$Binaries,
     [string]$Out,
     [string]$Analysis,
-    [switch]$FpuCheck
+    [switch]$FpuCheck,
+    [switch]$FlagAudit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,4 +42,5 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 $arguments = @((Join-Path $root 'recompiler/generate.py'), '--binaries', $Binaries, '--out', (Resolve-Path $Out).Path)
 if ($Analysis) { $arguments += @('--analysis', $Analysis) }
 if ($FpuCheck) { $arguments += '--fpu-check' }
+if ($FlagAudit) { $arguments += '--flag-audit' }
 if ((Invoke-Python @arguments) -ne 0) { throw 'generation failed' }
