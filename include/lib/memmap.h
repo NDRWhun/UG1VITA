@@ -4,6 +4,8 @@
 #include <x86.h>
 #include <vector>
 
+namespace pf { namespace perf { enum Alloc : int; } }
+
 namespace win32
 {
 
@@ -34,7 +36,8 @@ public:
     // allocation is tried again.
     typedef bool (*Reclaim)();
 
-    MemMap(x86::reg32 size, Placement placement = Low);
+    // The kind names the caller in the perf_log block counts.
+    MemMap(x86::reg32 size, Placement placement = Low, pf::perf::Alloc kind = pf::perf::Alloc(0));
     ~MemMap();
 
     x86::reg32 getBlockStart() const  { return s_addressOffset + m_block * 4096; }

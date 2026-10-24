@@ -26,6 +26,8 @@ struct ThreadControl
         ,   level(scheduler::LevelNormal)
         ,   priority(0)
         ,   holder(pf::perf::HolderMain)
+        ,   name(nullptr)
+        ,   holderSlot(NoHolderSlot)
         ,   suspendCount(0)
         ,   startPending(false)
         ,   start(nullptr)
@@ -37,7 +39,11 @@ struct ThreadControl
     x86::reg32          guestId;
     std::atomic<int>    level;          // scheduler::Level
     std::atomic<int>    priority;       // Windows thread priority
+    static const int NoHolderSlot = -2;
+
     pf::perf::Holder    holder;         // kind of thread, for perf_log
+    const char*         name;           // log name of a guest thread
+    int                 holderSlot;     // perf_log lock holder slot, NoHolderSlot until the first release
     std::atomic<int>    suspendCount;   // changed under s_tableMutex
     bool                startPending;   // created suspended and not started yet
     pf::Semaphore*      start;          // start semaphore of a guest thread
@@ -172,6 +178,7 @@ Thread::Thread(WinApplication *app, x86::reg32 method, x86::reg32 parameter, x86
         ThreadControl* control = s_guestControls.back().get();
         control->holder = role == pf::cores::Game ? pf::perf::HolderGame
                         : role == pf::cores::Io ? pf::perf::HolderIo : pf::perf::HolderHelper;
+        control->name = name;
         control->start = m_shared->m_semaphore;
         control->host = m_shared->m_thread;
         if (suspended)
@@ -468,6 +475,29 @@ pf::perf::Holder holder(const ThreadControl* control)
     if (!control->host && control->level.load(std::memory_order_relaxed) == LevelTimeCritical)
         return pf::perf::HolderTimer;
     return control->holder;
+}
+
+int holderSlot(ThreadControl* control)
+{
+    if (!control)
+        return pf::perf::holderSlot("main");
+    if (control->holderSlot == ThreadControl::NoHolderSlot)
+    {
+        const char* name = control->name;
+        if (!name)
+        {
+            switch (holder(control))
+            {
+            case pf::perf::HolderGame:  name = "game"; break;
+            case pf::perf::HolderTimer: name = "timer callbacks"; break;
+            case pf::perf::HolderIo:    name = "io"; break;
+            case pf::perf::HolderMain:  name = "main"; break;
+            default:                    name = "other"; break;
+            }
+        }
+        control->holderSlot = pf::perf::holderSlot(name);
+    }
+    return control->holderSlot;
 }
 
 void raiseCurrentLevel(Level level)

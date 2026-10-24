@@ -396,7 +396,7 @@ HRESULT Texture::lock(uint32_t face, uint32_t level, D3DLOCKED_RECT* locked, con
     }
     else
     {
-        memory = new MemMap(bytes, MemMap::High);
+        memory = new MemMap(bytes, MemMap::High, pf::perf::AllocTextureLock);
         if (m_written[index] && !(flags & D3DLOCK_DISCARD))
         {
             const bool timed = pf::perf::enabled();
@@ -673,7 +673,7 @@ Buffer::Buffer(Device* device, Kind kind, UINT size, DWORD usage, DWORD pool, DW
     ,   m_usage(usage)
     ,   m_pool(pool)
     ,   m_format(format)
-    ,   m_shadow(new MemMap(size ? size : 1))
+    ,   m_shadow(new MemMap(size ? size : 1, MemMap::Low, pf::perf::AllocBuffer))
     ,   m_storage(gpu().createBuffer(size))
 {
     device->addRef();

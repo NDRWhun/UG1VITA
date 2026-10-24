@@ -4,6 +4,7 @@
 #include <platform/perf.h>
 #include <nfsu_layout.h>
 #include <psp2/kernel/sysmem.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -58,6 +59,61 @@ static void freeArena()
 
 x86::reg8* const g_guestBase = allocArena();
 
+// One bit per block of the simulated memory, set while the block is free; kept with s_blocks under s_lock.
+static const x86::reg32 s_freeWordCount = s_simulatedMemory / 4096 / 32;
+static uint32_t s_freeBits[s_freeWordCount];
+
+static void markBlocks(x86::reg32 begin, x86::reg32 count, bool free)
+{
+    x86::reg32 b = begin;
+    const x86::reg32 end = begin + count;
+    while (b < end)
+    {
+        const x86::reg32 bit = b & 31;
+        const x86::reg32 n = std::min<x86::reg32>(32 - bit, end - b);
+        const uint32_t mask = (n == 32 ? ~0u : ((1u << n) - 1)) << bit;
+        if (free)
+            s_freeBits[b >> 5] |= mask;
+        else
+            s_freeBits[b >> 5] &= ~mask;
+        b += n;
+    }
+}
+
+// First block from b on whose free bit equals free, or limit.
+static x86::reg32 nextBlock(x86::reg32 b, x86::reg32 limit, bool free)
+{
+    if (b >= limit)
+        return limit;
+    x86::reg32 word = b >> 5;
+    uint32_t bits = (free ? s_freeBits[word] : ~s_freeBits[word]) & (~0u << (b & 31));
+    while (!bits)
+    {
+        if (++word >= (limit + 31) >> 5)
+            return limit;
+        bits = free ? s_freeBits[word] : ~s_freeBits[word];
+    }
+    return std::min<x86::reg32>((word << 5) + x86::reg32(__builtin_ctz(bits)), limit);
+}
+
+// Last block below e whose free bit equals free, plus 1; 0 when there is none.
+static x86::reg32 previousBlockEnd(x86::reg32 e, bool free)
+{
+    if (e == 0)
+        return 0;
+    x86::reg32 word = (e - 1) >> 5;
+    const x86::reg32 top = (e - 1) & 31;
+    uint32_t bits = (free ? s_freeBits[word] : ~s_freeBits[word]) & (top == 31 ? ~0u : ((2u << top) - 1));
+    while (!bits)
+    {
+        if (word == 0)
+            return 0;
+        --word;
+        bits = free ? s_freeBits[word] : ~s_freeBits[word];
+    }
+    return (word << 5) + 32 - x86::reg32(__builtin_clz(bits));
+}
+
 // Lowest b with [b, b + count) free: the same block plain first fit from block 0 finds.
 x86::reg32 MemMap::findLow(x86::reg32 count)
 {
@@ -65,10 +121,9 @@ x86::reg32 MemMap::findLow(x86::reg32 count)
     bool first = true;
     while (b + count <= s_blockCount)
     {
-        const void* free = memchr(s_blocks + b, 0, s_blockCount - b);
-        if (!free)
+        b = nextBlock(b, s_blockCount, true);
+        if (b == s_blockCount)
             break;
-        b = x86::reg32(static_cast<const x86::reg8*>(free) - s_blocks);
         if (first)
         {
             s_lowFree = b;
@@ -77,9 +132,7 @@ x86::reg32 MemMap::findLow(x86::reg32 count)
         const x86::reg32 end = b + count;
         if (end > s_blockCount)
             break;
-        x86::reg32 s = b;
-        while (s < end && !s_blocks[s])
-            ++s;
+        const x86::reg32 s = nextBlock(b, end, false);
         if (s == end)
             return b;
         b = s + 1;
@@ -94,8 +147,7 @@ x86::reg32 MemMap::findHigh(x86::reg32 count)
     bool first = true;
     while (e >= count)
     {
-        while (e > 0 && s_blocks[e - 1])
-            --e;
+        e = previousBlockEnd(e, true);
         if (first)
         {
             s_highFree = e;
@@ -104,9 +156,7 @@ x86::reg32 MemMap::findHigh(x86::reg32 count)
         if (e < count)
             break;
         const x86::reg32 begin = e - count;
-        x86::reg32 s = e;
-        while (s > begin && !s_blocks[s - 1])
-            --s;
+        const x86::reg32 s = std::max(previousBlockEnd(e, false), begin);
         if (s == begin)
             return begin;
         e = s - 1;
@@ -114,7 +164,7 @@ x86::reg32 MemMap::findHigh(x86::reg32 count)
     return x86::reg32(-1);
 }
 
-MemMap::MemMap(x86::reg32 size, Placement placement)
+MemMap::MemMap(x86::reg32 size, Placement placement, pf::perf::Alloc kind)
     :   m_block(x86::reg32(-1))
     ,   m_blockCount(size / 4096 + (size % 4096 != 0))
 {
@@ -123,10 +173,14 @@ MemMap::MemMap(x86::reg32 size, Placement placement)
         pf::fatal("guest memory exhausted (requested %u bytes)", size);
     const bool timed = pf::perf::enabled();
     const uint32_t start = timed ? pf::perf::now() : 0;
+    uint32_t searchUs = 0;
     for (;;)
     {
         s_lock->lock();
+        const uint32_t searchStart = timed ? pf::perf::now() : 0;
         m_block = placement == High ? findHigh(m_blockCount) : findLow(m_blockCount);
+        if (timed)
+            searchUs += pf::perf::now() - searchStart;
         if (m_block != x86::reg32(-1))
             break;
         s_lock->unlock();
@@ -134,6 +188,7 @@ MemMap::MemMap(x86::reg32 size, Placement placement)
             pf::fatal("guest memory exhausted (requested %u bytes)", size);
     }
     memset(s_blocks + m_block, 1, m_blockCount);
+    markBlocks(m_block, m_blockCount, false);
     if (m_block == s_lowFree)
         s_lowFree = m_block + m_blockCount;
     if (m_block + m_blockCount == s_highFree)
@@ -141,7 +196,7 @@ MemMap::MemMap(x86::reg32 size, Placement placement)
     s_memMaps.push_back(this);
     s_lock->unlock();
     if (timed)
-        pf::perf::guestBlock(pf::perf::now() - start);
+        pf::perf::guestBlock(kind, size, pf::perf::now() - start, searchUs);
 }
 
 MemMap::~MemMap()
@@ -156,6 +211,7 @@ MemMap::~MemMap()
         }
     }
     memset(s_blocks + m_block, 0, m_blockCount);
+    markBlocks(m_block, m_blockCount, true);
     if (m_block < s_lowFree)
         s_lowFree = m_block;
     if (m_block + m_blockCount > s_highFree)
@@ -202,6 +258,7 @@ void MemMap::init(x86::reg32 baseAddress, const std::vector<Section>& sections)
     s_blockSize = s_blockMapSize;
     s_lowFree = 0;
     s_highFree = s_blockCount;
+    markBlocks(0, s_blockCount, true);
     x86::reg32 maxEnd = 0;
     for (std::vector<Section>::const_iterator it = sections.begin(); it != sections.end(); ++it)
     {
