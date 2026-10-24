@@ -28,7 +28,7 @@ const x86::reg32 TrackCount = 0x0073616C;
 const x86::reg32 TrackEntrySize = 0xFC;
 const x86::reg32 TrackNumber = 0x6C;
 const x86::reg32 TrackTableLoader = 0x00442040;
-// Race state: coordinator state 4 is the race in progress, race stage 3 racing.
+// Race state: coordinator state 4 is the race in progress, race stage 3 the countdown, 4 racing.
 const x86::reg32 RaceCoordinator = 0x007361F0;
 const x86::reg32 CurrentRace = 0x0073619C;
 const x86::reg32 PlayerCount = 0x007361C4;
@@ -110,7 +110,7 @@ bool racing()
 {
     const x86::reg32 coordinator = dword(RaceCoordinator);
     const x86::reg32 race = dword(CurrentRace);
-    return coordinator && race && dword(coordinator) == 4 && dword(race) == 3;
+    return coordinator && race && dword(coordinator) == 4 && dword(race) == 4;
 }
 
 x86::reg32 player0()
@@ -200,6 +200,15 @@ void poll()
         return;
     static uint32_t s_startUs = 0;
     static bool s_quit = false;
+    static x86::reg32 s_lastState = ~0u, s_lastStage = ~0u;
+    const x86::reg32 coordinator = dword(RaceCoordinator), race = dword(CurrentRace);
+    const x86::reg32 state = coordinator ? dword(coordinator) : ~0u, stage = race ? dword(race) : ~0u;
+    if (state != s_lastState || stage != s_lastStage)
+    {
+        pf::logInfo("bench: coordinator state %d, race stage %d", int(int32_t(state)), int(int32_t(stage)));
+        s_lastState = state;
+        s_lastStage = stage;
+    }
     const int phase = s_phase.load(std::memory_order_acquire);
     if (phase == Idle)
     {
