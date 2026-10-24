@@ -100,6 +100,11 @@ NATIVE_OVERRIDES = [
     0x407db0,   # texture creation: palette textures expanded to A8R8G8B8, levels copied into the D3D texture
     0x5a8a50,   # CompositeSkin32: car skin layers blended into a 32-bit texture
     0x5a8640,   # weighted sum of up to n pixels
+    # Light flares (src/nfsu/flares.cpp): the world pass with per-flare visibility on the workers, one flare, and
+    # one flare quad.
+    0x544f30,   # world light flares of a view
+    0x5447c0,   # one light flare: intensity, visibility and its quads
+    0x5443f0,   # one flare quad and its submission
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.

@@ -96,6 +96,7 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/bench.cpp
   src/nfsu/coll.cpp
   src/nfsu/cull.cpp
+  src/nfsu/flares.cpp
   src/nfsu/mathfn.cpp
   src/nfsu/load.cpp
   src/nfsu/movie_yuv.cpp

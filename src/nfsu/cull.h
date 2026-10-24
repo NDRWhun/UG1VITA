@@ -16,6 +16,10 @@ void doCulling(win32::WinApplication* app, x86::CPU& cpu);
 // argument): 0 outside, 1 partial, 2 inside.
 void getVisibleState(win32::WinApplication* app, x86::CPU& cpu);
 
+// The test of guest 0x40db20 without a matrix, for a box as the guest holds it after loading (min, max): 0
+// outside, 1 partial, 2 inside. compareA and compareB get the operands of its last x87 compare. Any thread.
+int boxState(const float mn[3], const float mx[3], x86::reg32 view, double& compareA, double& compareB);
+
 }}
 
 #endif

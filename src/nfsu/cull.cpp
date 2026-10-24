@@ -1187,6 +1187,16 @@ void doCulling(win32::WinApplication* app, x86::CPU& cpu)
         report(pf::perf::now() - start, counts);
 }
 
+int boxState(const float mn[3], const float mx[3], reg32 view, double& compareA, double& compareB)
+{
+    X87 x87;
+    reg32 ecx, edx;
+    const int state = visible(mn, mx, view, ld(HalfConstant), ld(ZeroConstant), x87, ecx, edx);
+    compareA = x87.a;
+    compareB = x87.b;
+    return state;
+}
+
 void getVisibleState(win32::WinApplication* app, x86::CPU& cpu)
 {
     const Settings& s = settings();
