@@ -147,6 +147,23 @@ class Writer:
         for s in image.sections:
             lines.append('    { "%s", 0x%x, 0x%x, 0x%x, 0x%x },' % (s.name, s.address, s.virtual_size, s.file_offset,
                                                                     s.raw_size))
-        lines += ['};', '', '}}', '', '#endif /* !%s */' % guard, '']
+        lines += ['};', '',
+                  '// Functions whose callers read flags after they return, and those flags (cf 1, pf 2, af 4, zf 8, '
+                  'sf 16,',
+                  '// of 32, x87 condition codes 64). Sorted by address.',
+                  'struct FlagReturn',
+                  '{',
+                  '    x86::reg32  address;',
+                  '    x86::reg8   flags;',
+                  '};', '',
+                  'constexpr FlagReturn flagReturns[] = {']
+        flag_mask = (1 << 7) - 1
+        returns = sorted((a, m & flag_mask) for a, m in self.program.ret_live.items() if m & flag_mask)
+        for a, m in returns:
+            lines.append('    { 0x%x, 0x%x },' % (a, m))
+        if not returns:
+            lines.append('    { 0, 0 },')
+        lines += ['};', 'constexpr x86::reg32 flagReturnCount = %d;' % len(returns), '',
+                  '}}', '', '#endif /* !%s */' % guard, '']
         with open(self.path('%s_layout.h' % self.name), 'w', newline='\n') as f:
             f.write('\n'.join(lines))

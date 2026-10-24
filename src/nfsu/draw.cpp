@@ -5,6 +5,7 @@
 // 0x40bc10 and the effect group functions) run as guest code with the stack and registers the guest gives them.
 
 #include "draw.h"
+#include "retflags.h"
 
 #include <winapi/d3d9_native.h>
 #include <platform/config.h>
@@ -101,7 +102,6 @@ const uint32_t ShadowLogLimit = 20;
 
 inline double ld(reg32 address) { return double(rc::ldf32(address)); }
 inline sreg32 ld16s(reg32 address) { return sreg32(sreg16(rc::ld16(address))); }
-inline bool parity(reg32 value) { return !x86::parity8(reg8(value)); }
 inline reg32 bits(float value) { reg32 r; memcpy(&r, &value, 4); return r; }
 inline float asFloat(reg32 value) { float f; memcpy(&f, &value, 4); return f; }
 inline const float* guestFloats(reg32 address) { return reinterpret_cast<const float*>(rc::host(address)); }
@@ -163,7 +163,7 @@ struct Saved
 // ---- 0x410650, 0x410550: alpha test and blend states ----
 
 // Alpha test (guest 0x410650): render states 15 and 24, or BaseAlphaTestEnable and BaseAlphaRef of the effect.
-// eax, ecx, edx and cf, pf, zf as the guest leaves them.
+// eax, ecx, edx as the guest leaves them.
 void alphaTest(WinApplication* app, x86::CPU& cpu, reg32 enable, reg32 reference)
 {
     const reg32 group = rc::ld32(CurrentGroup);
@@ -190,13 +190,10 @@ void alphaTest(WinApplication* app, x86::CPU& cpu, reg32 enable, reg32 reference
     store(AlphaRef, reference);
     cpu.ecx = ecx;
     cpu.edx = edx;
-    cpu.flags.cf = 0;
-    cpu.flags.pf = parity(group);
-    cpu.flags.zf = group == 0;
 }
 
 // Blending (guest 0x410550): render states 27, 19, 20, or BaseAlphaBlendEnable, BaseSrcBlend and BaseDestBlend of the
-// effect. eax, ecx, edx and cf, pf, zf as the guest leaves them.
+// effect. eax, ecx, edx as the guest leaves them.
 void blend(WinApplication* app, x86::CPU& cpu, reg32 on, reg32 source, reg32 destination)
 {
     const reg32 group = rc::ld32(CurrentGroup);
@@ -247,9 +244,6 @@ void blend(WinApplication* app, x86::CPU& cpu, reg32 on, reg32 source, reg32 des
     }
     cpu.ecx = ecx;
     cpu.edx = edx;
-    cpu.flags.cf = 0;
-    cpu.flags.pf = parity(group);
-    cpu.flags.zf = group == 0;
 }
 
 void alphaTestNative(WinApplication* app, x86::CPU& cpu)
@@ -266,7 +260,7 @@ void blendNative(WinApplication* app, x86::CPU& cpu)
 
 // ---- 0x410400: world, view and projection ----
 
-// eax, ecx, edx, pf as the guest leaves them; edi = the view, [esp + 4] = the world matrix.
+// eax, ecx, edx as the guest leaves them; edi = the view, [esp + 4] = the world matrix.
 void worldNative(WinApplication* app, x86::CPU& cpu)
 {
     const reg32 entry = cpu.esp;
@@ -282,7 +276,6 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
     {
         cpu.eax = lastView;
         cpu.ecx = group;
-        cpu.flags.pf = parity((entry - 4) & ~15u);
         return;
     }
     const reg32 record = rc::ld32(ViewRecords + view * 0x60);
@@ -349,7 +342,6 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
     cpu.eax = eax;
     cpu.ecx = ecx;
     cpu.edx = edx;
-    cpu.flags.pf = parity(on);
 }
 
 // ---- 0x410700, 0x40ed10: packets back to their pool ----
@@ -404,17 +396,11 @@ void groupNative(WinApplication* app, x86::CPU& cpu)
         if (current == group)
         {
             cpu.esp = entry + 4;
-            cpu.flags.cf = 0;
-            cpu.flags.pf = parity(current);
-            cpu.flags.zf = 1;
             return;
         }
         const reg32 effect = rc::ld32(current + 0x18);
         cpu.ecx = rc::ld32(effect);
         cpu.esi = group;
-        cpu.flags.cf = current < group;
-        cpu.flags.pf = parity(current);
-        cpu.flags.zf = 0;
         cpu.eax = bridge::effectEnd(app, cpu, effect);
         cpu.edx = rc::ld32(CurrentGroup);
         cpu.esp = entry - 12;
@@ -427,9 +413,6 @@ void groupNative(WinApplication* app, x86::CPU& cpu)
     {
         cpu.eax = 0;
         cpu.esi = group;
-        cpu.flags.cf = 0;
-        cpu.flags.pf = 1;
-        cpu.flags.zf = 1;
     }
     const reg32 esi = cpu.esi;
     store(CurrentGroup, esi);
@@ -442,7 +425,6 @@ void groupNative(WinApplication* app, x86::CPU& cpu)
     bridge::setVertexDeclaration(app, cpu, rc::ld32(DevicePointer), rc::ld32(next + 4));
     UINT passes = entryEcx;
     cpu.eax = bridge::effectBegin(app, cpu, rc::ld32(next + 0x18), &passes, 0);
-    const bool pf = cpu.flags.pf;
     const reg32 pass = cpu.edi;
     if (pass != 0xffffffffu)
         cpu.eax = bridge::effectPass(app, cpu, rc::ld32(next + 0x18), pass);
@@ -450,9 +432,6 @@ void groupNative(WinApplication* app, x86::CPU& cpu)
     cpu.edx = entry - 4;
     cpu.esi = entryEsi;
     cpu.esp = entry + 4;
-    cpu.flags.cf = pass != 0xffffffffu;
-    cpu.flags.pf = pf;
-    cpu.flags.zf = pass == 0xffffffffu;
 }
 
 // ---- 0x4102f0: bone palette ----
@@ -471,20 +450,15 @@ void bonesNative(WinApplication* app, x86::CPU& cpu)
     const reg32 effect = rc::ld32(group + 0x18);
     const reg32 handle = rc::ld32(group + 0x34);
     cpu.eax = bridge::effectSetMatrixArray(app, cpu, effect, handle, matrices, 16);
-    const reg32 frame = (entry - 4) & ~15u;
-    const reg32 lastAdd = frame - 0x410 + 0x250;
     cpu.ecx = handle;
     cpu.edx = rc::ld32(effect);
     cpu.ebx = palette;
-    cpu.flags.cf = lastAdd + 0x200 < lastAdd;
-    cpu.flags.pf = parity(frame);
-    cpu.flags.zf = 1;
     cpu.esp = entry + 4;
 }
 
 // ---- 0x40f3d0: model texture, states and texture offset ----
 
-// [esp + 4] = the model. ebx, esi, edi, ebp are saved; edx, pf and the x87 status as the guest leaves them.
+// [esp + 4] = the model. ebx, esi, edi, ebp are saved; edx and the x87 status as the guest leaves them.
 void modelNative(WinApplication* app, x86::CPU& cpu)
 {
     const reg32 entry = cpu.esp;
@@ -498,7 +472,6 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
     if (rc::ld32(LastModel) == model && rc::ld32(LastModelGroup) == group)
     {
         cpu.edx = group;
-        cpu.flags.pf = parity(frame);
         return;
     }
     const reg32 texture = rc::ld32(rc::ld32(model) + 0x18);
@@ -506,7 +479,6 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
     if (texture == 0)
     {
         cpu.edx = group;
-        cpu.flags.pf = 1;
         return;
     }
     if (group != 0)
@@ -566,7 +538,6 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
     if (rc::ld32(g + 0xd0) == 0)
     {
         cpu.edx = edx;
-        cpu.flags.pf = 1;
         return;
     }
     reg32 u = 0, v = 0;
@@ -970,28 +941,28 @@ void materialNative(WinApplication* app, x86::CPU& cpu)
 
 typedef void (*Function)(WinApplication*, x86::CPU&);
 
-// The registers and flags the callers read after each function.
+// The registers the callers read after each function; the flags they read come from retflags::of(address).
 struct LeafInfo
 {
     const char* name;
     Function guest;
     Function native;
     uint8_t registers;
-    uint8_t flags;
+    reg32 address;
 };
 
 const LeafInfo s_leaves[LeafCount] = {
-    { "world 0x410400", &sub_410400_guest, &worldNative, 0xff, FlagPf | FlagAf | FlagFpu },
-    { "blend 0x410550", &sub_410550_guest, &blendNative, 0xff, FlagPf | FlagAf | FlagFpu },
-    { "alpha test 0x410650", &sub_410650_guest, &alphaTestNative, 0xff, FlagCf | FlagPf | FlagAf | FlagZf | FlagFpu },
-    { "packets 0x410700", &sub_410700_guest, &packetsNative, 0x7c, FlagPf | FlagAf | FlagFpu },
-    { "node 0x40ed10", &sub_40ed10_guest, &nodeNative, 0xfc, FlagPf | FlagAf | FlagFpu },
-    { "group 0x40e6d0", &sub_40e6d0_guest, &groupNative, 0xfe, FlagCf | FlagPf | FlagAf | FlagZf | FlagFpu },
-    { "bones 0x4102f0", &sub_4102f0_guest, &bonesNative, 0xf0, FlagPf | FlagAf | FlagFpu },
-    { "model 0x40f3d0", &sub_40f3d0_guest, &modelNative, 0xfc, FlagPf | FlagAf | FlagFpu },
-    { "lights 0x40f7c0", &sub_40f7c0_guest, &lightsNative, 0xfc, FlagAf | FlagFpu },
-    { "reflection 0x4100a0", &sub_4100a0_guest, &reflectionNative, 0xfc, FlagAf | FlagFpu },
-    { "material 0x40fae0", &sub_40fae0_guest, &materialNative, 0xfc, FlagAf | FlagFpu },
+    { "world 0x410400", &sub_410400_guest, &worldNative, 0xff, 0x410400 },
+    { "blend 0x410550", &sub_410550_guest, &blendNative, 0xff, 0x410550 },
+    { "alpha test 0x410650", &sub_410650_guest, &alphaTestNative, 0xff, 0x410650 },
+    { "packets 0x410700", &sub_410700_guest, &packetsNative, 0x7c, 0x410700 },
+    { "node 0x40ed10", &sub_40ed10_guest, &nodeNative, 0xfc, 0x40ed10 },
+    { "group 0x40e6d0", &sub_40e6d0_guest, &groupNative, 0xfe, 0x40e6d0 },
+    { "bones 0x4102f0", &sub_4102f0_guest, &bonesNative, 0xf0, 0x4102f0 },
+    { "model 0x40f3d0", &sub_40f3d0_guest, &modelNative, 0xfc, 0x40f3d0 },
+    { "lights 0x40f7c0", &sub_40f7c0_guest, &lightsNative, 0xfc, 0x40f7c0 },
+    { "reflection 0x4100a0", &sub_4100a0_guest, &reflectionNative, 0xfc, 0x4100a0 },
+    { "material 0x40fae0", &sub_40fae0_guest, &materialNative, 0xfc, 0x40fae0 },
 };
 
 // Guest memory each function may store to, besides its stack frame.
@@ -1107,7 +1078,7 @@ void shadow(Leaf leaf, WinApplication* app, x86::CPU& cpu)
     ++s.calls;
     char text[200] = {};
     const bool same = sameCalls(s.capture, text, sizeof(text))
-                      && sameState(info.registers, info.flags, guest, native, text, sizeof(text))
+                      && sameState(info.registers, retflags::of(info.address), guest, native, text, sizeof(text))
                       && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     if (!same)
     {
@@ -1225,30 +1196,12 @@ bool sameState(uint8_t registers, uint8_t flagMask, const x86::CPU& g, const x86
             return false;
         }
     }
-    const struct { const char* name; uint8_t bit; bool a, b; } flags[] = {
-        {"cf", FlagCf, bool(g.flags.cf), bool(n.flags.cf)}, {"pf", FlagPf, bool(g.flags.pf), bool(n.flags.pf)},
-        {"af", FlagAf, bool(g.flags.af), bool(n.flags.af)}, {"zf", FlagZf, bool(g.flags.zf), bool(n.flags.zf)},
-    };
-    for (const auto& f : flags)
-    {
-        if ((flagMask & f.bit) && f.a != f.b)
-        {
-            snprintf(text, size, "%s guest %d native %d", f.name, int(f.a), int(f.b));
-            return false;
-        }
-    }
     if (g.fpu.count != n.fpu.count)
     {
         snprintf(text, size, "x87 depth guest %u native %u", unsigned(g.fpu.count), unsigned(n.fpu.count));
         return false;
     }
-    if ((flagMask & FlagFpu) && (g.fpu.status.word & 0x4500) != (n.fpu.status.word & 0x4500))
-    {
-        snprintf(text, size, "x87 status guest 0x%04x native 0x%04x", unsigned(g.fpu.status.word),
-                 unsigned(n.fpu.status.word));
-        return false;
-    }
-    return true;
+    return retflags::same(flagMask, g, n, text, size);
 }
 
 bool sameCalls(const bridge::Capture& c, char* text, size_t size)

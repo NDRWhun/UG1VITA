@@ -6,6 +6,8 @@
 // x87 slot above the stack it spills at its calls. x87 chains are evaluated in double in the guest's order and
 // rounded to float where the guest stores a dword.
 
+#include "retflags.h"
+
 #include <platform/config.h>
 #include <platform/log.h>
 #include <platform/perf.h>
@@ -1209,6 +1211,7 @@ enum Entry
 };
 
 const char* const EntryNames[EntryCount] = {"jdlz", "composite", "pixel sum", "texture"};
+const reg32 EntryAddresses[EntryCount] = {0x58d190, 0x5a8a50, 0x5a8640, 0x407db0};
 
 struct Shadow
 {
@@ -1234,15 +1237,16 @@ struct Alias
     bool same(reg32 guest, reg32 native) const { return guest == native || (g && guest == g && native == n); }
 };
 
-bool compareRegisters(const x86::CPU& guest, const x86::CPU& native, char* text, size_t size,
+bool compareRegisters(Entry entry, const x86::CPU& guest, const x86::CPU& native, char* text, size_t size,
                       const Alias& alias = Alias())
 {
+    const reg32 status = ~reg32(retflags::ConditionCodes);
     const struct { const char* name; reg32 g, n; } regs[] = {
         {"eax", guest.eax, native.eax}, {"ecx", guest.ecx, native.ecx}, {"edx", guest.edx, native.edx},
         {"ebx", guest.ebx, native.ebx}, {"esp", guest.esp, native.esp}, {"ebp", guest.ebp, native.ebp},
         {"esi", guest.esi, native.esi}, {"edi", guest.edi, native.edi},
-        {"eflags", guest.flags.eflags, native.flags.eflags}, {"x87 depth", guest.fpu.count, native.fpu.count},
-        {"x87 status", guest.fpu.status.word, native.fpu.status.word},
+        {"x87 depth", guest.fpu.count, native.fpu.count},
+        {"x87 status", guest.fpu.status.word & status, native.fpu.status.word & status},
     };
     for (const auto& r : regs)
     {
@@ -1252,6 +1256,8 @@ bool compareRegisters(const x86::CPU& guest, const x86::CPU& native, char* text,
             return false;
         }
     }
+    if (!retflags::same(retflags::of(EntryAddresses[entry]), guest, native, text, size))
+        return false;
     for (int i = 0; i < 8; ++i)
     {
         const double g = guest.fpu.regs[i], n = native.fpu.regs[i];
@@ -1418,7 +1424,7 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
         stores.clear();
         regions.clear();
     }
-    bool same = relocated || compareRegisters(cpu, after, text, sizeof(text));
+    bool same = relocated || compareRegisters(entry, cpu, after, text, sizeof(text));
     for (const Store& st : stores)
     {
         if (!same)
@@ -1539,7 +1545,7 @@ void shadowJdlz(win32::WinApplication* app, x86::CPU& cpu)
     if (cpu.terminate)
         return;
     char text[200] = {};
-    bool same = compareRegisters(cpu, after, text, sizeof(text));
+    bool same = compareRegisters(EntryJdlz, cpu, after, text, sizeof(text));
     if (same && end - dst > span)
     {
         same = false;
@@ -1665,7 +1671,7 @@ void shadowTexture(win32::WinApplication* app, x86::CPU& cpu)
     }
     else
     {
-        same = compareRegisters(guest, cpu, text, sizeof(text), alias);
+        same = compareRegisters(EntryTexture, guest, cpu, text, sizeof(text), alias);
         for (const Saved& s : saved)
         {
             for (reg32 i = 0; same && i + 4 <= s.size; i += 4)

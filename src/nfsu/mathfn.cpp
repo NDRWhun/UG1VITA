@@ -2,6 +2,7 @@
 // the translated guest function sets at its return, and its stores at or above the entry stack pointer.
 
 #include "mathfn.h"
+#include "retflags.h"
 
 #include <lib/winapp.h>
 #include <platform/config.h>
@@ -832,6 +833,11 @@ const char* const Names[IdCount] = {
     "point box 0x567710",
 };
 
+const reg32 Addresses[IdCount] = {
+    0x564b10, 0x564bb0, 0x564bd0, 0x564cd0, 0x564db0, 0x4387e0, 0x583ea0, 0x583f20, 0x567370, 0x567450, 0x567310,
+    0x540830, 0x5677d0, 0x567740, 0x567710,
+};
+
 struct Span
 {
     reg32 address;
@@ -849,13 +855,14 @@ uint32_t s_shadowCalls = 0, s_shadowDiffering = 0, s_shadowLogged = 0;
 typedef void (*Guest)(win32::WinApplication*, x86::CPU&);
 typedef void (*Native)(x86::CPU&);
 
-bool sameCpu(const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
+bool sameCpu(reg32 function, const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
 {
+    const reg32 status = ~reg32(retflags::ConditionCodes);
     const struct { const char* name; reg32 a, b; } regs[] = {
         {"eax", g.eax, n.eax}, {"ecx", g.ecx, n.ecx}, {"edx", g.edx, n.edx}, {"ebx", g.ebx, n.ebx},
         {"esp", g.esp, n.esp}, {"ebp", g.ebp, n.ebp}, {"esi", g.esi, n.esi}, {"edi", g.edi, n.edi},
-        {"eflags", g.flags.eflags, n.flags.eflags}, {"x87 depth", g.fpu.count, n.fpu.count},
-        {"x87 status", g.fpu.status.word, n.fpu.status.word},
+        {"x87 depth", g.fpu.count, n.fpu.count},
+        {"x87 status", g.fpu.status.word & status, n.fpu.status.word & status},
     };
     for (const auto& r : regs)
     {
@@ -865,6 +872,8 @@ bool sameCpu(const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
             return false;
         }
     }
+    if (!retflags::same(retflags::of(function), g, n, text, size))
+        return false;
     for (int i = 0; i < 8; ++i)
     {
         // Two NaNs compare equal regardless of sign or payload.
@@ -894,7 +903,7 @@ void shadow(Id id, win32::WinApplication* app, x86::CPU& cpu, Native native, Gue
     guest(app, cpu);
     ++s_shadowCalls;
     char text[160];
-    bool same = sameCpu(cpu, n, text, sizeof(text));
+    bool same = sameCpu(Addresses[id], cpu, n, text, sizeof(text));
     for (int i = 0; same && i < spanCount; ++i)
     {
         for (reg32 k = 0; k < spans[i].size; k += 4)

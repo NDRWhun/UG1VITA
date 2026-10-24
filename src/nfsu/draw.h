@@ -61,13 +61,12 @@ struct Span
 
 enum : uint8_t
 {
-    RegEax = 1, RegEcx = 2, RegEdx = 4, RegEbx = 8, RegEsp = 0x10, RegEbp = 0x20, RegEsi = 0x40, RegEdi = 0x80,
-    FlagCf = 1, FlagPf = 2, FlagAf = 4, FlagZf = 8, FlagFpu = 0x40
+    RegEax = 1, RegEcx = 2, RegEdx = 4, RegEbx = 8, RegEsp = 0x10, RegEbp = 0x20, RegEsi = 0x40, RegEdi = 0x80
 };
 
 void snapshot(const std::vector<Span>& spans, std::vector<x86::reg8>& bytes);
 void restoreSpans(const std::vector<Span>& spans, const std::vector<x86::reg8>& bytes);
-// False with a text when a register or flag of the masks, or the x87 depth, differs.
+// False with a text when a register of the mask, the x87 depth or a flag of flags (retflags.h) differs.
 bool sameState(uint8_t registers, uint8_t flags, const x86::CPU& g, const x86::CPU& n, char* text, size_t size);
 // False with a text when the replay of a capture found a difference or did not use every recorded call.
 bool sameCalls(const win32::d3d9::bridge::Capture& c, char* text, size_t size);

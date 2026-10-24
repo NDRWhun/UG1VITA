@@ -15,6 +15,7 @@
 
 #include "cull.h"
 #include "phases.h"
+#include "retflags.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -1024,14 +1025,16 @@ struct Region
     std::vector<bool> stored;   // bytes the native code stored
 };
 
-bool compareRegisters(const char* what, const x86::CPU& guest, const x86::CPU& native, char* text, size_t size)
+bool compareRegisters(const char* what, reg32 function, const x86::CPU& guest, const x86::CPU& native, char* text,
+                      size_t size)
 {
+    const reg32 status = ~reg32(retflags::ConditionCodes);
     const struct { const char* name; reg32 g, n; } regs[] = {
         {"eax", guest.eax, native.eax}, {"ecx", guest.ecx, native.ecx}, {"edx", guest.edx, native.edx},
         {"ebx", guest.ebx, native.ebx}, {"esp", guest.esp, native.esp}, {"ebp", guest.ebp, native.ebp},
         {"esi", guest.esi, native.esi}, {"edi", guest.edi, native.edi},
-        {"eflags", guest.flags.eflags, native.flags.eflags}, {"x87 depth", guest.fpu.count, native.fpu.count},
-        {"x87 status", guest.fpu.status.word, native.fpu.status.word},
+        {"x87 depth", guest.fpu.count, native.fpu.count},
+        {"x87 status", guest.fpu.status.word & status, native.fpu.status.word & status},
     };
     for (const auto& r : regs)
     {
@@ -1040,6 +1043,12 @@ bool compareRegisters(const char* what, const x86::CPU& guest, const x86::CPU& n
             snprintf(text, size, "%s: %s guest 0x%08x native 0x%08x", what, r.name, unsigned(r.g), unsigned(r.n));
             return false;
         }
+    }
+    char flags[120];
+    if (!retflags::same(retflags::of(function), guest, native, flags, sizeof(flags)))
+    {
+        snprintf(text, size, "%s: %s", what, flags);
+        return false;
     }
     for (int i = 0; i < 8; ++i)
     {
@@ -1099,7 +1108,7 @@ void shadowCulling(win32::WinApplication* app, x86::CPU& cpu, Counts& counts)
     }
 
     char text[200] = {};
-    bool same = compareRegisters("culler", cpu, native, text, sizeof(text));
+    bool same = compareRegisters("culler", 0x446620, cpu, native, text, sizeof(text));
     for (const Store& st : stores)
     {
         for (Region& r : regions)
@@ -1265,7 +1274,7 @@ void getVisibleState(win32::WinApplication* app, x86::CPU& cpu)
     sub_40db20_guest(app, cpu);
     ++s_shadow.boxes;
     char text[200];
-    if (!compareRegisters("box", cpu, native, text, sizeof(text)))
+    if (!compareRegisters("box", 0x40db20, cpu, native, text, sizeof(text)))
     {
         ++s_shadow.boxesDiffering;
         if (s_shadow.logged < ShadowLogLimit)

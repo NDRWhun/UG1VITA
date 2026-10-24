@@ -13,6 +13,7 @@
 #include "flares.h"
 #include "cull.h"
 #include "phases.h"
+#include "retflags.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -870,8 +871,9 @@ bool sameDraw(const Draw& n, const Draw& g, char* text, size_t size)
 }
 
 // Compares a native run in record mode (its CPU, draws and guest writes) with the guest run that followed it.
-void compareRuns(const char* what, const x86::CPU& native, const x86::CPU& guest, const std::vector<Draw>& nd,
-                 const std::vector<Draw>& gd, const std::vector<Write>& writes, const std::vector<reg32>& values)
+void compareRuns(const char* what, reg32 function, const x86::CPU& native, const x86::CPU& guest,
+                 const std::vector<Draw>& nd, const std::vector<Draw>& gd, const std::vector<Write>& writes,
+                 const std::vector<reg32>& values)
 {
     ++s_shadow.calls;
     char text[200] = {};
@@ -879,11 +881,13 @@ void compareRuns(const char* what, const x86::CPU& native, const x86::CPU& guest
     bool drew = false;
     for (const Draw& d : nd)
         drew = drew || d.drawn;
+    const reg32 status = drew ? 0u
+                       : (retflags::of(function) & retflags::Fc) ? 0xffffu : ~reg32(retflags::ConditionCodes);
     const struct { const char* name; reg32 n, g; } regs[] = {
         {"ebx", native.ebx, guest.ebx}, {"esp", native.esp, guest.esp}, {"ebp", native.ebp, guest.ebp},
         {"esi", native.esi, guest.esi}, {"edi", native.edi, guest.edi},
         {"x87 depth", native.fpu.count, guest.fpu.count},
-        {"x87 status", drew ? 0u : native.fpu.status.word, drew ? 0u : guest.fpu.status.word},
+        {"x87 status", native.fpu.status.word & status, guest.fpu.status.word & status},
     };
     for (const auto& r : regs)
     {
@@ -932,7 +936,7 @@ std::vector<Write> s_writes;
 std::vector<reg32> s_values;
 
 // Runs native into records, takes its guest writes back, runs the guest code for real and compares.
-void shadowRun(const char* what, win32::WinApplication* app, x86::CPU& cpu,
+void shadowRun(const char* what, reg32 function, win32::WinApplication* app, x86::CPU& cpu,
                void (*native)(win32::WinApplication*, x86::CPU&, Run&),
                void (*guest)(win32::WinApplication*, x86::CPU&), Run& run)
 {
@@ -960,7 +964,7 @@ void shadowRun(const char* what, win32::WinApplication* app, x86::CPU& cpu,
     s_capture = nullptr;
     s_guestRun = false;
     if (!cpu.terminate)
-        compareRuns(what, n, cpu, s_nativeDraws, s_guestDraws, s_writes, s_values);
+        compareRuns(what, function, n, cpu, s_nativeDraws, s_guestDraws, s_writes, s_values);
 }
 
 struct PerfSums
@@ -994,7 +998,7 @@ void worldFlares(win32::WinApplication* app, x86::CPU& cpu)
     if (!s.native)
         sub_544f30_guest(app, cpu);
     else if (s.shadow)
-        shadowRun("world", app, cpu, &world, &sub_544f30_guest, run);
+        shadowRun("world", 0x544f30, app, cpu, &world, &sub_544f30_guest, run);
     else
         world(app, cpu, run);
     account(start, run);
@@ -1011,7 +1015,7 @@ void lightFlare(win32::WinApplication* app, x86::CPU& cpu)
     const uint32_t start = pf::perf::enabled() ? pf::perf::now() : 0;
     Run run;
     if (s.shadow)
-        shadowRun("flare", app, cpu, &one, &sub_5447c0_guest, run);
+        shadowRun("flare", 0x5447c0, app, cpu, &one, &sub_5447c0_guest, run);
     else
         one(app, cpu, run);
     account(start, run);

@@ -112,6 +112,7 @@ set(NFSU_GAME_PORT_SOURCES
 # Runtime sources that include headers generated from the game binary (nfsu_layout.h).
 set(NFSU_GENERATED_HEADER_SOURCES
   src/lib/memmap.cpp
+  src/nfsu/retflags.cpp
 )
 
 # Runtime sources that build without the generated code (the CI runtime check).
