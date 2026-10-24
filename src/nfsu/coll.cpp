@@ -8,6 +8,8 @@
 // The outputs are guest memory, esp, the x87 stack and the registers the callers read: eax, ecx and edx of
 // 0x440a40, ecx and the upper half of eax of 0x4400e0, ecx and edx of 0x4407b0. Runs on the calling thread.
 
+#include "retstate.h"
+
 #include <platform/config.h>
 #include <platform/log.h>
 #include <platform/perf.h>
@@ -788,6 +790,7 @@ inline bool nanPair(reg32 g, reg32 n)
 }
 const uint32_t ShadowLogLimit = 20;
 const char* const EntryNames[3] = {"elevation", "outside", "interest box"};
+const reg32 EntryAddresses[3] = {0x440a40, 0x4400e0, 0x4407b0};
 // The bits of eax, ecx and edx each entry's callers read.
 const reg32 OutputMasks[3][3] = {
     {0xffffffffu, 0xffffffffu, 0xffffffffu}, {0xffff0000u, 0xffffffffu, 0}, {0, 0xffffffffu, 0xffffffffu}};
@@ -796,15 +799,18 @@ const reg32 OutputMasks[3][3] = {
 bool compareRegisters(int entry, const x86::CPU& guest, const x86::CPU& native, char* text, size_t size)
 {
     const reg32* mask = OutputMasks[entry];
-    const struct { const char* name; reg32 g, n; } regs[] = {
-        {"eax", guest.eax & mask[0], native.eax & mask[0]}, {"ecx", guest.ecx & mask[1], native.ecx & mask[1]},
-        {"edx", guest.edx & mask[2], native.edx & mask[2]}, {"ebx", guest.ebx, native.ebx},
-        {"esp", guest.esp, native.esp}, {"ebp", guest.ebp, native.ebp}, {"esi", guest.esi, native.esi},
-        {"edi", guest.edi, native.edi}, {"x87 depth", guest.fpu.count, native.fpu.count},
+    const uint8_t stored = retstate::registers(EntryAddresses[entry]);
+    const struct { const char* name; uint8_t bit; reg32 g, n; } regs[] = {
+        {"eax", retstate::Eax, guest.eax & mask[0], native.eax & mask[0]},
+        {"ecx", retstate::Ecx, guest.ecx & mask[1], native.ecx & mask[1]},
+        {"edx", retstate::Edx, guest.edx & mask[2], native.edx & mask[2]},
+        {"ebx", retstate::Ebx, guest.ebx, native.ebx}, {"esp", retstate::Esp, guest.esp, native.esp},
+        {"ebp", retstate::Ebp, guest.ebp, native.ebp}, {"esi", retstate::Esi, guest.esi, native.esi},
+        {"edi", retstate::Edi, guest.edi, native.edi}, {"x87 depth", 0, guest.fpu.count, native.fpu.count},
     };
     for (const auto& r : regs)
     {
-        if (r.g != r.n && !nanPair(r.g, r.n))
+        if ((r.bit == 0 || (stored & r.bit)) && r.g != r.n && !nanPair(r.g, r.n))
         {
             snprintf(text, size, "%s guest 0x%08x native 0x%08x", r.name, unsigned(r.g), unsigned(r.n));
             return false;

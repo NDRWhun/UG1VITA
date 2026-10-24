@@ -6,7 +6,7 @@
 // x87 slot above the stack it spills at its calls. x87 chains are evaluated in double in the guest's order and
 // rounded to float where the guest stores a dword.
 
-#include "retflags.h"
+#include "retstate.h"
 
 #include <platform/config.h>
 #include <platform/log.h>
@@ -1240,23 +1240,26 @@ struct Alias
 bool compareRegisters(Entry entry, const x86::CPU& guest, const x86::CPU& native, char* text, size_t size,
                       const Alias& alias = Alias())
 {
-    const reg32 status = ~reg32(retflags::ConditionCodes);
-    const struct { const char* name; reg32 g, n; } regs[] = {
-        {"eax", guest.eax, native.eax}, {"ecx", guest.ecx, native.ecx}, {"edx", guest.edx, native.edx},
-        {"ebx", guest.ebx, native.ebx}, {"esp", guest.esp, native.esp}, {"ebp", guest.ebp, native.ebp},
-        {"esi", guest.esi, native.esi}, {"edi", guest.edi, native.edi},
-        {"x87 depth", guest.fpu.count, native.fpu.count},
-        {"x87 status", guest.fpu.status.word & status, native.fpu.status.word & status},
+    const reg32 function = EntryAddresses[entry];
+    const uint8_t stored = retstate::registers(function);
+    const reg32 status = ~reg32(retstate::ConditionCodes);
+    const struct { const char* name; uint8_t bit; reg32 g, n; } regs[] = {
+        {"eax", retstate::Eax, guest.eax, native.eax}, {"ecx", retstate::Ecx, guest.ecx, native.ecx},
+        {"edx", retstate::Edx, guest.edx, native.edx}, {"ebx", retstate::Ebx, guest.ebx, native.ebx},
+        {"esp", retstate::Esp, guest.esp, native.esp}, {"ebp", retstate::Ebp, guest.ebp, native.ebp},
+        {"esi", retstate::Esi, guest.esi, native.esi}, {"edi", retstate::Edi, guest.edi, native.edi},
+        {"x87 depth", 0, guest.fpu.count, native.fpu.count},
+        {"x87 status", 0, guest.fpu.status.word & status, native.fpu.status.word & status},
     };
     for (const auto& r : regs)
     {
-        if (!alias.same(r.g, r.n))
+        if ((r.bit == 0 || (stored & r.bit)) && !alias.same(r.g, r.n))
         {
             snprintf(text, size, "%s guest 0x%08x native 0x%08x", r.name, unsigned(r.g), unsigned(r.n));
             return false;
         }
     }
-    if (!retflags::same(retflags::of(EntryAddresses[entry]), guest, native, text, size))
+    if (!retstate::sameFlags(retstate::flags(function), guest, native, text, size))
         return false;
     for (int i = 0; i < 8; ++i)
     {

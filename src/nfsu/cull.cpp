@@ -15,7 +15,7 @@
 
 #include "cull.h"
 #include "phases.h"
-#include "retflags.h"
+#include "retstate.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -1028,11 +1028,8 @@ struct Region
 bool compareRegisters(const char* what, reg32 function, const x86::CPU& guest, const x86::CPU& native, char* text,
                       size_t size)
 {
-    const reg32 status = ~reg32(retflags::ConditionCodes);
+    const reg32 status = ~reg32(retstate::ConditionCodes);
     const struct { const char* name; reg32 g, n; } regs[] = {
-        {"eax", guest.eax, native.eax}, {"ecx", guest.ecx, native.ecx}, {"edx", guest.edx, native.edx},
-        {"ebx", guest.ebx, native.ebx}, {"esp", guest.esp, native.esp}, {"ebp", guest.ebp, native.ebp},
-        {"esi", guest.esi, native.esi}, {"edi", guest.edi, native.edi},
         {"x87 depth", guest.fpu.count, native.fpu.count},
         {"x87 status", guest.fpu.status.word & status, native.fpu.status.word & status},
     };
@@ -1044,10 +1041,11 @@ bool compareRegisters(const char* what, reg32 function, const x86::CPU& guest, c
             return false;
         }
     }
-    char flags[120];
-    if (!retflags::same(retflags::of(function), guest, native, flags, sizeof(flags)))
+    char state[120];
+    if (!retstate::sameRegisters(retstate::registers(function), guest, native, state, sizeof(state))
+        || !retstate::sameFlags(retstate::flags(function), guest, native, state, sizeof(state)))
     {
-        snprintf(text, size, "%s: %s", what, flags);
+        snprintf(text, size, "%s: %s", what, state);
         return false;
     }
     for (int i = 0; i < 8; ++i)

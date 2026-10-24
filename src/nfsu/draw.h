@@ -66,8 +66,10 @@ enum : uint8_t
 
 void snapshot(const std::vector<Span>& spans, std::vector<x86::reg8>& bytes);
 void restoreSpans(const std::vector<Span>& spans, const std::vector<x86::reg8>& bytes);
-// False with a text when a register of the mask, the x87 depth or a flag of flags (retflags.h) differs.
-bool sameState(uint8_t registers, uint8_t flags, const x86::CPU& g, const x86::CPU& n, char* text, size_t size);
+// False with a text when a register of the mask that the guest function stores at its return, the x87 depth or a
+// flag read at the return (retstate.h) differs.
+bool sameState(x86::reg32 function, uint8_t registers, const x86::CPU& g, const x86::CPU& n, char* text,
+               size_t size);
 // False with a text when the replay of a capture found a difference or did not use every recorded call.
 bool sameCalls(const win32::d3d9::bridge::Capture& c, char* text, size_t size);
 // False with a text at the first byte of the spans that differs, or the first logged store outside them.

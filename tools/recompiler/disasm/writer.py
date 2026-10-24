@@ -164,6 +164,21 @@ class Writer:
         if not returns:
             lines.append('    { 0, 0 },')
         lines += ['};', 'constexpr x86::reg32 flagReturnCount = %d;' % len(returns), '',
+                  '// The native overrides: the registers their callers read from cpu after they return (eax 1, ecx 2,',
+                  '// edx 4, ebx 8, esp 16, ebp 32, esi 64, edi 128). The translated guest bodies store only these at',
+                  '// their returns. Sorted by address.',
+                  'struct RegisterReturn',
+                  '{',
+                  '    x86::reg32  address;',
+                  '    x86::reg8   registers;',
+                  '};', '',
+                  'constexpr RegisterReturn registerReturns[] = {']
+        overrides = sorted(a for a in self.program.native_overrides if a in self.program.ret_live)
+        for a in overrides:
+            lines.append('    { 0x%x, 0x%x },' % (a, (self.program.ret_live[a] >> 8) & 0xff))
+        if not overrides:
+            lines.append('    { 0, 0 },')
+        lines += ['};', 'constexpr x86::reg32 registerReturnCount = %d;' % len(overrides), '',
                   '}}', '', '#endif /* !%s */' % guard, '']
         with open(self.path('%s_layout.h' % self.name), 'w', newline='\n') as f:
             f.write('\n'.join(lines))

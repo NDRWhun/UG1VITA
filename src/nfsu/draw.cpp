@@ -5,7 +5,7 @@
 // 0x40bc10 and the effect group functions) run as guest code with the stack and registers the guest gives them.
 
 #include "draw.h"
-#include "retflags.h"
+#include "retstate.h"
 
 #include <winapi/d3d9_native.h>
 #include <platform/config.h>
@@ -941,7 +941,8 @@ void materialNative(WinApplication* app, x86::CPU& cpu)
 
 typedef void (*Function)(WinApplication*, x86::CPU&);
 
-// The registers the callers read after each function; the flags they read come from retflags::of(address).
+// The registers the natives set for their callers; the shadow compares those the guest stores at the return
+// (retstate.h).
 struct LeafInfo
 {
     const char* name;
@@ -1078,7 +1079,7 @@ void shadow(Leaf leaf, WinApplication* app, x86::CPU& cpu)
     ++s.calls;
     char text[200] = {};
     const bool same = sameCalls(s.capture, text, sizeof(text))
-                      && sameState(info.registers, retflags::of(info.address), guest, native, text, sizeof(text))
+                      && sameState(info.address, info.registers, guest, native, text, sizeof(text))
                       && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     if (!same)
     {
@@ -1181,27 +1182,16 @@ void restoreSpans(const std::vector<Span>& spans, const std::vector<reg8>& bytes
     }
 }
 
-bool sameState(uint8_t registers, uint8_t flagMask, const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
+bool sameState(reg32 function, uint8_t registers, const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
 {
-    const struct { const char* name; uint8_t bit; reg32 a, b; } regs[] = {
-        {"eax", RegEax, g.eax, n.eax}, {"ecx", RegEcx, g.ecx, n.ecx}, {"edx", RegEdx, g.edx, n.edx},
-        {"ebx", RegEbx, g.ebx, n.ebx}, {"esp", RegEsp, g.esp, n.esp}, {"ebp", RegEbp, g.ebp, n.ebp},
-        {"esi", RegEsi, g.esi, n.esi}, {"edi", RegEdi, g.edi, n.edi},
-    };
-    for (const auto& r : regs)
-    {
-        if ((registers & r.bit) && r.a != r.b)
-        {
-            snprintf(text, size, "%s guest 0x%08x native 0x%08x", r.name, unsigned(r.a), unsigned(r.b));
-            return false;
-        }
-    }
+    if (!retstate::sameRegisters(registers & retstate::registers(function), g, n, text, size))
+        return false;
     if (g.fpu.count != n.fpu.count)
     {
         snprintf(text, size, "x87 depth guest %u native %u", unsigned(g.fpu.count), unsigned(n.fpu.count));
         return false;
     }
-    return retflags::same(flagMask, g, n, text, size);
+    return retstate::sameFlags(retstate::flags(function), g, n, text, size);
 }
 
 bool sameCalls(const bridge::Capture& c, char* text, size_t size)

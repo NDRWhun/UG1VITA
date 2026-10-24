@@ -5,7 +5,7 @@
 // registers and stack arguments the guest gives them.
 
 #include "draw.h"
-#include "retflags.h"
+#include "retstate.h"
 #include "phases.h"
 
 #include <winapi/d3d9_native.h>
@@ -1013,8 +1013,8 @@ void enqueueShadow(WinApplication* app, x86::CPU& cpu)
     c.runNative(app, cpu, &enqueueNative, false);
     s_usage.enqueues = enqueues;
     char text[200] = {};
-    const bool same = sameState(RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, retflags::of(0x40f1e0), c.guest,
-                                c.native, text, sizeof(text))
+    const bool same = sameState(0x40f1e0, RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, c.guest, c.native, text,
+                                sizeof(text))
                       && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     report(c.what, c.entry, same, text);
 }
@@ -1048,8 +1048,8 @@ void submitShadow(WinApplication* app, x86::CPU& cpu)
         snprintf(text, sizeof(text), "enqueues guest %u native %u", unsigned(replay.calls.size()),
                  unsigned(replay.next));
     }
-    same = same && sameState(RegEcx | RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, retflags::of(0x40c910), c.guest,
-                             c.native, text, sizeof(text))
+    same = same && sameState(0x40c910, RegEcx | RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, c.guest, c.native,
+                             text, sizeof(text))
            && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     report(c.what, c.entry, same, text);
 }
@@ -1100,7 +1100,7 @@ void flushShadow(WinApplication* app, x86::CPU& cpu)
     s_usage.nodes = counts.nodes;
     char text[200] = {};
     const bool same = sameCalls(s.capture, text, sizeof(text))
-                      && sameState(0xff & ~RegEbp, retflags::of(0x40ed50), c.guest, c.native, text, sizeof(text))
+                      && sameState(0x40ed50, 0xff & ~RegEbp, c.guest, c.native, text, sizeof(text))
                       && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     report(c.what, c.entry, same, text);
 }

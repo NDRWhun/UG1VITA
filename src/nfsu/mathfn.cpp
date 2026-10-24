@@ -2,7 +2,7 @@
 // the translated guest function sets at its return, and its stores at or above the entry stack pointer.
 
 #include "mathfn.h"
-#include "retflags.h"
+#include "retstate.h"
 
 #include <lib/winapp.h>
 #include <platform/config.h>
@@ -857,10 +857,8 @@ typedef void (*Native)(x86::CPU&);
 
 bool sameCpu(reg32 function, const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
 {
-    const reg32 status = ~reg32(retflags::ConditionCodes);
+    const reg32 status = ~reg32(retstate::ConditionCodes);
     const struct { const char* name; reg32 a, b; } regs[] = {
-        {"eax", g.eax, n.eax}, {"ecx", g.ecx, n.ecx}, {"edx", g.edx, n.edx}, {"ebx", g.ebx, n.ebx},
-        {"esp", g.esp, n.esp}, {"ebp", g.ebp, n.ebp}, {"esi", g.esi, n.esi}, {"edi", g.edi, n.edi},
         {"x87 depth", g.fpu.count, n.fpu.count},
         {"x87 status", g.fpu.status.word & status, n.fpu.status.word & status},
     };
@@ -872,7 +870,8 @@ bool sameCpu(reg32 function, const x86::CPU& g, const x86::CPU& n, char* text, s
             return false;
         }
     }
-    if (!retflags::same(retflags::of(function), g, n, text, size))
+    if (!retstate::sameRegisters(retstate::registers(function), g, n, text, size)
+        || !retstate::sameFlags(retstate::flags(function), g, n, text, size))
         return false;
     for (int i = 0; i < 8; ++i)
     {

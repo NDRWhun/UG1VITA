@@ -13,7 +13,7 @@
 #include "flares.h"
 #include "cull.h"
 #include "phases.h"
-#include "retflags.h"
+#include "retstate.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -882,16 +882,18 @@ void compareRuns(const char* what, reg32 function, const x86::CPU& native, const
     for (const Draw& d : nd)
         drew = drew || d.drawn;
     const reg32 status = drew ? 0u
-                       : (retflags::of(function) & retflags::Fc) ? 0xffffu : ~reg32(retflags::ConditionCodes);
-    const struct { const char* name; reg32 n, g; } regs[] = {
-        {"ebx", native.ebx, guest.ebx}, {"esp", native.esp, guest.esp}, {"ebp", native.ebp, guest.ebp},
-        {"esi", native.esi, guest.esi}, {"edi", native.edi, guest.edi},
-        {"x87 depth", native.fpu.count, guest.fpu.count},
-        {"x87 status", native.fpu.status.word & status, guest.fpu.status.word & status},
+                       : (retstate::flags(function) & retstate::Fc) ? 0xffffu : ~reg32(retstate::ConditionCodes);
+    const uint8_t stored = retstate::registers(function);
+    const struct { const char* name; uint8_t bit; reg32 n, g; } regs[] = {
+        {"ebx", retstate::Ebx, native.ebx, guest.ebx}, {"esp", retstate::Esp, native.esp, guest.esp},
+        {"ebp", retstate::Ebp, native.ebp, guest.ebp}, {"esi", retstate::Esi, native.esi, guest.esi},
+        {"edi", retstate::Edi, native.edi, guest.edi},
+        {"x87 depth", 0, native.fpu.count, guest.fpu.count},
+        {"x87 status", 0, native.fpu.status.word & status, guest.fpu.status.word & status},
     };
     for (const auto& r : regs)
     {
-        if (same && r.n != r.g)
+        if (same && (r.bit == 0 || (stored & r.bit)) && r.n != r.g)
         {
             same = false;
             snprintf(text, sizeof(text), "%s native 0x%08x guest 0x%08x", r.name, unsigned(r.n), unsigned(r.g));
