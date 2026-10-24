@@ -1,6 +1,7 @@
 #include <lib/heap.h>
 #include <lib/memmap.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <platform/sync.h>
 #include <cstring>
 #include <unordered_map>
@@ -67,7 +68,7 @@ struct State
     {
         if (chunkEnd - chunkNext < size)
         {
-            MemMap* chunk = new MemMap(ChunkSize);
+            MemMap* chunk = new MemMap(ChunkSize, MemMap::Low, pf::perf::AllocHeapChunk);
             chunks.push_back(chunk);
             chunkNext = chunk->getBlockStart();
             chunkEnd = chunkNext + chunk->getBlockSize();
@@ -110,7 +111,7 @@ x86::reg32 allocate(x86::reg32 size, bool zero)
         }
         else
         {
-            MemMap* block = new MemMap(rounded);
+            MemMap* block = new MemMap(rounded, MemMap::Low, pf::perf::AllocHeapLarge);
             address = block->getBlockStart();
             s.large[address] = block;
         }

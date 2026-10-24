@@ -215,7 +215,8 @@ void AudioDevice::run()
     x86::reg32 levelFrames = 0;
     x86::reg32 peak = 0;
     double squares = 0.0;
-    x86::reg32 clipped = 0;
+    x86::reg32 fullScale = 0;
+    x86::reg32 saturated = 0;
     while (m_running)
     {
         const x86::reg32 wanted = portRate(m_requestedRate.load());
@@ -251,18 +252,20 @@ void AudioDevice::run()
                 const x86::reg32 magnitude = x86::reg32(v < 0 ? -v : v);
                 peak = std::max(peak, magnitude);
                 squares += double(v) * double(v);
-                clipped += magnitude > 32767;
+                fullScale += v >= 32767 || v <= -32768;
+                saturated += v > 32767 || v < -32768;
             }
             levelFrames += m_grain;
             if (levelFrames >= m_rate * 5)
             {
-                pf::logInfo("audio: peak %u rms %.0f clipped %u over %u frames, %u buffers playing", peak,
-                            std::sqrt(squares / (double(levelFrames) * s_channelCount)), clipped, levelFrames,
-                            unsigned(playing));
+                pf::logInfo("audio: peak %u rms %.0f full scale %u saturated %u over %u frames, %u buffers playing",
+                            peak, std::sqrt(squares / (double(levelFrames) * s_channelCount)), fullScale, saturated,
+                            levelFrames, unsigned(playing));
                 levelFrames = 0;
                 peak = 0;
                 squares = 0.0;
-                clipped = 0;
+                fullScale = 0;
+                saturated = 0;
             }
         }
         sceAudioOutOutput(m_port, m_output);
@@ -272,7 +275,7 @@ void AudioDevice::run()
 AudioBuffer::AudioBuffer(AudioDevice* device, WinApplication* app, x86::reg32 bufferSize, const AudioFormat& format, bool primary)
     :   m_device(device)
     ,   m_bufferSize(bufferSize)
-    ,   m_memmap(new MemMap(bufferSize))
+    ,   m_memmap(new MemMap(bufferSize, MemMap::Low, pf::perf::AllocSound))
     ,   m_data(&app->getMemory<x86::reg8>(m_memmap->getBlockStart()))
     ,   m_format(format)
     ,   m_position(0)

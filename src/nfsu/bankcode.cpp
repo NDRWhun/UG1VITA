@@ -9,6 +9,7 @@
 
 #include <lib/foreigncode.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <recomp.h>
 #include <x86.h>
 
@@ -142,11 +143,15 @@ public:
             --m_routine->running;
     }
 
+    x86::reg32 executed() const { return m_executed; }
+    x86::reg32 decoded() const { return m_decoded; }
+
     void run(x86::reg32 ip)
     {
         m_ip = ip;
         for (;;)
         {
+            ++m_executed;
             m_start = m_ip;
             if (m_ip < m_range.begin || m_ip >= m_range.end)
                 unsupported(m_ip, "jump out of the routine");
@@ -243,6 +248,7 @@ private:
                 return cached;
         }
         decode(scratch);
+        ++m_decoded;
         if (!slot)
             return scratch;
         if (*slot)
@@ -446,7 +452,12 @@ private:
     x86::reg32*            m_regs[8];
     x86::reg32             m_ip = 0;
     x86::reg32             m_start = 0;
+    x86::reg32             m_executed = 0;
+    x86::reg32             m_decoded = 0;
 };
+
+// Bank routines running on the thread holding the execution lock (perf_log times the outermost one).
+int s_depth = 0;
 
 // Entered like a translated function: cpu.ip is the routine, cpu.esp points at the return address slot.
 void runRoutine(win32::WinApplication* app, x86::CPU& cpu)
@@ -454,7 +465,22 @@ void runRoutine(win32::WinApplication* app, x86::CPU& cpu)
     Range range;
     if (!findRoutine(cpu.ip, range))
         unsupported(cpu.ip, "no loaded bank routine");
-    Interpreter(app, cpu, range, routine(range)).run(cpu.ip);
+    const bool timed = pf::perf::enabled() && s_depth == 0;
+    const uint32_t start = timed ? pf::perf::now() : 0;
+    ++s_depth;
+    Interpreter interpreter(app, cpu, range, routine(range));
+    interpreter.run(cpu.ip);
+    --s_depth;
+    if (timed)
+    {
+        pf::perf::audio(pf::perf::AudioBankRuns, 1);
+        pf::perf::audio(pf::perf::AudioBankUs, pf::perf::now() - start);
+    }
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioBankInstructions, interpreter.executed());
+        pf::perf::audio(pf::perf::AudioBankDecodes, interpreter.decoded());
+    }
 }
 
 win32::MethodPtr resolve(x86::reg32 address)

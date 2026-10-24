@@ -114,7 +114,7 @@ x86::reg32 MemMap::findHigh(x86::reg32 count)
     return x86::reg32(-1);
 }
 
-MemMap::MemMap(x86::reg32 size, Placement placement)
+MemMap::MemMap(x86::reg32 size, Placement placement, pf::perf::Alloc kind)
     :   m_block(x86::reg32(-1))
     ,   m_blockCount(size / 4096 + (size % 4096 != 0))
 {
@@ -123,10 +123,14 @@ MemMap::MemMap(x86::reg32 size, Placement placement)
         pf::fatal("guest memory exhausted (requested %u bytes)", size);
     const bool timed = pf::perf::enabled();
     const uint32_t start = timed ? pf::perf::now() : 0;
+    uint32_t searchUs = 0;
     for (;;)
     {
         s_lock->lock();
+        const uint32_t searchStart = timed ? pf::perf::now() : 0;
         m_block = placement == High ? findHigh(m_blockCount) : findLow(m_blockCount);
+        if (timed)
+            searchUs += pf::perf::now() - searchStart;
         if (m_block != x86::reg32(-1))
             break;
         s_lock->unlock();
@@ -141,7 +145,7 @@ MemMap::MemMap(x86::reg32 size, Placement placement)
     s_memMaps.push_back(this);
     s_lock->unlock();
     if (timed)
-        pf::perf::guestBlock(pf::perf::now() - start);
+        pf::perf::guestBlock(kind, size, pf::perf::now() - start, searchUs);
 }
 
 MemMap::~MemMap()

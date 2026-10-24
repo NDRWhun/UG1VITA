@@ -64,6 +64,38 @@ enum Upload
     UploadCount
 };
 
+// Callers of guest memory blocks (MemMap), counted per kind.
+enum Alloc : int
+{
+    AllocOther,
+    AllocVirtual,       // VirtualAlloc
+    AllocHeapLarge,     // HeapAlloc / GlobalAlloc / LocalAlloc above the size classes
+    AllocHeapChunk,     // a chunk of the size-class heap
+    AllocFileView,      // MapViewOfFile
+    AllocTextureLock,   // D3D texture level lock buffer
+    AllocBuffer,        // D3D vertex / index buffer
+    AllocThread,        // thread block and stack
+    AllocSound,         // DirectSound buffer
+    AllocCount
+};
+
+// EA SND voice render and the routines of its audio banks, logged as one line per interval.
+enum Audio
+{
+    AudioRendersUnlocked,       // voice renders without the execution lock
+    AudioRenderUnlockedUs,
+    AudioRendersLocked,         // voice renders under the lock (the audit failed)
+    AudioRenderLockedUs,
+    AudioBankRuns,              // bank routines run (under the lock)
+    AudioBankUs,                // their time, called library functions included
+    AudioBankInstructions,      // bank instructions interpreted
+    AudioBankDecodes,           // bank instructions decoded (not taken from the cache)
+    AudioOutputSamples,         // samples the SND output module converted to 16 bits
+    AudioSaturatedHigh,         // of them saturated to 32767
+    AudioSaturatedLow,          // of them saturated to -32768
+    AudioCount
+};
+
 extern bool g_enabled;
 extern int g_nextBlock;
 
@@ -77,8 +109,10 @@ inline void blocking(Block block) { g_nextBlock = block; }
 void gameBlocked(Block block, uint32_t microseconds, uint32_t relockUs);
 // The calling thread's CPU time is logged under this name (a string literal); a few threads at most.
 void trackThread(const char* name);
-// Time a thread of a kind held the execution lock.
-void held(Holder holder, uint32_t microseconds);
+// Slot of a named execution lock holder (a string literal), -1 when the table is full.
+int holderSlot(const char* name);
+// Time a thread of a kind held the execution lock; slot from holderSlot, or -1.
+void held(Holder holder, int slot, uint32_t microseconds);
 // Timer service: one timer callback ran for this long, waiting for the lock included.
 void timerFired(uint32_t callback, uint32_t microseconds);
 // Process time in microseconds, wrapping; the difference of two readings is a duration.
@@ -92,12 +126,14 @@ void preemptWait(uint32_t microseconds);
 void gpuBusy(uint32_t microseconds);
 // Any thread: adds to an upload counter.
 void upload(Upload counter, uint32_t value);
-// Any thread: a guest memory block was created in this many microseconds.
-inline void guestBlock(uint32_t microseconds)
-{
-    upload(UploadGuestBlocks, 1);
-    upload(UploadGuestBlockUs, microseconds);
-}
+// Any thread: a guest memory block of a kind was created in this many microseconds, searchUs of them finding the
+// free range.
+void guestBlock(Alloc kind, uint32_t bytes, uint32_t microseconds, uint32_t searchUs);
+// Any thread: adds to an audio counter.
+void audio(Audio counter, uint32_t value);
+// Audio thread: a voice render kept the execution lock, with the failed audit check (a string literal) and the
+// guest address it failed on.
+void renderLocked(const char* reason, uint32_t address);
 // Game thread: kept linear texture copies at the moment.
 void uploadCache(uint32_t bytes, uint32_t levels);
 // Render thread, after each game frame it queued; logs one line about every 5 s.

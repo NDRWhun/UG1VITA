@@ -6,6 +6,7 @@
 #include <lib/mutex.h>
 #include <lib/teb.h>
 #include <lib/winapp.h>
+#include <platform/perf.h>
 #include <recomp.h>
 #include <x86.h>
 
@@ -127,56 +128,86 @@ bool contains(const reg32 (&set)[N], reg32 value)
     return false;
 }
 
-bool knownModule(reg32 module, int depth, int& budget)
+// The first failed check of an audit: what failed (a string literal) and the guest value it failed on.
+struct Audit
+{
+    const char* reason = nullptr;
+    reg32       address = 0;
+
+    bool fail(const char* what, reg32 value)
+    {
+        reason = what;
+        address = value;
+        return false;
+    }
+};
+
+bool knownModule(reg32 module, int depth, int& budget, Audit& audit)
 {
     if (!module)
         return true;
-    if (depth > MaxDepth || --budget < 0)
-        return false;
-    const ModuleKind* kind = moduleKind(rc::ld32(module));
-    if (!kind || !contains(s_teardowns, rc::ld32(module + 4)))
-        return false;
+    if (depth > MaxDepth)
+        return audit.fail("depth", module);
+    if (--budget < 0)
+        return audit.fail("module count", module);
+    const reg32 render = rc::ld32(module);
+    const ModuleKind* kind = moduleKind(render);
+    if (!kind)
+        return audit.fail("module", render);
+    const reg32 teardown = rc::ld32(module + 4);
+    if (!contains(s_teardowns, teardown))
+        return audit.fail("teardown", teardown);
     if (kind->extra == Decoder)
     {
         const reg32 decoder = rc::ld32(module + 0x1c);
-        if (!decoder || rc::ld32(decoder) != EaxaDecoder)
-            return false;
+        if (!decoder)
+            return audit.fail("decoder", 0);
+        if (rc::ld32(decoder) != EaxaDecoder)
+            return audit.fail("decoder", rc::ld32(decoder));
     }
     else if (kind->extra == Resampler && !contains(s_resamplerKernels, rc::ld32(module + 0x24)))
     {
-        return false;
+        return audit.fail("resampler", rc::ld32(module + 0x24));
     }
-    return knownModule(rc::ld32(module + 8), depth + 1, budget)
-        && (!kind->secondInput || knownModule(rc::ld32(module + 0xc), depth + 1, budget));
+    return knownModule(rc::ld32(module + 8), depth + 1, budget, audit)
+        && (!kind->secondInput || knownModule(rc::ld32(module + 0xc), depth + 1, budget, audit));
 }
 
-bool knownRoot(reg32 module, int& budget)
+bool knownRoot(reg32 module, int& budget, Audit& audit)
 {
-    return module && knownModule(module, 0, budget);
+    if (!module)
+        return audit.fail("no output", 0);
+    return knownModule(module, 0, budget, audit);
 }
 
 // With the execution lock and the SND mutex held.
-bool renderAudited()
+bool renderAudited(Audit& audit)
 {
-    if (rc::ld32(MixKernel) != 0x65a880 || rc::ld32(ConvertKernel) != 0x65a9a0 || rc::ld32(VoiceDone) != 0x6525f0
-        || rc::ld32(FreeHook) != 0x656500)
-        return false;
+    if (rc::ld32(MixKernel) != 0x65a880)
+        return audit.fail("mix kernel", rc::ld32(MixKernel));
+    if (rc::ld32(ConvertKernel) != 0x65a9a0)
+        return audit.fail("convert kernel", rc::ld32(ConvertKernel));
+    if (rc::ld32(VoiceDone) != 0x6525f0)
+        return audit.fail("voice done", rc::ld32(VoiceDone));
+    if (rc::ld32(FreeHook) != 0x656500)
+        return audit.fail("free hook", rc::ld32(FreeHook));
     const reg32 channels = rc::ld8(ChannelCount);
     if (channels > MaxChannels)
-        return false;
+        return audit.fail("channels", channels);
     int budget = MaxModules;
     const reg32 voices = rc::ld32(VoiceArray);
     const reg32 voiceCount = rc::ld8(VoiceCount);
     for (reg32 i = 0; i < voiceCount; ++i)
     {
         const reg32 voice = voices + i * VoiceSize;
-        if (rc::ld8(voice) == PlayingVoice && !knownRoot(rc::ld32(voice + 0x40), budget))
+        if (rc::ld8(voice) == PlayingVoice && !knownRoot(rc::ld32(voice + 0x40), budget, audit))
             return false;
     }
     for (reg32 channel = 0; channel < channels; ++channel)
     {
         const reg32 filter = rc::ld32(PostFilters + 4 * channel);
-        if ((filter && !knownRoot(filter, budget)) || !knownRoot(rc::ld32(PostOutputs + 4 * channel), budget))
+        if ((filter && !knownRoot(filter, budget, audit))
+            || !knownRoot(rc::ld32(PostOutputs + 4 * channel), budget, audit))
             return false;
     }
     const reg32 hook = rc::ld32(ReverbHook);
@@ -184,16 +215,16 @@ bool renderAudited()
     {
         const reg32 table = rc::ld32(ReverbModules);
         if (!table)
-            return false;
+            return audit.fail("reverb table", 0);
         for (reg32 channel = 0; channel < channels; ++channel)
         {
-            if (!knownModule(rc::ld32(table + 4 + 4 * channel), 0, budget))
+            if (!knownModule(rc::ld32(table + 4 + 4 * channel), 0, budget, audit))
                 return false;
         }
     }
     else if (hook != 0)
     {
-        return false;
+        return audit.fail("reverb hook", hook);
     }
     return true;
 }
@@ -206,15 +237,29 @@ void sub_656d70(win32::WinApplication* app, x86::CPU& cpu)
 {
     const reg32 slot = cpu.efs + win32::teb::HostLock;
     win32::Mutex* const lock = app->getMemory<win32::Mutex*>(slot);
-    if (!lock || !renderAudited())
+    const bool timed = pf::perf::enabled();
+    const uint32_t start = timed ? pf::perf::now() : 0;
+    Audit audit;
+    if (!lock || !renderAudited(audit))
     {
         sub_656d70_guest(app, cpu);
+        if (timed)
+        {
+            pf::perf::audio(pf::perf::AudioRendersLocked, 1);
+            pf::perf::audio(pf::perf::AudioRenderLockedUs, pf::perf::now() - start);
+            pf::perf::renderLocked(lock ? audit.reason : "no lock", audit.address);
+        }
         return;
     }
     app->unlockContext(cpu);
     app->getMemory<win32::Mutex*>(slot) = nullptr;
     sub_656d70_guest(app, cpu);
     app->getMemory<win32::Mutex*>(slot) = lock;
+    if (timed)
+    {
+        pf::perf::audio(pf::perf::AudioRendersUnlocked, 1);
+        pf::perf::audio(pf::perf::AudioRenderUnlockedUs, pf::perf::now() - start);
+    }
     app->lockContext(cpu);
 }
 
@@ -490,6 +535,8 @@ void sub_65b3f0(win32::WinApplication* app, x86::CPU& cpu)
     const double bias = loadFloat(RoundingBias);
     const reg32 end = samples + frames * 4;
     cpu.ecx = end;
+    reg32 high = 0;
+    reg32 low = 0;
     for (; samples < end; samples += 4, out += 2)
     {
         double value = loadFloat(samples);
@@ -497,10 +544,21 @@ void sub_65b3f0(win32::WinApplication* app, x86::CPU& cpu)
         rc::stf32(samples, float(value));
         reg32 bits = rc::ld32(samples) & 0xfffff;
         if (bits > 0x7fff && bits < 0xf8000)
-            bits = bits < 0x80000 ? 0x7fff : 0xffff8000;
+        {
+            const bool positive = bits < 0x80000;
+            high += positive;
+            low += !positive;
+            bits = positive ? 0x7fff : 0xffff8000;
+        }
         rc::st16(out, x86::reg16(bits));
     }
     cpu.eax = frames;
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioOutputSamples, frames);
+        pf::perf::audio(pf::perf::AudioSaturatedHigh, high);
+        pf::perf::audio(pf::perf::AudioSaturatedLow, low);
+    }
 }
 
 }
