@@ -1,4 +1,5 @@
 #include "bankcode.h"
+#include "bench.h"
 
 #include <lib/file.h>
 #include <lib/gamepad.h>
@@ -158,6 +159,7 @@ static void pollTextField()
 static void padPollHook(x86::reg32* buttons, int* pov)
 {
     pollTextField();
+    nfsu::bench::poll();
     const x86::reg32 slots = 0x0078DAA8, slotSize = 0x270, slotCount = 6;
     const bool driving = win32::g_guestBase[0x007041C4] == 0;
     const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
@@ -214,7 +216,8 @@ int main(int, char**)
     pf::Config::load(dataPath("nfsug1vita.cfg").c_str());
     pf::logSetConsole(pf::Config::getBool("tty_log", false));
     pf::cores::init();
-    pf::perf::init(pf::Config::getBool("perf_log", false));
+    // bench=1 turns the timing log on.
+    pf::perf::init(pf::Config::getBool("perf_log", false) || pf::Config::getBool("bench", false));
 #ifdef NFSU_PGO_GENERATE
     pf::pgo::start(dataPath("nfsu.profraw").c_str());
 #endif
@@ -236,6 +239,7 @@ int main(int, char**)
         nfsu::Application app(s_commandLine, imageSections(image));
         std::vector<uint8_t>().swap(image);
         setPadBindings();
+        nfsu::bench::configure(app);
         win32::Gamepad::setPollHook(padPollHook);
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))
             pf::fatal("%s (the game folder) is missing", s_guestGameFolder);
