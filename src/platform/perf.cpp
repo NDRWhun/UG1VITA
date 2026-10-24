@@ -11,10 +11,14 @@
 namespace pf { namespace perf {
 
 bool g_enabled = false;
+bool g_counting = false;
 int g_nextBlock = BlockOther;
 
 namespace
 {
+
+std::atomic<uint32_t> s_counts[CountCount];
+std::atomic<uint32_t> s_blockedTotal{0};
 
 const uint32_t LogIntervalUs = 5000000;
 
@@ -286,7 +290,23 @@ void init(bool enabled)
 
 uint32_t now()
 {
+    count(CountClock);
     return uint32_t(sceKernelGetProcessTimeWide());
+}
+
+void countSlow(Count counter)
+{
+    s_counts[counter].fetch_add(1, std::memory_order_relaxed);
+}
+
+void startCounting()
+{
+    g_counting = true;
+}
+
+uint32_t takeCount(Count counter)
+{
+    return s_counts[counter].exchange(0, std::memory_order_relaxed);
 }
 
 void add(Counter counter, uint32_t microseconds)
@@ -312,6 +332,12 @@ void gameBlocked(Block block, uint32_t microseconds, uint32_t relockUs)
     s_blocked[block].fetch_add(microseconds, std::memory_order_relaxed);
     s_blockCount.fetch_add(1, std::memory_order_relaxed);
     s_relock.fetch_add(relockUs, std::memory_order_relaxed);
+    s_blockedTotal.fetch_add(microseconds, std::memory_order_relaxed);
+}
+
+uint32_t gameBlockedTotal()
+{
+    return s_blockedTotal.load(std::memory_order_relaxed);
 }
 
 void trackThread(const char* name)
@@ -418,8 +444,19 @@ void timerFired(uint32_t callback, uint32_t microseconds)
     }
 }
 
+bool frameObserved()
+{
+    return s_frameObserver.load(std::memory_order_relaxed) != nullptr;
+}
+
 void framePresented(uint32_t drawCalls, uint32_t triangles)
 {
+    if (!g_enabled)
+    {
+        if (FrameObserver observer = s_frameObserver.load(std::memory_order_acquire))
+            observer(now());
+        return;
+    }
     ++s_frames;
     s_drawCalls += drawCalls;
     s_triangles += triangles;

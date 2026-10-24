@@ -350,8 +350,10 @@ void EnterCriticalSection(WinApplication* app, x86::CPU& cpu,
                           LPCRITICAL_SECTION lpCriticalSection)
 {
     // Blocks only with the execution lock released: the owner may need that lock to leave the section.
+    pf::perf::count(pf::perf::CountCritSec);
     if (!(*lpCriticalSection)->tryLock())
     {
+        pf::perf::count(pf::perf::CountCritSecWait);
         pf::perf::blocking(pf::perf::BlockCritSec);
         app->unlockContext(cpu);
         (*lpCriticalSection)->lock();

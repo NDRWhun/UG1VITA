@@ -1666,7 +1666,7 @@ void FrameRenderer::initLists()
     }
     // The render thread records too and takes whatever the helpers have not claimed.
     std::vector<int> cores;
-    if (cores::hasCore3())
+    if (cores::core3Waited())
         cores.push_back(3);
     if (Config::getBool("gxm_core2", true))
         cores.push_back(2);

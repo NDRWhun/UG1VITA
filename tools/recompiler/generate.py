@@ -124,6 +124,25 @@ NATIVE_OVERRIDES = [
     0x40f7c0,   # light context: fixed-function lights or the harmonic coefficients
     0x4100a0,   # reflection matrices
     0x40fae0,   # material: fixed-function material or the diffuse, specular and envmap terms
+    # Phase log (src/nfsu/phases.cpp, perf_phases): the guest bodies timed per call.
+    0x420b40,   # World::DoTimestep
+    0x420310,   # World::DoTimestepMove
+    0x4774a0,   # PhysicsMover::Move
+    0x474a90,   # MellowMover::Move
+    0x420380,   # World::DoTimestepCollisions
+    0x420890,   # World::DoPredictiveCollision
+    0x44b1b0,   # AICarController::Think
+    0x462430,   # AIDriver::Think
+    0x48e8b0,   # UpdateCameraMovers
+    0x51d240,   # EAXSound::Update
+    0x445050,   # TrackStreamer::Service
+    0x4483c0,   # ServiceResourceLoading
+    0x409580,   # world views of the frame render
+    0x40ed50,   # draw queue flush
+    0x571050,   # RenderCars
+    # Particle draw (src/nfsu/particles.cpp): the quads of every particle on the workers, the draws in order.
+    0x404110,   # particle system list draw for a view
+    0x403a60,   # particle system update: emitters, then every particle's motion
 ]
 
 # Byte patches applied to the code before discovery: (address, original bytes, new bytes) in hex. Generation stops

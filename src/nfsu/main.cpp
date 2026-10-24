@@ -1,5 +1,6 @@
 #include "bankcode.h"
 #include "bench.h"
+#include "phases.h"
 
 #include <lib/file.h>
 #include <lib/gamepad.h>
@@ -239,8 +240,9 @@ int main(int, char**)
     pf::Config::load(dataPath("nfsug1vita.cfg").c_str());
     pf::logSetConsole(pf::Config::getBool("tty_log", false));
     pf::cores::init();
-    // bench=1 turns the timing log on.
-    pf::perf::init(pf::Config::getBool("perf_log", false) || pf::Config::getBool("bench", false));
+    // bench=1 logs its summary without the timing log; bench_perf=1 adds the timing log to a benchmark.
+    pf::perf::init(pf::Config::getBool("perf_log", false)
+                   || (pf::Config::getBool("bench", false) && pf::Config::getBool("bench_perf", false)));
 #ifdef NFSU_PGO_GENERATE
     pf::pgo::start(dataPath("nfsu.profraw").c_str());
 #endif
@@ -264,6 +266,7 @@ int main(int, char**)
         setPadBindings();
         setEnvmapSchedule();
         nfsu::bench::configure(app);
+        nfsu::phases::configure();
         win32::Gamepad::setPollHook(padPollHook);
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))
             pf::fatal("%s (the game folder) is missing", s_guestGameFolder);

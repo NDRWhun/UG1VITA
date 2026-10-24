@@ -39,20 +39,26 @@ enum : DWORD
 
 const D3DMATRIX s_identity = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
 
-// Perf builds: game thread time spent in the Draw* methods, logged every 300 frames.
+// Perf builds: game thread time spent in the Draw* methods, logged every 300 frames. One draw in DrawSampleMask + 1
+// is timed; the time per draw is the mean of the timed ones.
+const uint32_t DrawSampleMask = 7;
 uint64_t s_drawUs = 0;
-uint32_t s_drawCalls = 0, s_drawFrames = 0;
+uint32_t s_drawCalls = 0, s_drawTimed = 0, s_drawFrames = 0;
 
 struct DrawTimer
 {
     uint32_t start;
-    DrawTimer() : start(pf::perf::enabled() ? pf::perf::now() : 0) {}
+    DrawTimer()
+        :   start(__builtin_expect(pf::perf::enabled(), 0) && (s_drawCalls++ & DrawSampleMask) == 0 ? pf::perf::now()
+                                                                                                     : 0)
+    {
+    }
     ~DrawTimer()
     {
-        if (!pf::perf::enabled())
+        if (__builtin_expect(start == 0, 1))
             return;
         s_drawUs += pf::perf::now() - start;
-        ++s_drawCalls;
+        ++s_drawTimed;
     }
 };
 
@@ -60,11 +66,12 @@ void drawFrameDone()
 {
     if (!pf::perf::enabled() || ++s_drawFrames < 300)
         return;
-    pf::logInfo("d3d9: draws on the game thread: %u us/frame, %u draws/frame, %.2f us/draw",
-                uint32_t(s_drawUs / s_drawFrames), s_drawCalls / s_drawFrames,
-                s_drawCalls ? double(s_drawUs) / double(s_drawCalls) : 0.0);
+    const double perDraw = s_drawTimed ? double(s_drawUs) / double(s_drawTimed) : 0.0;
+    pf::logInfo("d3d9: draws on the game thread: %u us/frame, %u draws/frame, %.2f us/draw (1 in %u timed)",
+                uint32_t(perDraw * s_drawCalls / s_drawFrames), s_drawCalls / s_drawFrames, perDraw,
+                unsigned(DrawSampleMask + 1));
     s_drawUs = 0;
-    s_drawCalls = s_drawFrames = 0;
+    s_drawCalls = s_drawTimed = s_drawFrames = 0;
 }
 
 void color(DWORD argb, float out[4])

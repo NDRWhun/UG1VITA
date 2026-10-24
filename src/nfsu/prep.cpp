@@ -6,6 +6,8 @@
 #include "flares.h"
 #include "draw.h"
 #include "mathfn.h"
+#include "particles.h"
+#include "phases.h"
 
 #include <platform/config.h>
 #include <platform/log.h>
@@ -276,6 +278,7 @@ uint32_t s_frames = 0;
 
 void stuffScenery(win32::WinApplication* app, x86::CPU& cpu)
 {
+    phases::Scope scope(phases::Stuff);
     const Settings& s = settings();
     const uint32_t start = pf::perf::enabled() ? pf::perf::now() : 0;
     if (!s.native)
@@ -341,7 +344,11 @@ void stuffScenery(win32::WinApplication* app, x86::CPU& cpu)
 
 void frame(win32::WinApplication* app, x86::CPU& cpu)
 {
-    sub_40a580_guest(app, cpu);
+    {
+        phases::Scope scope(phases::Render);
+        sub_40a580_guest(app, cpu);
+    }
+    phases::frame();
     if (!pf::perf::enabled() || ++s_frames < ReportFrames)
         return;
     const Settings& s = settings();
@@ -354,6 +361,7 @@ void frame(win32::WinApplication* app, x86::CPU& cpu)
     if (s.native && s.shadow)
         pf::logInfo("shadow_prep: %u calls compared, %u differ", unsigned(s_shadow.calls), unsigned(s_shadow.differing));
     flares::report(s_frames);
+    particles::report(s_frames);
     draw::logUsage(s_frames);
     s_perf = PerfSums();
     s_frames = 0;

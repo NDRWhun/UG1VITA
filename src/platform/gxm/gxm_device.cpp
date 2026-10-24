@@ -578,6 +578,10 @@ void Device::Impl::run()
             perf::add(perf::Render, perf::now() - start);
             perf::framePresented(calls, triangles);
         }
+        else if (queued && perf::frameObserved())
+        {
+            perf::framePresented(0, 0);
+        }
     }
 }
 

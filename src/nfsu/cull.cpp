@@ -14,6 +14,7 @@
 // and the flags the guest stores at calls are reproduced too.
 
 #include "cull.h"
+#include "phases.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -1214,6 +1215,7 @@ void visibleStateNative(x86::CPU& cpu)
 
 void doCulling(win32::WinApplication* app, x86::CPU& cpu)
 {
+    phases::Scope scope(phases::Cull);
     const Settings& s = settings();
     const uint32_t start = pf::perf::enabled() ? pf::perf::now() : 0;
     Counts counts;

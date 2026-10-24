@@ -12,6 +12,7 @@
 
 #include "flares.h"
 #include "cull.h"
+#include "phases.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -986,6 +987,7 @@ void account(uint32_t start, const Run& run)
 
 void worldFlares(win32::WinApplication* app, x86::CPU& cpu)
 {
+    phases::Scope scope(phases::Flares);
     const Settings& s = settings();
     const uint32_t start = pf::perf::enabled() ? pf::perf::now() : 0;
     Run run;

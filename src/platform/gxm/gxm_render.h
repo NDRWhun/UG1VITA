@@ -309,8 +309,8 @@ private:
     SceGxmTexture samplerTexture(const render::DrawState& s, uint32_t i) const;
     void upload(void* buffer, const render::UniformField* fields, uint8_t count,
                 const std::vector<const SceGxmProgramParameter*>& parameters, const float* constants);
-    // Command lists (setting gxm_lists): workers on the render core, core 3 and core 2 record the frame's scenes in
-    // ranges; the immediate context executes the lists in order.
+    // Command lists (setting gxm_lists): workers on the render core, core 3 (core3_layout=1) and core 2 record the
+    // frame's scenes in ranges; the immediate context executes the lists in order.
     void initLists();
     void shutdownLists();
     bool createWorker(Worker& worker);

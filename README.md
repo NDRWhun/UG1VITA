@@ -73,8 +73,8 @@ edge on their side at the same scale and stretches full-screen 2D (fades, backgr
 races and track loading; menus stay centred. `hud_anchor=0` keeps the whole HUD centred at 4:3.
 
 Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your
-car; the timing log is on and a `bench: summary` line gives the fps and frame times from the start signal to the
-finish. Off by default; the other keys need `bench=1`:
+car; a `bench: summary` line gives the fps and frame times from the start signal to the finish (the timing log stays
+off unless `bench_perf=1` or `perf_log=1`). Off by default; the other keys need `bench=1`:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -83,6 +83,7 @@ finish. Off by default; the other keys need `bench=1`:
 | `bench_opponents` | 3 | AI opponents, 0-3 |
 | `bench_seconds` | 0 | ends the measurement after this many seconds (0: at the finish) |
 | `bench_exit` | 0 | 1 quits the game after the summary |
+| `bench_perf` | 0 | 1 turns the timing log (`perf:` lines) on during the benchmark |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

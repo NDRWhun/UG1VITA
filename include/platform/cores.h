@@ -11,6 +11,10 @@
 //   Audio    2                2             SceAudioOut mixer, timer service (guest timer callbacks)
 //   Helper   2                3             other guest threads
 //   Io       2                3             guest file reading threads
+//
+// With core 3, core3_layout=1 (default) uses the "with core 3" column, and core 3 also runs a job phase worker and a
+// GXM command list worker. core3_layout=0 uses the "without core 3" column, and core 3 runs only a worker for the job
+// pool's posted tasks.
 
 namespace pf { namespace cores
 {
@@ -32,6 +36,9 @@ void init();
 
 // True when user threads run on core 3.
 bool hasCore3();
+// True with core 3 and core3_layout=1: helper and io threads, a job phase worker and a GXM command list worker on
+// core 3.
+bool core3Waited();
 // Core number (0-3) and pf::Thread::Cpu mask of a role.
 int core(Role role);
 int mask(Role role);
