@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fpu.h>
 #include <recomp.h>
@@ -81,8 +82,8 @@ const Settings& settings()
     return s;
 }
 
-// Guest stores. Shadow mode records the old values to undo them, except in the locked texture level, whose contents
-// before the unlock are kept in texture.
+// Guest stores. Shadow mode records the old values to undo them, except in the ranges saved whole and in the locked
+// texture level, whose contents before the unlock are kept in texture.
 struct Writer
 {
     struct Undo
@@ -98,11 +99,18 @@ struct Writer
     reg32 lockSlot = 0;
     reg32 lockedTexture = 0;
     std::vector<reg8> texture, original;
+    // Ranges saved whole by the caller: stores in them are not recorded.
+    std::vector<std::pair<reg32, reg32>> saved;
 
     [[gnu::noinline, gnu::cold]] void log(reg32 address, reg32 size)
     {
         if (address - lockedBegin < lockedEnd - lockedBegin)
             return;
+        for (const auto& range : saved)
+        {
+            if (address - range.first < range.second && address + size - range.first <= range.second)
+                return;
+        }
         undo.push_back(Undo{address, size == 4 ? rc::ld32(address) : size == 2 ? rc::ld16(address)
                                                                                 : rc::ld8(address), size});
     }
@@ -1207,12 +1215,16 @@ struct Shadow
     uint32_t calls[EntryCount] = {}, differing[EntryCount] = {};
     uint32_t relocated[EntryCount] = {};
     uint32_t uncompared = 0;
+    uint32_t tooLarge[EntryCount] = {};
     uint32_t logged = 0;
     uint32_t reported = 0;
     bool started = false;
 };
 
 Shadow s_shadow;
+
+// Calls whose output, texture level or texture would take more host memory than this run native only.
+const reg32 MaxShadowBytes = 0x400000;
 
 // Values are equal, or the guest's object g stands where the native code's object n does.
 struct Alias
@@ -1262,12 +1274,14 @@ void report()
     s.reported = now;
     pf::logInfo("shadow_load: compared/differing jdlz %u/%u, composite %u/%u, pixel sum %u/%u, texture %u/%u; "
                 "texture contents only (lock or buffer at another address): composite %u, texture %u; texture "
-                "replacing a texture (not compared) %u",
+                "replacing a texture (not compared) %u; too large (not compared): jdlz %u, composite %u, texture %u",
                 unsigned(s.calls[EntryJdlz]), unsigned(s.differing[EntryJdlz]),
                 unsigned(s.calls[EntryComposite]), unsigned(s.differing[EntryComposite]),
                 unsigned(s.calls[EntryPixelSum]), unsigned(s.differing[EntryPixelSum]),
                 unsigned(s.calls[EntryTexture]), unsigned(s.differing[EntryTexture]),
-                unsigned(s.relocated[EntryComposite]), unsigned(s.relocated[EntryTexture]), unsigned(s.uncompared));
+                unsigned(s.relocated[EntryComposite]), unsigned(s.relocated[EntryTexture]), unsigned(s.uncompared),
+                unsigned(s.tooLarge[EntryJdlz]), unsigned(s.tooLarge[EntryComposite]),
+                unsigned(s.tooLarge[EntryTexture]));
 }
 
 // esp: the guest's esp at the call.
@@ -1292,8 +1306,7 @@ struct Region
 {
     reg32 address;
     reg32 size;
-    std::vector<reg8> before;
-    std::vector<bool> stored;
+    std::vector<reg8> before, native;
 };
 
 // A level of a texture interface locked below the guest's stack: read into out (read-only lock), or with write
@@ -1334,9 +1347,9 @@ bool accessTexture(win32::WinApplication* app, x86::CPU& cpu, reg32 texture, reg
     return ok;
 }
 
-// Runs the native entry with its stores recorded and undone, then the guest code (whose result stays), and logs
-// the first difference: registers, x87 state, every native store, guest stores the native code did not make in
-// the given regions, then check.
+// Runs the native entry, then the guest code (whose result stays), and logs the first difference: registers, x87
+// state, the given regions byte for byte (saved before the native run, restored after it), every native store
+// outside them (recorded and undone), then check.
 template< typename Native, typename Regions, typename Check >
 void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native native,
                void (*guest)(win32::WinApplication*, x86::CPU&), Regions regionsOf, Check check)
@@ -1344,6 +1357,17 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
     const x86::CPU start = cpu;
     Writer w;
     w.record = true;
+    std::vector<Region> regions;
+    for (const auto& range : regionsOf(start))
+    {
+        if (range.second && win32::MemMap::isGuestRange(range.first, range.second))
+        {
+            regions.push_back(Region{range.first, range.second,
+                                     std::vector<reg8>(rc::host(range.first), rc::host(range.first) + range.second),
+                                     {}});
+            w.saved.push_back(range);
+        }
+    }
     if (!native(app, cpu, w))
         return;
     struct Store { reg32 address, size, value; };
@@ -1358,19 +1382,13 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
         else
             rc::st8(u->address, reg8(u->value));
     }
-    const x86::CPU after = cpu;
-
-    std::vector<Region> regions;
-    for (const auto& range : regionsOf(start, after))
-    {
-        if (range.second && win32::MemMap::isGuestRange(range.first, range.second))
-            regions.push_back(Region{range.first, range.second, {}, {}});
-    }
+    std::vector<Writer::Undo>().swap(w.undo);
     for (Region& r : regions)
     {
-        r.before.assign(rc::host(r.address), rc::host(r.address) + r.size);
-        r.stored.assign(r.size, false);
+        r.native.assign(rc::host(r.address), rc::host(r.address) + r.size);
+        memcpy(rc::host(r.address), r.before.data(), r.size);
     }
+    const x86::CPU after = cpu;
 
     // The locked level gets back the contents the native code found in it.
     bool restored = true;
@@ -1378,6 +1396,7 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
     {
         std::vector<reg8> unused;
         restored = accessTexture(app, cpu, w.lockedTexture, 0, reg32(w.original.size()), unused, &w.original);
+        std::vector<reg8>().swap(w.original);
         if (cpu.terminate)
             return;
     }
@@ -1403,16 +1422,8 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
     bool same = relocated || compareRegisters(cpu, after, text, sizeof(text));
     for (const Store& st : stores)
     {
-        for (Region& r : regions)
-        {
-            for (reg32 i = 0; i < st.size; ++i)
-            {
-                if (st.address + i - r.address < r.size)
-                    r.stored[st.address + i - r.address] = true;
-            }
-        }
         if (!same)
-            continue;
+            break;
         const reg32 g = st.size == 4 ? rc::ld32(st.address) : rc::ld8(st.address);
         if (g != st.value)
         {
@@ -1426,11 +1437,11 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
         for (reg32 i = 0; same && i < r.size; ++i)
         {
             const reg8 now = rc::ld8(r.address + i);
-            if (!r.stored[i] && now != r.before[i])
+            if (now != r.native[i])
             {
                 same = false;
-                snprintf(text, sizeof(text), "guest stored 0x%02x at 0x%08x, native nothing", unsigned(now),
-                         unsigned(r.address + i));
+                snprintf(text, sizeof(text), "guest 0x%02x native 0x%02x at 0x%08x", unsigned(now),
+                         unsigned(r.native[i]), unsigned(r.address + i));
             }
         }
     }
@@ -1443,6 +1454,21 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
 
 bool noCheck(win32::WinApplication*, x86::CPU&, const x86::CPU&, const Writer&, char*, size_t)
 {
+    return true;
+}
+
+// CompositeSkin32 at its entry: true, counted, when its texture level is above MaxShadowBytes.
+bool skinTooLarge(const x86::CPU& cpu)
+{
+    const reg32 texture = rc::ld32(rc::ld32(cpu.esp + 4));
+    if (!texture)
+        return false;
+    const x86::reg64 size = x86::reg64(sreg32(sreg16(rc::ld16(texture + 0x44))))
+                            * x86::reg64(sreg32(sreg16(rc::ld16(texture + 0x46)))) * 4;
+    if (size <= MaxShadowBytes)
+        return false;
+    ++s_shadow.tooLarge[EntryComposite];
+    report();
     return true;
 }
 
@@ -1489,14 +1515,25 @@ void shadowJdlz(win32::WinApplication* app, x86::CPU& cpu)
     reg32 span = size + 0x1004;
     if (!win32::MemMap::isGuestRange(dst, span))
         span = size;
-    std::vector<reg8> before(rc::host(dst), rc::host(dst) + span);
-    std::vector<reg8> frameBefore(rc::host(frame), rc::host(frame) + 0x20);
+    // malloc: a failed allocation gives null instead of terminating.
+    reg8* const nativeOut = span <= MaxShadowBytes ? static_cast<reg8*>(malloc(span ? span : 1)) : nullptr;
+    struct Free { reg8* p; ~Free() { free(p); } } freeOut{nativeOut};
+    if (nativeOut)
+        memcpy(nativeOut, rc::host(dst), span);
+    else
+    {
+        ++s_shadow.tooLarge[EntryJdlz];
+        jdlzNative(cpu);
+        report();
+        return;
+    }
+    reg8 nativeFrame[0x20];
+    memcpy(nativeFrame, rc::host(frame), 0x20);
     const reg32 end = jdlzNative(cpu);
     const x86::CPU after = cpu;
-    std::vector<reg8> nativeOut(rc::host(dst), rc::host(dst) + span);
-    std::vector<reg8> nativeFrame(rc::host(frame), rc::host(frame) + 0x20);
-    memcpy(rc::host(dst), before.data(), span);
-    memcpy(rc::host(frame), frameBefore.data(), 0x20);
+    // The output range and the frame exchange contents: memory as before the native run, the copies its result.
+    std::swap_ranges(nativeOut, nativeOut + span, rc::host(dst));
+    std::swap_ranges(nativeFrame, nativeFrame + 0x20, rc::host(frame));
 
     cpu = start;
     sub_58d190_guest(app, cpu);
@@ -1568,6 +1605,16 @@ void shadowTexture(win32::WinApplication* app, x86::CPU& cpu)
         return;
     }
     const std::vector<reg32> sizes = levelSizes(t);
+    reg32 total = 0;
+    for (reg32 size : sizes)
+        total += std::min(size, MaxShadowBytes);
+    if (!sizes.empty() && (sizes[0] > MaxShadowBytes || total > MaxShadowBytes))
+    {
+        ++s_shadow.tooLarge[EntryTexture];
+        textureNative(app, cpu);
+        report();
+        return;
+    }
     const x86::CPU start = cpu;
     const reg32 tail = rc::ld32(TextureListTail);
     struct Saved
@@ -1775,7 +1822,7 @@ void sub_5a8640(win32::WinApplication* app, x86::CPU& cpu)
             load::pixelSumNative(c, w);
             return true;
         };
-        const auto regions = [](const x86::CPU& start, const x86::CPU&)
+        const auto regions = [](const x86::CPU& start)
         {
             return std::vector<std::pair<x86::reg32, x86::reg32>>{{start.esp - 0x28, 0x3c}};
         };
@@ -1793,14 +1840,14 @@ void sub_5a8a50(win32::WinApplication* app, x86::CPU& cpu)
         {
             sub_5a8a50_guest(app, cpu);
         }
-        else if (!s.shadow)
+        else if (!s.shadow || load::skinTooLarge(cpu))
         {
             load::Writer w;
             load::compositeNative(app, cpu, w);
         }
         else
         {
-            const auto regions = [](const x86::CPU& start, const x86::CPU&)
+            const auto regions = [](const x86::CPU& start)
             {
                 using Range = std::pair<x86::reg32, x86::reg32>;
                 std::vector<Range> r;
