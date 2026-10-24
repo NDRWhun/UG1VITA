@@ -1,14 +1,12 @@
-// Native render preparation (prep.h): the per-view StuffScenery loop. The light-context fill (0x5437f0) of each
-// instance runs on the job workers into that instance's own 0x1c0-byte context; the game thread keeps the bump
-// allocation and the submission (0x40c910) in the guest's order. Shadow mode compares the result against the guest
-// body.
+// Native render preparation (prep.h): the per-view StuffScenery loop. The bump allocation of the light contexts,
+// the light-context fill (0x5437f0) of each instance into its own 0x1c0-byte context and the submission (0x40c910)
+// run in the guest's order on the calling thread. Shadow mode compares the result against the guest body.
 
 #include "prep.h"
 #include "draw.h"
 #include "mathfn.h"
 
 #include <platform/config.h>
-#include <platform/jobs.h>
 #include <platform/log.h>
 #include <platform/perf.h>
 
@@ -48,13 +46,11 @@ const reg32 LightSize = 0x1c0;          // one instance light context
 const reg32 ViewCount = 0x820;          // views in the culler object
 const reg32 InfoSize = 0xd0;
 const reg32 DefaultTexture = 0x78ea40;  // fill argument (guest 0x446833)
-const int BatchItems = 16;              // light fills per claim
 const uint32_t ReportFrames = 300;
 
 struct Settings
 {
     bool native;
-    bool parallel;
     bool shadow;
 };
 
@@ -62,10 +58,9 @@ const Settings& settings()
 {
     static const Settings s = []
     {
-        const Settings r = { pf::Config::getBool("prep_native", true), pf::Config::getBool("prep_parallel", true),
-                             pf::Config::getBool("shadow_prep", false) };
-        pf::logInfo("prep: render preparation %s%s%s", r.native ? "native" : "guest",
-                    r.native && r.parallel ? ", parallel" : "", r.native && r.shadow ? ", shadow compare" : "");
+        const Settings r = { pf::Config::getBool("prep_native", true), pf::Config::getBool("shadow_prep", false) };
+        pf::logInfo("prep: render preparation %s%s", r.native ? "native" : "guest",
+                    r.native && r.shadow ? ", shadow compare" : "");
         return r;
     }();
     return s;
@@ -75,36 +70,31 @@ const Settings& settings()
 struct Item
 {
     size_t entry;       // index in the view's visible list (phase C pairs it back)
-    reg32 light;        // the instance light record (fill argument 1 = [entry+4] matrix); see fillBatch
+    reg32 light;        // the instance light record
     reg32 context;      // its 0x1c0 light context, from the bump allocator (fill argument 0)
     reg32 matrix;       // the instance matrix ([entry+4]); fill argument 1
     reg32 target;       // [view+0x40] + 0x40 (fill argument 3)
     reg32 view;         // the view (fill argument 4)
-    reg32 esp;          // a 16-aligned worker stack for the fill
 };
 
 std::vector<Item> s_items;
 std::vector<size_t> s_overflow;
-win32::WinApplication* s_app = nullptr;
 
-// Runs the light fills of a range of items.
-void fillBatch(void*, int begin, int end, int)
+// Runs the light fills of the items in order, each on a copy of the caller's state with the arguments below its stack.
+void fillAll(win32::WinApplication* app, const x86::CPU& caller)
 {
-    for (int i = begin; i < end; ++i)
+    for (const Item& item : s_items)
     {
-        const Item& item = s_items[size_t(i)];
-        x86::CPU cpu;
-        memset(&cpu, 0, sizeof(cpu));
-        cpu.fpu.init();
-        cpu.esp = item.esp;
+        x86::CPU cpu = caller;
+        cpu.esp = (caller.esp - 0x40) & ~15u;
         // The guest pushes, right to left (0x446828-0x446839): context, matrix, 0x78ea40, [view+0x40]+0x40, view.
-        rc::st32(item.esp, 0x0044683f);             // return address slot
-        rc::st32(item.esp + 4, item.context);
-        rc::st32(item.esp + 8, item.matrix);
-        rc::st32(item.esp + 12, DefaultTexture);
-        rc::st32(item.esp + 16, item.target);
-        rc::st32(item.esp + 20, item.view);
-        sub_5437f0(s_app, cpu);
+        rc::st32(cpu.esp, 0x0044683f);              // return address slot
+        rc::st32(cpu.esp + 4, item.context);
+        rc::st32(cpu.esp + 8, item.matrix);
+        rc::st32(cpu.esp + 12, DefaultTexture);
+        rc::st32(cpu.esp + 16, item.target);
+        rc::st32(cpu.esp + 20, item.view);
+        sub_5437f0(app, cpu);
     }
 }
 
@@ -129,9 +119,7 @@ reg32 allocate()
 // no-matrix path.
 void submit(win32::WinApplication* app, x86::CPU& cpu, reg32 flags, reg32 view, reg32 model, reg32 slotC, reg32 slotD)
 {
-    x86::CPU c;
-    memset(&c, 0, sizeof(c));
-    c.fpu.init();
+    x86::CPU c = cpu;
     const reg32 esp = (cpu.esp - 0x40) & ~15u;
     rc::st32(esp, 0x00446863);
     rc::st32(esp + 4, view);
@@ -147,7 +135,6 @@ void submit(win32::WinApplication* app, x86::CPU& cpu, reg32 flags, reg32 view, 
 // the culler info whose view matched, as the guest does.
 void stuffNative(win32::WinApplication* app, x86::CPU& cpu)
 {
-    s_app = app;
     const reg32 view = rc::ld32(cpu.esp + 4);
     const reg32 detail = cpu.ecx != 0 ? 0x1000u : 0;
     const reg32 object = cpu.edx;
@@ -207,17 +194,11 @@ void stuffNative(win32::WinApplication* app, x86::CPU& cpu)
             continue;
         }
         const reg32 target = rc::ld32(view + 0x40) + 0x40;
-        s_items.push_back(Item{index, light, context, matrix, target, view, (cpu.esp - 0x40) & ~15u});
+        s_items.push_back(Item{index, light, context, matrix, target, view});
     }
 
-    // Phase B: the fills, on the workers (or inline).
-    if (!s_items.empty())
-    {
-        if (settings().parallel)
-            pf::jobs::run(int(s_items.size()), BatchItems, &fillBatch, nullptr);
-        else
-            fillBatch(nullptr, 0, int(s_items.size()), 0);
-    }
+    // Phase B: the fills.
+    fillAll(app, entry);
 
     // Phase C: the submission in the guest's order. Model slot and the instance's 0x2e field are set per entry as
     // the guest sets them.
@@ -365,7 +346,7 @@ void frame(win32::WinApplication* app, x86::CPU& cpu)
     const Settings& s = settings();
     const mathfn::Usage math = mathfn::takeUsage();
     pf::logInfo("prep: %s light fills %u/frame, %.2f ms/frame (max %.2f); math helpers %u calls/frame, %.2f ms/frame",
-                !s.native ? "guest" : s.shadow ? "shadow" : s.parallel ? "parallel" : "serial",
+                !s.native ? "guest" : s.shadow ? "shadow" : "native",
                 s_perf.calls ? s_perf.items / s_perf.calls : 0,
                 s_perf.calls ? double(s_perf.us) / 1000.0 / s_frames : 0.0, double(s_perf.maxUs) / 1000.0,
                 math.calls / s_frames, math.ms / s_frames);
