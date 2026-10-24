@@ -64,6 +64,7 @@ enum VertexProgram : uint8_t
     VpFixed,                    // fixed function, untransformed positions
     VpFixedScreen,              // fixed function, POSITIONT
     VpWorld,
+    VpWorldProjected,           // world, four texture coordinates (stage 0 PROJECTED)
     VpWorldHeadlight,
     VpWorldReflect,
     VpWorldHeadlightReflect,
@@ -80,6 +81,7 @@ enum FragmentProgram : uint8_t
     FpFixedTexture,
     FpFixedProjected,           // texture coordinates divided by z (COUNT3 | PROJECTED)
     FpWorld,
+    FpWorldProjected,           // world, texture coordinates divided by w (stage 0 PROJECTED)
     FpWorldHeadlight,
     FpWorldReflect,
     FpWorldHeadlightReflect,

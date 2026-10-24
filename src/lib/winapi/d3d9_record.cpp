@@ -137,7 +137,9 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
         }
         EffectBinding b;
         memset(&b, 0, sizeof(b));
-        effectBinding(effect, own, shared, b);
+        const bool projected = (m_state.stageStates[0][D3DTSS_TEXTURETRANSFORMFLAGS] & D3DTTFF_PROJECTED) != 0 &&
+                               record.texComponents == 4;
+        effectBinding(effect, own, shared, projected, b);
         state.vertexProgram = b.vertexProgram;
         state.fragmentProgram = b.fragmentProgram;
         for (uint32_t i = 0; i < b.samplerCount && i < render::MaxSamplers; ++i)

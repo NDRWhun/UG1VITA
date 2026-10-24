@@ -12,11 +12,12 @@
 #include <cstring>
 
 #define NFSU_SHADERS(X) \
-    X(ff_v) X(ff_screen_v) X(world_v) X(worldheadlight_v) X(worldreflect_v) X(worldheadlightreflect_v) \
-    X(worldbone_v) X(car_v) X(filter_v) X(clearz_v) \
+    X(ff_v) X(ff_screen_v) X(world_v) X(world_proj_v) X(worldheadlight_v) X(worldreflect_v) \
+    X(worldheadlightreflect_v) X(worldbone_v) X(car_v) X(filter_v) X(clearz_v) \
     X(ff_color_f) X(ff_color_f_atest) X(ff_tex_f) X(ff_tex_f_atest) X(ff_proj_f) X(ff_proj_f_atest) \
-    X(world_f) X(world_f_atest) X(worldheadlight_f) X(worldheadlight_f_atest) X(worldreflect_f) \
-    X(worldreflect_f_atest) X(worldheadlightreflect_f) X(worldheadlightreflect_f_atest) X(car_f) X(car_f_atest) \
+    X(world_f) X(world_f_atest) X(world_proj_f) X(world_proj_f_atest) X(worldheadlight_f) X(worldheadlight_f_atest) \
+    X(worldreflect_f) X(worldreflect_f_atest) X(worldheadlightreflect_f) X(worldheadlightreflect_f_atest) X(car_f) \
+    X(car_f_atest) \
     X(filter1_f) X(filter1_f_atest) X(filter2_f) X(filter2_f_atest) X(filter3_f) X(filter3_f_atest) \
     X(filter4_f) X(filter4_f_atest) X(clear_f) \
     X(filter1_f_bfcolor) X(filter1_f_bfalpha) X(filter1_f_bfscale) X(filter2_f_bfcolor) X(filter2_f_bfalpha) \

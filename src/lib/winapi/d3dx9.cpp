@@ -429,7 +429,8 @@ uint32_t effectBlockFloats()
     return s_totalFloats;
 }
 
-void effectBinding(const EffectDraw& effect, const float* own, const float* shared, EffectBinding& b)
+void effectBinding(const EffectDraw& effect, const float* own, const float* shared, bool projected,
+                   EffectBinding& b)
 {
     const View v(effect, own, shared);
     const bool wrapMip = true;
@@ -445,6 +446,13 @@ void effectBinding(const EffectDraw& effect, const float* own, const float* shar
     switch (v.kind)
     {
     case EffectWorld:
+        if (projected)
+        {
+            D3D_LOG_ONCE("d3dx9: world effect draw with projected texture coordinates (stage 0 PROJECTED)");
+            b.vertexProgram = render::VpWorldProjected;
+            b.fragmentProgram = render::FpWorldProjected;
+            break;
+        }
         b.vertexProgram = render::VpWorld;
         b.fragmentProgram = render::FpWorld;
         break;
@@ -479,6 +487,8 @@ void effectBinding(const EffectDraw& effect, const float* own, const float* shar
             b.samplers[i] = samplerOf(render::AddressClamp, false);
         break;
     }
+    if (projected && v.kind != EffectWorld)
+        D3D_LOG_ONCE("d3dx9: projected stage 0 texture coordinates of effect kind %u not emulated", unsigned(v.kind));
 }
 
 void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
