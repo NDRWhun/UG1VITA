@@ -24,6 +24,8 @@ const uint32_t WorkerStack = 64 * 1024;
 const int MaxWorkers = 2;
 // The caller spins this long for workers still in their last batch before it sleeps.
 const uint32_t JoinSpinUs = 50;
+// Spin iterations between two clock reads of the join.
+const uint32_t JoinClockMask = 15;
 
 struct Phase
 {
@@ -145,9 +147,9 @@ void join()
 {
     s_current.store(nullptr, std::memory_order_seq_cst);
     const uint32_t start = sceKernelGetProcessTimeLow();
-    while (s_busy.load(std::memory_order_acquire) != 0)
+    for (uint32_t spin = 1; s_busy.load(std::memory_order_acquire) != 0; ++spin)
     {
-        if (sceKernelGetProcessTimeLow() - start < JoinSpinUs)
+        if ((spin & JoinClockMask) != 0 || sceKernelGetProcessTimeLow() - start < JoinSpinUs)
             continue;
         s_waiter.store(1, std::memory_order_seq_cst);
         // Waits for the post unless no worker is busy and the flag is taken back here.

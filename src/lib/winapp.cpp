@@ -38,6 +38,11 @@ static const uint64_t PreemptSpinUs = 500;
 // Threads waiting for the execution lock per preemption level above normal (m_preemptWaiters is their sum).
 static std::atomic<int> s_levelWaiters[scheduler::LevelCount];
 
+// True while a thread holds the execution lock: spinning waiters read it instead of calling the kernel.
+static std::atomic<bool> s_lockHeld{false};
+// Spin iterations between two clock reads of the spin loops.
+static const uint32_t SpinClockMask = 15;
+
 // Thread blocks and guest stacks of returned runThread calls, reused: timer callbacks run about 125 times a second,
 // and finding 1 MB in the guest memory map takes a long first-fit search.
 struct ThreadMemory
@@ -390,8 +395,13 @@ static void acquire(Mutex* executionContext, scheduler::Level level, std::atomic
     // awake takes it without a wake-up.
     const uint64_t spinEnd = pf::ticksUs() + PreemptSpinUs;
     bool owned = executionContext->tryLock();
-    while (!owned && pf::ticksUs() < spinEnd)
-        owned = executionContext->tryLock();
+    for (uint32_t spin = 1; !owned; ++spin)
+    {
+        if (!s_lockHeld.load(std::memory_order_relaxed))
+            owned = executionContext->tryLock();
+        if (!owned && (spin & SpinClockMask) == 0 && pf::ticksUs() >= spinEnd)
+            break;
+    }
     if (!owned)
         executionContext->lock();
     preemptWaiters.fetch_sub(1, std::memory_order_relaxed);
@@ -420,13 +430,16 @@ void WinApplication::lockContext(const x86::CPU& cpu)
     const uint32_t start = timed ? pf::perf::now() : 0;
     acquire(executionContext, level, m_preemptWaiters);
     ++m_contextDepth;
+    s_lockHeld.store(true, std::memory_order_relaxed);
     while (scheduler::anySuspended() && m_contextDepth == 1 && scheduler::mustPark(control) && !cpu.terminate)
     {
         --m_contextDepth;
+        s_lockHeld.store(false, std::memory_order_relaxed);
         executionContext->unlock();
         scheduler::park(control, cpu);
         acquire(executionContext, level, m_preemptWaiters);
         ++m_contextDepth;
+        s_lockHeld.store(true, std::memory_order_relaxed);
     }
     if (timed && m_contextDepth == 1)
     {
@@ -460,7 +473,11 @@ void WinApplication::unlockContext(const x86::CPU& cpu)
             }
         }
         pf::perf::g_nextBlock = pf::perf::BlockOther;
-        --m_contextDepth;
+        if (--m_contextDepth == 0)
+        {
+            s_lockHeld.store(false, std::memory_order_relaxed);
+            pf::perf::count(pf::perf::CountRelease);
+        }
         executionContext->unlock();
     }
 }
@@ -486,12 +503,15 @@ void WinApplication::yieldContext(const x86::CPU& cpu)
         return;
     const bool timed = pf::perf::enabled();
     const uint32_t start = timed ? pf::perf::now() : 0;
+    pf::perf::count(pf::perf::CountYield);
     pf::perf::blocking(pf::perf::BlockPreempt);
     unlockContext(cpu);
     // A waiter that spins for the lock takes it now; this thread must not take it back first.
     const uint64_t spinEnd = pf::ticksUs() + PreemptSpinUs;
-    while (higherWaits() && pf::ticksUs() < spinEnd)
+    for (uint32_t spin = 1; higherWaits(); ++spin)
     {
+        if ((spin & SpinClockMask) == 0 && pf::ticksUs() >= spinEnd)
+            break;
     }
     lockContext(cpu);
     if (timed)
