@@ -92,7 +92,7 @@ static void freeThreadMemory()
     s_threadMemory.clear();
 }
 
-// The method table doubles while methods register; about 7,800 methods end in 16,384 slots.
+// The method table doubles while methods register beyond half of it; reserveMethods presizes it.
 static const x86::reg32 s_initialMethodSlotBits = 10;
 
 static ForeignCodeResolver s_foreignCodeResolver = nullptr;
@@ -268,6 +268,12 @@ bool WinApplication::freeResource(x86::reg32 resource)
     object->setResourceIndex(0);
     delete object;
     return true;
+}
+
+void WinApplication::reserveMethods(x86::reg32 count)
+{
+    while (count * 4 > methodSlotCount())
+        growMethodTable();
 }
 
 void WinApplication::registerMethod(x86::reg32 pointer, Method method)
