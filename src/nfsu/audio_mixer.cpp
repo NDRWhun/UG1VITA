@@ -1,7 +1,12 @@
-// EA SND 8 software mixer (docs: audio.md). The audio thread renders the voices (0x656D70) outside the execution
-// lock, and the x87 kernels of the render run natively. Each kernel does the guest's loads, double operations and
-// stores in the guest's order, so its output is bit-identical (only where two NaNs meet in one operation may the
-// result carry the other NaN's payload: the compiler orders the operands, here as in the generated code).
+// EA SND 8 software mixer (docs: audio.md). The audio thread runs the render loop 0x654050 (SND ticks, the
+// millisecond callbacks with the bank routines, the voice render 0x656D70 and the stream notifications) outside
+// the execution lock, holding the SND mutex as the game does; each part checks what it reaches and takes the lock
+// again for that call when the check fails. The x87 kernels of the render run natively. Each kernel does the
+// guest's loads, double operations and stores in the guest's order, so its output is bit-identical (only where two
+// NaNs meet in one operation may the result carry the other NaN's payload: the compiler orders the operands, here as
+// in the generated code).
+
+#include "audio_mixer.h"
 
 #include <lib/mutex.h>
 #include <lib/teb.h>
@@ -10,14 +15,66 @@
 #include <recomp.h>
 #include <x86.h>
 
+#include <atomic>
 #include <cstring>
 
 namespace nfsu
 {
 
 // Generated guest code.
+void sub_654050_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_64e330_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_64e2f0_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_655880_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_656d70_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_65f930(win32::WinApplication* app, x86::CPU& cpu);
+
+namespace mixer
+{
+
+namespace
+{
+
+// Thread block (fs) of the guest thread in the render loop without the execution lock, 0 while there is none. Only
+// that thread stores it; a thread compares it with its own block.
+std::atomic<x86::reg32> s_thread{0};
+// The execution lock that thread gave up; only that thread reads it.
+win32::Mutex* s_lock = nullptr;
+
+void setLock(win32::WinApplication* app, const x86::CPU& cpu, win32::Mutex* lock)
+{
+    app->getMemory<win32::Mutex*>(cpu.efs + win32::teb::HostLock) = lock;
+}
+
+}
+
+bool unlocked(const x86::CPU& cpu)
+{
+    return s_thread.load(std::memory_order_relaxed) == cpu.efs;
+}
+
+Locked::Locked(win32::WinApplication* app, const x86::CPU& cpu)
+    :   m_app(app)
+    ,   m_cpu(cpu)
+    ,   m_taken(unlocked(cpu))
+{
+    if (!m_taken)
+        return;
+    s_thread.store(0, std::memory_order_relaxed);
+    setLock(m_app, m_cpu, s_lock);
+    m_app->lockContext(m_cpu);
+}
+
+Locked::~Locked()
+{
+    if (!m_taken)
+        return;
+    m_app->unlockContext(m_cpu);
+    setLock(m_app, m_cpu, nullptr);
+    s_thread.store(m_cpu.efs, std::memory_order_relaxed);
+}
+
+}
 
 namespace native
 {
@@ -45,7 +102,7 @@ inline double loadFloat(reg32 address)
 // It and its callees touch only SND state (voices, modules, decoders, stream blocks, the SND pool, the mix buses),
 // sample data and the DirectSound buffer, and the game changes that state only through SND calls that take the
 // same mutex. Its indirect calls go through the pointers checked below; when every one leads to a function of the
-// audited set, the render runs without the execution lock, else it keeps the lock.
+// audited set, the render runs without the execution lock, else it takes the lock for the render.
 
 const reg32 VoiceArray      = 0x71666c;     // 0x60-byte voices: +0 state (2 = playing), +0x40 module chain
 const reg32 VoiceCount      = 0x716464;     // byte
@@ -180,7 +237,7 @@ bool knownRoot(reg32 module, int& budget, Audit& audit)
     return knownModule(module, 0, budget, audit);
 }
 
-// With the execution lock and the SND mutex held.
+// With the SND mutex held.
 bool renderAudited(Audit& audit)
 {
     if (rc::ld32(MixKernel) != 0x65a880)
@@ -229,38 +286,238 @@ bool renderAudited(Audit& audit)
     return true;
 }
 
+// ---- SND tick -------------------------------------------------------------------------------------------------
+//
+// The tick 0x64E330 (each 10 ms of output) runs the tick hooks, then for every handle in use its pitch and volume
+// envelopes and its fade, which may stop the handle its id names (the one at index id & 0xFF) and the handles of
+// its group in use. That reaches SND state, the handle's driver (volume and stop functions, the voices it lists),
+// the voices' module chains with their teardowns and the SND pool; the game changes all of it only through SND calls
+// that take the SND mutex. The tick runs without the execution lock when every handle in use names itself, has the
+// software driver, and every function the tick can reach through a pointer is one of the audited set.
+
+const reg32 Handles         = 0x713f48;     // 0x8C bytes each: +0 id, +0x24 kind flags, +0x69 state
+const reg32 HandleCount     = 0x713ee8;     // int16
+const reg32 HandleSize      = 0x8c;
+const reg32 HandleInUse     = 1;
+const reg32 SoftwareHandle  = 4;            // kind flag of handles mixed by the software voices
+const reg32 Drivers         = 0x71400c;     // 0x110 bytes per handle
+const reg32 DriverSize      = 0x110;
+const reg32 DriverVoices    = 0x2c;         // byte count, then int16 voice numbers from +4
+const reg32 SoftwareVolume  = 0x657540;     // driver +0xEC, with the voice list at driver +0xC8
+const reg32 SoftwareStop    = 0x6577a0;     // driver +0xE8
+const reg32 TickHookCount   = 0x713ee6;     // int8; hooks at 0x713EF0
+const reg32 PoolFree        = 0x656500;
+
+// Module teardowns (+4, along the +8 links) of a voice the stop tears down.
+bool teardownsKnown(reg32 voice, int& budget, Audit& audit)
+{
+    for (reg32 module = rc::ld32(voice + 0x40); module; module = rc::ld32(module + 8))
+    {
+        if (--budget < 0)
+            return audit.fail("module count", module);
+        const reg32 teardown = rc::ld32(module + 4);
+        if (!contains(s_teardowns, teardown))
+            return audit.fail("teardown", teardown);
+    }
+    return true;
 }
 
-// Renders frames into the DirectSound buffer: (pointer to the output pointer, frames). The audio thread gives the
-// execution lock up meanwhile, and no preemption point inside takes it back.
-void sub_656d70(win32::WinApplication* app, x86::CPU& cpu)
+// With the SND mutex held.
+bool tickAudited(Audit& audit)
+{
+    const reg32 hooks = rc::ld8(TickHookCount);
+    if (x86::sreg8(hooks) > 0)
+        return audit.fail("tick hooks", hooks);
+    if (rc::ld32(FreeHook) != PoolFree)
+        return audit.fail("free hook", rc::ld32(FreeHook));
+    const reg32 handles = rc::ld32(Handles);
+    const reg32 drivers = rc::ld32(Drivers);
+    const reg32 voices = rc::ld32(VoiceArray);
+    const reg32 voiceCount = rc::ld8(VoiceCount);
+    const x86::sreg32 count = x86::sreg16(rc::ld16(HandleCount));
+    int budget = MaxModules;
+    for (x86::sreg32 i = 0; i < count; ++i)
+    {
+        const reg32 handle = handles + reg32(i) * HandleSize;
+        if (rc::ld8(handle + 0x69) != HandleInUse)
+            continue;
+        const reg32 id = rc::ld32(handle);
+        if (x86::sreg32(id) >= 0 && (id & 0xff) != reg32(i))
+            return audit.fail("handle id", id);
+        const reg32 kind = rc::ld16(handle + 0x24);
+        if (!(kind & SoftwareHandle))
+            return audit.fail("handle kind", kind);
+        const reg32 driver = drivers + reg32(i) * DriverSize;
+        if (rc::ld32(driver + 0xec) != SoftwareVolume)
+            return audit.fail("handle volume", rc::ld32(driver + 0xec));
+        if (rc::ld32(driver + 0xe8) != SoftwareStop)
+            return audit.fail("handle stop", rc::ld32(driver + 0xe8));
+        if (rc::ld32(driver + 0xc8) != driver + DriverVoices)
+            return audit.fail("handle voice list", rc::ld32(driver + 0xc8));
+        // The stop of a handle of kind 2 without kind 1 walks the effect list at driver +0xE4.
+        if ((kind & 3) == 2 && rc::ld32(driver + 0xe4))
+            return audit.fail("handle effects", rc::ld32(driver + 0xe4));
+        const reg32 listed = rc::ld8(driver + DriverVoices);
+        for (reg32 k = 0; k < listed; ++k)
+        {
+            const reg32 voice = reg32(x86::sreg16(rc::ld16(driver + DriverVoices + 4 + 2 * k)));
+            if (voice >= voiceCount)
+                return audit.fail("handle voice", voice);
+            if (!teardownsKnown(voices + voice * VoiceSize, budget, audit))
+                return false;
+        }
+    }
+    return true;
+}
+
+// ---- Millisecond callbacks ------------------------------------------------------------------------------------
+//
+// 0x64E2F0 runs the callback list 0x713CA8 once per new value of the millisecond count. The one callback the code
+// links there is the bank tick 0x652960 (by the bank loader), which runs the routines linked at 0x713C70: code in
+// the loaded banks, run by bankcode.cpp, whose library calls outside its audited set take the execution lock again.
+
+const reg32 Callbacks       = 0x713ca8;     // nodes: +0 next, +8 function, +0xC argument
+const reg32 BankTick        = 0x652960;
+const reg32 BankRoutines    = 0x713c70;     // nodes: +0 next, +8 routine, +0xC argument
+const int   MaxNodes        = 4096;
+
+// With the SND mutex held.
+bool callbacksAudited(win32::WinApplication* app, Audit& audit)
+{
+    int budget = MaxNodes;
+    for (reg32 node = rc::ld32(Callbacks); node; node = rc::ld32(node))
+    {
+        if (--budget < 0)
+            return audit.fail("callback count", node);
+        if (rc::ld32(node + 8) != BankTick)
+            return audit.fail("callback", rc::ld32(node + 8));
+    }
+    // A routine is bank code: no translated function has its address.
+    for (reg32 node = rc::ld32(BankRoutines); node; node = rc::ld32(node))
+    {
+        if (--budget < 0)
+            return audit.fail("bank callback count", node);
+        if (app->getMethodName(rc::ld32(node + 8)))
+            return audit.fail("bank callback", rc::ld32(node + 8));
+    }
+    return true;
+}
+
+// ---- Stream notifications -------------------------------------------------------------------------------------
+//
+// 0x655880 delivers the notifications the stream modules queued during the render to the callbacks the game gave
+// each stream (+0x54, +0x58 of the stream at 0x7163DC): game code, so a delivery takes the execution lock.
+
+const reg32 Notifications   = 0x7160d8;     // count; entries of 8 bytes from 0x7160DC
+
+}
+
+// Render loop (pointer to the output pointer, frames): SND ticks of 10 ms, the millisecond callbacks, the voice
+// render and the stream notifications, until the frames are written. The audio thread runs it with the SND mutex
+// and gives the execution lock up meanwhile; the parts below take it again for a call that fails its audit.
+void sub_654050(win32::WinApplication* app, x86::CPU& cpu)
 {
     const reg32 slot = cpu.efs + win32::teb::HostLock;
     win32::Mutex* const lock = app->getMemory<win32::Mutex*>(slot);
+    if (!lock || mixer::unlocked(cpu))
+    {
+        sub_654050_guest(app, cpu);
+        return;
+    }
+    const bool timed = pf::perf::enabled();
+    const uint32_t start = timed ? pf::perf::now() : 0;
+    app->unlockContext(cpu);
+    app->getMemory<win32::Mutex*>(slot) = nullptr;
+    mixer::s_lock = lock;
+    mixer::s_thread.store(cpu.efs, std::memory_order_relaxed);
+    sub_654050_guest(app, cpu);
+    mixer::s_thread.store(0, std::memory_order_relaxed);
+    app->getMemory<win32::Mutex*>(slot) = lock;
+    if (timed)
+    {
+        pf::perf::audio(pf::perf::AudioLoopsUnlocked, 1);
+        pf::perf::audio(pf::perf::AudioLoopUnlockedUs, pf::perf::now() - start);
+    }
+    app->lockContext(cpu);
+}
+
+// SND tick.
+void sub_64e330(win32::WinApplication* app, x86::CPU& cpu)
+{
+    Audit audit;
+    if (!mixer::unlocked(cpu) || tickAudited(audit))
+    {
+        sub_64e330_guest(app, cpu);
+        return;
+    }
+    mixer::Locked locked(app, cpu);
+    sub_64e330_guest(app, cpu);
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioTicksLocked, 1);
+        pf::perf::audioLocked(audit.reason, audit.address);
+    }
+}
+
+// Millisecond callbacks.
+void sub_64e2f0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    Audit audit;
+    if (!mixer::unlocked(cpu) || callbacksAudited(app, audit))
+    {
+        sub_64e2f0_guest(app, cpu);
+        return;
+    }
+    mixer::Locked locked(app, cpu);
+    sub_64e2f0_guest(app, cpu);
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioCallbacksLocked, 1);
+        pf::perf::audioLocked(audit.reason, audit.address);
+    }
+}
+
+// Stream notifications: without any queued, the guest only clears the count.
+void sub_655880(win32::WinApplication* app, x86::CPU& cpu)
+{
+    if (!mixer::unlocked(cpu) || x86::sreg32(rc::ld32(Notifications)) <= 0)
+    {
+        sub_655880_guest(app, cpu);
+        return;
+    }
+    mixer::Locked locked(app, cpu);
+    sub_655880_guest(app, cpu);
+    if (pf::perf::enabled())
+        pf::perf::audio(pf::perf::AudioNotificationsLocked, 1);
+}
+
+// Renders frames into the DirectSound buffer: (pointer to the output pointer, frames). In the render loop without
+// the execution lock it runs as it is when the audit passes, else with the lock; no preemption point inside takes
+// the lock back.
+void sub_656d70(win32::WinApplication* app, x86::CPU& cpu)
+{
     const bool timed = pf::perf::enabled();
     const uint32_t start = timed ? pf::perf::now() : 0;
     Audit audit;
-    if (!lock || !renderAudited(audit))
+    if (mixer::unlocked(cpu) && renderAudited(audit))
     {
         sub_656d70_guest(app, cpu);
         if (timed)
         {
-            pf::perf::audio(pf::perf::AudioRendersLocked, 1);
-            pf::perf::audio(pf::perf::AudioRenderLockedUs, pf::perf::now() - start);
-            pf::perf::renderLocked(lock ? audit.reason : "no lock", audit.address);
+            pf::perf::audio(pf::perf::AudioRendersUnlocked, 1);
+            pf::perf::audio(pf::perf::AudioRenderUnlockedUs, pf::perf::now() - start);
         }
         return;
     }
-    app->unlockContext(cpu);
-    app->getMemory<win32::Mutex*>(slot) = nullptr;
+    const char* const reason = mixer::unlocked(cpu) ? audit.reason : "outside the render loop";
+    mixer::Locked locked(app, cpu);
     sub_656d70_guest(app, cpu);
-    app->getMemory<win32::Mutex*>(slot) = lock;
     if (timed)
     {
-        pf::perf::audio(pf::perf::AudioRendersUnlocked, 1);
-        pf::perf::audio(pf::perf::AudioRenderUnlockedUs, pf::perf::now() - start);
+        pf::perf::audio(pf::perf::AudioRendersLocked, 1);
+        pf::perf::audio(pf::perf::AudioRenderLockedUs, pf::perf::now() - start);
+        pf::perf::audioLocked(reason, audit.address);
     }
-    app->lockContext(cpu);
 }
 
 // ---- x87 kernels ----------------------------------------------------------------------------------------------

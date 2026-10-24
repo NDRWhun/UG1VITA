@@ -86,7 +86,13 @@ enum Audio
     AudioRenderUnlockedUs,
     AudioRendersLocked,         // voice renders under the lock (the audit failed)
     AudioRenderLockedUs,
-    AudioBankRuns,              // bank routines run (under the lock)
+    AudioLoopsUnlocked,         // runs of the render loop 0x654050 without the execution lock
+    AudioLoopUnlockedUs,        // their time, the parts that took the lock again included
+    AudioTicksLocked,           // SND ticks (0x64E330) that took the lock again (the audit failed)
+    AudioCallbacksLocked,       // millisecond callback walks (0x64E2F0) that took the lock again
+    AudioNotificationsLocked,   // stream notification deliveries (0x655880) that took the lock again
+    AudioLibraryLocked,         // library calls of bank routines that took the lock again
+    AudioBankRuns,              // bank routines run
     AudioBankUs,                // their time, called library functions included
     AudioBankInstructions,      // bank instructions interpreted
     AudioBankDecodes,           // bank instructions decoded (not taken from the cache)
@@ -159,9 +165,9 @@ void upload(Upload counter, uint32_t value);
 void guestBlock(Alloc kind, uint32_t bytes, uint32_t microseconds, uint32_t searchUs);
 // Any thread: adds to an audio counter.
 void audio(Audio counter, uint32_t value);
-// Audio thread: a voice render kept the execution lock, with the failed audit check (a string literal) and the
-// guest address it failed on.
-void renderLocked(const char* reason, uint32_t address);
+// Audio thread: a voice render or a part of the SND tick kept the execution lock, with the failed audit check (a
+// string literal) and the guest address it failed on.
+void audioLocked(const char* reason, uint32_t address);
 // Game thread: kept linear texture copies at the moment.
 void uploadCache(uint32_t bytes, uint32_t levels);
 // Render thread, after each game frame it queued, with the timing log on or a frame observer set: calls the observer

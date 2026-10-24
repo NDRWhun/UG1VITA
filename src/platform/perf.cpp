@@ -68,15 +68,15 @@ AllocStats s_allocs[AllocCount];
 const char* const s_allocNames[AllocCount] = { "other", "virtual", "heap", "chunk", "view", "texlock", "buffer",
                                                "thread", "sound" };
 
-// Reasons of voice renders under the lock, with the guest address of the first failure.
-struct LockedRender
+// Reasons of voice renders and SND tick parts under the lock, with the guest address of the first failure.
+struct LockedAudio
 {
     std::atomic<const char*> reason{nullptr};
     std::atomic<uint32_t> address{0};
     std::atomic<uint32_t> count{0};
 };
-const int LockedRenderSlots = 6;
-LockedRender s_lockedRenders[LockedRenderSlots];
+const int LockedAudioSlots = 10;
+LockedAudio s_lockedAudio[LockedAudioSlots];
 
 // Timer callbacks by guest address; written by the timer service thread.
 struct TimerStats
@@ -230,9 +230,9 @@ void logHolders(uint32_t elapsed, uint32_t frames)
 }
 
 // Fifth log line, per interval: EA SND voice renders without and with the execution lock (count, ms per frame,
-// why the lock was kept), the bank routines (runs, ms per frame, translated and interpreted runs, instructions
-// interpreted, decodes) and the SND output
-// module's 16-bit saturation.
+// why the lock was kept, for the tick parts too), the render loop without the lock (runs, ms per frame, the parts
+// that took it again), the bank routines (runs, ms per frame, translated and interpreted runs, instructions
+// interpreted, decodes) and the SND output module's 16-bit saturation.
 void logAudio(uint32_t frames)
 {
     uint32_t a[AudioCount];
@@ -243,7 +243,7 @@ void logAudio(uint32_t frames)
                 msPerFrame(a[AudioRenderUnlockedUs], frames), unsigned(a[AudioRendersLocked]),
                 msPerFrame(a[AudioRenderLockedUs], frames));
     bool first = true;
-    for (LockedRender& locked : s_lockedRenders)
+    for (LockedAudio& locked : s_lockedAudio)
     {
         const char* reason = locked.reason.load(std::memory_order_acquire);
         if (!reason)
@@ -255,7 +255,11 @@ void logAudio(uint32_t frames)
                     unsigned(locked.address.load(std::memory_order_relaxed)), unsigned(count));
         first = false;
     }
-    line.append(") | bank code %u runs %.2f ms (%u native %u interpreted) %u instructions %u decodes | output %u"
+    line.append(") | loop unlocked %u %.2f ms, locked ticks %u callbacks %u notifications %u library calls %u",
+                unsigned(a[AudioLoopsUnlocked]), msPerFrame(a[AudioLoopUnlockedUs], frames),
+                unsigned(a[AudioTicksLocked]), unsigned(a[AudioCallbacksLocked]),
+                unsigned(a[AudioNotificationsLocked]), unsigned(a[AudioLibraryLocked]));
+    line.append(" | bank code %u runs %.2f ms (%u native %u interpreted) %u instructions %u decodes | output %u"
                 " samples saturated %u high %u low", unsigned(a[AudioBankRuns]), msPerFrame(a[AudioBankUs], frames),
                 unsigned(a[AudioBankNative]), unsigned(a[AudioBankInterpreted]), unsigned(a[AudioBankInstructions]),
                 unsigned(a[AudioBankDecodes]), unsigned(a[AudioOutputSamples]), unsigned(a[AudioSaturatedHigh]),
@@ -399,9 +403,9 @@ void audio(Audio counter, uint32_t value)
 }
 
 // The audio thread only.
-void renderLocked(const char* reason, uint32_t address)
+void audioLocked(const char* reason, uint32_t address)
 {
-    for (LockedRender& locked : s_lockedRenders)
+    for (LockedAudio& locked : s_lockedAudio)
     {
         const char* current = locked.reason.load(std::memory_order_relaxed);
         if (!current)

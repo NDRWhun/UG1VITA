@@ -65,7 +65,12 @@ NATIVE_OVERRIDES = [
     0x5abdaf,   # D3DXVec3Transform
     0x5ac443,   # D3DXVec4Transform
     0x5ac8e5,   # D3DXMatrixTranspose
-    # EA SND mixer (src/nfsu/audio_mixer.cpp): the voice render without the execution lock, its x87 kernels.
+    # EA SND mixer (src/nfsu/audio_mixer.cpp): the render loop without the execution lock, the parts that check
+    # what they reach, the x87 kernels of the voice render.
+    0x654050,   # render loop: ticks, millisecond callbacks, voice render and stream notifications
+    0x64e330,   # SND tick
+    0x64e2f0,   # millisecond callbacks (the bank tick)
+    0x655880,   # stream notifications to the game's callbacks
     0x656d70,   # render frames into the DirectSound buffer
     0x65a880,   # dst += src * gain
     0x65a9a0,   # 16-bit -> float

@@ -8,6 +8,7 @@
 // the instruction that follows, and reused while their bytes are unchanged. shadow_bank=1 runs each translated
 // routine both ways, call by call, and compares registers, flags, stores and calls.
 
+#include "audio_mixer.h"
 #include "bankcode.h"
 #include "banknative.h"
 
@@ -19,8 +20,10 @@
 #include <recomp.h>
 #include <x86.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -154,8 +157,9 @@ struct Routine
     x86::reg32               seenBank = 0;
 };
 
-// Routines by begin and end. Only threads holding the execution lock run bank code, so no lock here; a routine
-// that is running stays put however others change the cache at preemption points.
+// Routines by begin and end. Bank code runs only with the SND mutex (0x713C50) held: from the bank tick 0x652960,
+// on the audio thread in the render loop without the execution lock (audio_mixer.cpp), and from SND calls of the
+// game. So no lock here; a routine that is running stays put however others change the cache at preemption points.
 std::unordered_map<uint64_t, std::unique_ptr<Routine>> s_routines;
 const size_t MaxRoutines = 256;
 const size_t MaxRoutineBytes = 0x10000;
@@ -638,6 +642,39 @@ private:
     x86::reg32             m_decoded = 0;
 };
 
+// Library functions (table 0x6E9AE8) a routine calls without the execution lock in the render loop: they read and
+// write only the data their arguments point at (the routine's and the bank's), the SND random generator state
+// (0x6511B0) and constants, and call nothing else. The others (instance teardown 0x64C690 with listener callbacks,
+// the game's allocator and the SND mutex, sound starts 0x64D860, the listener walks 0x64C800, 0x64C870, 0x64C9B0)
+// take the lock for the call.
+const x86::reg32 s_unlockedLibrary[] = {
+    0x64c650, 0x64c660, 0x64c670, 0x64c680, 0x64ca00, 0x64ca50, 0x64ca80, 0x64cb30, 0x64cb90, 0x64cbd0, 0x64cc20,
+    0x64cc60, 0x64ccc0, 0x64cdd0, 0x64cef0, 0x64cf90, 0x64cfb0, 0x64cff0, 0x64d020, 0x64d030, 0x64d060, 0x64d070,
+    0x64d0b0, 0x64d0d0, 0x64d0f0, 0x64d100, 0x64d110, 0x64d120, 0x64d140, 0x64d960, 0x64da70, 0x64db20, 0x64db50,
+    0x64db70, 0x64db90,
+};
+
+// A routine's call of cpu.ip. In the render loop without the execution lock, a call of a translated function
+// outside the list above runs with the lock; calls of bank code run as they are.
+void callTarget(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const x86::reg32 target = cpu.ip;
+    if (mixer::unlocked(cpu)
+        && !std::binary_search(std::begin(s_unlockedLibrary), std::end(s_unlockedLibrary), target)
+        && app->getMethodName(target))
+    {
+        mixer::Locked locked(app, cpu);
+        app->dynamic_call(target, cpu);
+        if (pf::perf::enabled())
+        {
+            pf::perf::audio(pf::perf::AudioLibraryLocked, 1);
+            pf::perf::audioLocked("library call", target);
+        }
+        return;
+    }
+    app->dynamic_call(target, cpu);
+}
+
 void countInterpreted(const Interpreter& interpreter)
 {
     if (pf::perf::enabled())
@@ -654,7 +691,7 @@ void interpret(win32::WinApplication* app, x86::CPU& cpu, const Range& range, Ro
     interpreter.begin(cpu.ip);
     while (interpreter.segment())
     {
-        app->dynamic_call(cpu.ip, cpu);
+        callTarget(app, cpu);
         if (cpu.terminate)
             break;
         interpreter.resume();
@@ -742,7 +779,7 @@ void runNative(win32::WinApplication* app, x86::CPU& cpu, const Translation& t, 
         resume = t.run(cpu, memory, range.begin, range.bank, resume);
         if (resume == Returned)
             break;
-        app->dynamic_call(cpu.ip, cpu);
+        callTarget(app, cpu);
         if (cpu.terminate)
             break;
     }
@@ -874,7 +911,7 @@ void runShadow(win32::WinApplication* app, x86::CPU& cpu, const Translation& t, 
         }
         if (!called)
             break;
-        app->dynamic_call(cpu.ip, cpu);
+        callTarget(app, cpu);
         if (cpu.terminate)
             break;
         interpreter.resume();
@@ -884,7 +921,7 @@ void runShadow(win32::WinApplication* app, x86::CPU& cpu, const Translation& t, 
         pf::logInfo("shadow_bank: %u runs compared, %u differ", unsigned(s.runs), unsigned(s.differing));
 }
 
-// Bank routines running on the thread holding the execution lock (perf_log times the outermost one).
+// Bank routines running (perf_log times the outermost one).
 int s_depth = 0;
 
 // The range resolve found for the address dynamic_call is about to run.
