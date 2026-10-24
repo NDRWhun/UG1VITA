@@ -349,6 +349,7 @@ private:
 
     // Render thread (and workers, read only while they record).
     std::atomic<bool>           m_precomputed{true};    // precomputed states and draws (setting gxm_precomputed)
+    bool                        m_cullSwap = false;     // D3DCULL_CW drawn as SCE_GXM_CULL_CCW and back (cull_swap)
     Recorder                    m_main;                 // the immediate context
     std::vector<DrawPrograms>   m_programs;             // per draw of the frame being drawn
     std::vector<ScenePlan>      m_plan;
