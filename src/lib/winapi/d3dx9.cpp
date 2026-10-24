@@ -209,6 +209,17 @@ const int8_t s_samplerParams[EffectCount][render::MaxSamplers] = {
     { PFilterTexture0, PFilterTexture1, PFilterTexture2, PFilterTexture3 },
 };
 
+// Sampler stage of each kind's samplers (ps_1_1: tN reads stage N; car samples the diffuse map with t1).
+const int8_t s_samplerStages[EffectCount][render::MaxSamplers] = {
+    { 0, -1, -1, -1 },
+    { 0, 1, 2, -1 },
+    { 0, 1, -1, -1 },
+    { 0, 1, 2, 3 },
+    { 0, -1, -1, -1 },
+    { 1, 0, -1, -1 },
+    { 0, 1, 2, 3 },
+};
+
 uint32_t samplerCount(EffectKind kind, uint32_t pass)
 {
     switch (kind)
@@ -423,6 +434,12 @@ void markEffectValuesDirty()
             v->markDirty();
 }
 
+int effectSamplerStage(const EffectDraw& effect, uint32_t slot)
+{
+    const EffectKind kind = effect.kind < EffectCount ? EffectKind(effect.kind) : EffectFilter;
+    return slot < samplerCount(kind, effect.pass) && slot < render::MaxSamplers ? s_samplerStages[kind][slot] : -1;
+}
+
 uint32_t effectBlockFloats()
 {
     initOffsets();
@@ -558,19 +575,25 @@ void effectVertexConstants(const EffectDraw& effect, const float* own, const flo
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
 {
     const View v(effect, own, shared);
+    // ps_1_1 constant registers hold [-1, 1].
+    auto copy = [&v](float* to, int p, uint32_t n)
+    {
+        const float* from = v.floats(p);
+        for (uint32_t i = 0; i < n; ++i)
+            to[i] = from[i] < -1.0f ? -1.0f : from[i] > 1.0f ? 1.0f : from[i];
+    };
     switch (v.kind)
     {
     case EffectWorldHeadlight:
     case EffectWorldHeadlightReflect:
-        memcpy(reinterpret_cast<render::WorldHeadlightFragmentConstants*>(out)->headlightColor,
-               v.floats(PHeadlightColor), 16);
+        copy(reinterpret_cast<render::WorldHeadlightFragmentConstants*>(out)->headlightColor, PHeadlightColor, 4);
         break;
     case EffectCar:
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, v.floats(PEnvmapMin), 16);
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, v.floats(PEnvmapRange), 16);
+        copy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, PEnvmapMin, 4);
+        copy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, PEnvmapRange, 4);
         break;
     case EffectFilter:
-        memcpy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, v.floats(PFilterWeights), 64);
+        copy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, PFilterWeights, 16);
         break;
     default:
         break;
@@ -823,6 +846,20 @@ HRESULT Effect::SetTexture(WinApplication* app, x86::CPU& cpu, x86::reg32 handle
     if (slot)
         slot->release();
     slot = texture;
+    // The active pass samples the new value from now on (it was set after any device SetTexture of the stage).
+    if (const EffectPass* active = m_device->effectPass())
+    {
+        const Effect* e = static_cast<const Effect*>(active);
+        if (&e->values(p) == &values(p))
+        {
+            const uint32_t count = samplerCount(e->m_kind, e->m_pass);
+            for (uint32_t i = 0; i < count && i < render::MaxSamplers; ++i)
+            {
+                if (s_samplerParams[e->m_kind][i] == p)
+                    m_device->effectTextureApplied(uint32_t(s_samplerStages[e->m_kind][i]));
+            }
+        }
+    }
     return D3D_OK;
 }
 
@@ -918,6 +955,7 @@ HRESULT Effect::Pass(WinApplication* app, x86::CPU& cpu, UINT pass)
     // Parameters keep applying while the pass is active (9.0b): draws read them as they are then.
     m_pass = pass;
     m_device->setEffectPass(this);
+    m_device->effectPassApplied();
     return D3D_OK;
 }
 

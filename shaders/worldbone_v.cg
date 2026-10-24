@@ -22,11 +22,14 @@ void main(
     float2 out vTex0 : TEXCOORD0)
 {
     float4 position = float4(aPosition, 1.0);
-    int i0 = int(aIndex.x + 0.5) * 4;
-    int i1 = int(aIndex.y + 0.5) * 4;
-    int i2 = int(aIndex.z + 0.5) * 4;
-    float4 p = bone(position, i0, uBones) * aWeight.x + bone(position, i1, uBones) * aWeight.y
-             + bone(position, i2, uBones) * aWeight.z;
+    // Indices clamped to the 16 matrices; a bone of weight 0 adds nothing, whatever its matrix holds.
+    float3 index = clamp(aIndex + 0.5, 0.0, 15.0);
+    int i0 = int(index.x) * 4;
+    int i1 = int(index.y) * 4;
+    int i2 = int(index.z) * 4;
+    float4 p = aWeight.x != 0.0 ? bone(position, i0, uBones) * aWeight.x : float4(0.0);
+    p += aWeight.y != 0.0 ? bone(position, i1, uBones) * aWeight.y : float4(0.0);
+    p += aWeight.z != 0.0 ? bone(position, i2, uBones) * aWeight.z : float4(0.0);
 
     // The normal goes through the first matrix only.
     float3 n = aNormal.x * uBones[i0].xyz + aNormal.y * uBones[i0 + 1].xyz + aNormal.z * uBones[i0 + 2].xyz;

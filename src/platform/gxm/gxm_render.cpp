@@ -368,6 +368,9 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     m_uploadDone = new CondVar("gxm_uploads", *m_uploadLock);
     m_precomputed = Config::getBool("gxm_precomputed", true);
     logInfo("gxm: %s draws", m_precomputed ? "precomputed" : "immediate");
+    m_cullSwap = Config::getBool("cull_swap", false);
+    if (m_cullSwap)
+        logInfo("gxm: cull winding swapped (cull_swap=1)");
     m_textureHeap = new GpuHeap("gxm_textures", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 16 * 1024 * 1024,
                                 SCE_GXM_MEMORY_ATTRIB_RW);
     m_bufferHeap = new GpuHeap("gxm_buffers", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, 8 * 1024 * 1024,
@@ -690,6 +693,8 @@ render::TextureStorage* FrameRenderer::createTexture(const render::TextureDesc& 
         sceGxmTextureInitCube(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
     else
         sceGxmTextureInitSwizzled(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
+    // LOD bias 0, the Direct3D default: the field holds bias * 8 + 31.
+    sceGxmTextureSetLodBias(&t->texture, 31);
     if (desc.target)
     {
         // Cube target: each face a swizzled colour surface.
@@ -1153,8 +1158,11 @@ void FrameRenderer::setFixedState(ContextState& c, SceGxmContext* context, const
                                                                                : SCE_GXM_DEPTH_WRITE_DISABLED);
     }
     if (first || s.cullMode != c.last.cullMode)
-        sceGxmSetCullMode(context, s.cullMode == 2 ? SCE_GXM_CULL_CW : s.cullMode == 3 ? SCE_GXM_CULL_CCW
-                                                                                        : SCE_GXM_CULL_NONE);
+    {
+        const SceGxmCullMode cw = m_cullSwap ? SCE_GXM_CULL_CCW : SCE_GXM_CULL_CW;
+        const SceGxmCullMode ccw = m_cullSwap ? SCE_GXM_CULL_CW : SCE_GXM_CULL_CCW;
+        sceGxmSetCullMode(context, s.cullMode == 2 ? cw : s.cullMode == 3 ? ccw : SCE_GXM_CULL_NONE);
+    }
 }
 
 void FrameRenderer::draw(Recorder& r, const render::Frame& frame, uint32_t index)
