@@ -112,29 +112,21 @@ struct Settings
 {
     bool native;
     bool shadow;
+    bool defer;     // matrix products multiplied by the render thread
 };
 
 const Settings& settings()
 {
     static const Settings s = []
     {
-        const Settings r = { pf::Config::getBool("draw_native", false), pf::Config::getBool("shadow_draw", false) };
-        pf::logInfo("draw: setup functions %s%s", r.native ? "native" : "guest",
-                    r.native && r.shadow ? ", shadow compare" : "");
+        const Settings r = { pf::Config::getBool("draw_native", false), pf::Config::getBool("shadow_draw", false),
+                             pf::Config::getBool("wvp_defer", true) };
+        pf::logInfo("draw: setup functions %s%s%s", r.native ? "native" : "guest",
+                    r.native && r.shadow ? ", shadow compare" : "",
+                    r.native && r.defer ? ", matrix products on the render thread" : "");
         return r;
     }();
     return s;
-}
-
-// Guest stores of the native code; the shadow compare logs their addresses.
-bool s_logStores = false;
-std::vector<reg32> s_stores;
-
-inline void store(reg32 address, reg32 value)
-{
-    if (__builtin_expect(s_logStores, 0))
-        s_stores.push_back(address);
-    rc::st32(address, value);
 }
 
 // _ftol2 at a guest call: the value goes to the x87 slot above the stack, edx:eax gets it truncated to an integer.
@@ -311,14 +303,22 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
     const reg32 kind = rc::ld32(group);
     store(LastGroup, group);
     store(LastWorld, world);
+    const bool defer = settings().defer;
     float a[16], b[16], m[16];
     if (kind == 5 && rc::ld32(EffectMatricesOn))
     {
         loadMatrix(world, a);
         loadMatrix(record, b);
-        bridge::matrixMultiply(a, b, m);
         const reg32 g = rc::ld32(CurrentGroup);
-        bridge::effectSetMatrix(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + 0x24), m);
+        if (defer)
+        {
+            bridge::effectSetMatrixProduct(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + 0x24), a, b, nullptr);
+        }
+        else
+        {
+            bridge::matrixMultiply(a, b, m);
+            bridge::effectSetMatrix(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + 0x24), m);
+        }
     }
     if (rc::ld32(TransformsOn))
     {
@@ -332,11 +332,18 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
     {
         loadMatrix(world, a);
         loadMatrix(record + 0x80, b);
-        bridge::matrixMultiply(a, b, m);
         const reg32 g = rc::ld32(CurrentGroup);
         const reg32 effect = rc::ld32(g + 0x18);
         ecx = rc::ld32(g + 0x1c);
-        eax = bridge::effectSetMatrix(app, cpu, effect, ecx, m);
+        if (defer)
+        {
+            eax = bridge::effectSetMatrixProduct(app, cpu, effect, ecx, a, b, nullptr);
+        }
+        else
+        {
+            bridge::matrixMultiply(a, b, m);
+            eax = bridge::effectSetMatrix(app, cpu, effect, ecx, m);
+        }
         edx = rc::ld32(effect);
     }
     cpu.eax = eax;
@@ -790,12 +797,19 @@ void reflectionNative(WinApplication* app, x86::CPU& cpu)
     float a[16], b[16], m[16];
     loadMatrix(world, a);
     loadMatrix(viewProjection, b);
-    bridge::matrixMultiply(a, b, m);
-    bridge::matrixMultiply(m, bias, m);
     const reg32 group = rc::ld32(CurrentGroup);
     if (rc::ld32(group + 0xc) == 0)
     {
-        bridge::effectSetMatrix(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0x38), m);
+        if (settings().defer)
+        {
+            bridge::effectSetMatrixProduct(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0x38), a, b, bias);
+        }
+        else
+        {
+            bridge::matrixMultiply(a, b, m);
+            bridge::matrixMultiply(m, bias, m);
+            bridge::effectSetMatrix(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0x38), m);
+        }
     }
     else
     {
@@ -954,19 +968,7 @@ void materialNative(WinApplication* app, x86::CPU& cpu)
 
 // ---- dispatch, shadow compare and perf ----
 
-enum Leaf
-{
-    LeafWorld, LeafBlend, LeafAlphaTest, LeafPackets, LeafNode, LeafGroup, LeafBones, LeafModel, LeafLights,
-    LeafReflection, LeafMaterial, LeafCount
-};
-
 typedef void (*Function)(WinApplication*, x86::CPU&);
-
-enum : uint8_t
-{
-    RegEax = 1, RegEcx = 2, RegEdx = 4, RegEbx = 8, RegEsp = 0x10, RegEbp = 0x20, RegEsi = 0x40, RegEdi = 0x80,
-    FlagCf = 1, FlagPf = 2, FlagAf = 4, FlagZf = 8, FlagFpu = 0x40
-};
 
 // The registers and flags the callers read after each function.
 struct LeafInfo
@@ -990,12 +992,6 @@ const LeafInfo s_leaves[LeafCount] = {
     { "lights 0x40f7c0", &sub_40f7c0_guest, &lightsNative, 0xfc, FlagAf | FlagFpu },
     { "reflection 0x4100a0", &sub_4100a0_guest, &reflectionNative, 0xfc, FlagAf | FlagFpu },
     { "material 0x40fae0", &sub_40fae0_guest, &materialNative, 0xfc, FlagAf | FlagFpu },
-};
-
-struct Span
-{
-    reg32 address;
-    reg32 size;
 };
 
 // Guest memory each function may store to, besides its stack frame.
@@ -1052,81 +1048,6 @@ struct Shadow
 
 Shadow s_shadow;
 
-void snapshot(const std::vector<Span>& spans, std::vector<reg8>& bytes)
-{
-    bytes.clear();
-    for (const Span& s : spans)
-        bytes.insert(bytes.end(), rc::host(s.address), rc::host(s.address) + s.size);
-}
-
-void restoreSpans(const std::vector<Span>& spans, const std::vector<reg8>& bytes)
-{
-    size_t at = 0;
-    for (const Span& s : spans)
-    {
-        memcpy(rc::host(s.address), bytes.data() + at, s.size);
-        at += s.size;
-    }
-}
-
-bool sameState(const LeafInfo& info, const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
-{
-    const struct { const char* name; uint8_t bit; reg32 a, b; } regs[] = {
-        {"eax", RegEax, g.eax, n.eax}, {"ecx", RegEcx, g.ecx, n.ecx}, {"edx", RegEdx, g.edx, n.edx},
-        {"ebx", RegEbx, g.ebx, n.ebx}, {"esp", RegEsp, g.esp, n.esp}, {"ebp", RegEbp, g.ebp, n.ebp},
-        {"esi", RegEsi, g.esi, n.esi}, {"edi", RegEdi, g.edi, n.edi},
-    };
-    for (const auto& r : regs)
-    {
-        if ((info.registers & r.bit) && r.a != r.b)
-        {
-            snprintf(text, size, "%s guest 0x%08x native 0x%08x", r.name, unsigned(r.a), unsigned(r.b));
-            return false;
-        }
-    }
-    const struct { const char* name; uint8_t bit; bool a, b; } flags[] = {
-        {"cf", FlagCf, bool(g.flags.cf), bool(n.flags.cf)}, {"pf", FlagPf, bool(g.flags.pf), bool(n.flags.pf)},
-        {"af", FlagAf, bool(g.flags.af), bool(n.flags.af)}, {"zf", FlagZf, bool(g.flags.zf), bool(n.flags.zf)},
-    };
-    for (const auto& f : flags)
-    {
-        if ((info.flags & f.bit) && f.a != f.b)
-        {
-            snprintf(text, size, "%s guest %d native %d", f.name, int(f.a), int(f.b));
-            return false;
-        }
-    }
-    if (g.fpu.count != n.fpu.count)
-    {
-        snprintf(text, size, "x87 depth guest %u native %u", unsigned(g.fpu.count), unsigned(n.fpu.count));
-        return false;
-    }
-    if ((info.flags & FlagFpu) && (g.fpu.status.word & 0x4500) != (n.fpu.status.word & 0x4500))
-    {
-        snprintf(text, size, "x87 status guest 0x%04x native 0x%04x", unsigned(g.fpu.status.word),
-                 unsigned(n.fpu.status.word));
-        return false;
-    }
-    return true;
-}
-
-bool sameCalls(const bridge::Capture& c, char* text, size_t size)
-{
-    if (c.differs)
-    {
-        snprintf(text, size, "device call %u: guest %s, native %s, word %u guest 0x%08x native 0x%08x",
-                 unsigned(c.differingCall), bridge::methodName(c.expected), bridge::methodName(c.got),
-                 unsigned(c.differingWord), unsigned(c.expectedWord), unsigned(c.gotWord));
-        return false;
-    }
-    if (c.replayed != c.calls.size())
-    {
-        snprintf(text, size, "device calls guest %u native %u", unsigned(c.calls.size()), unsigned(c.replayed));
-        return false;
-    }
-    return true;
-}
-
 void shadow(Leaf leaf, WinApplication* app, x86::CPU& cpu)
 {
     Shadow& s = s_shadow;
@@ -1172,12 +1093,12 @@ void shadow(Leaf leaf, WinApplication* app, x86::CPU& cpu)
 
     restoreSpans(s.spans, s.before);
     cpu = entry;
-    s_stores.clear();
-    s_logStores = true;
+    g_stores.clear();
+    g_logStores = true;
     bridge::begin(s.capture, bridge::Capture::Replay);
     info.native(app, cpu);
     bridge::end();
-    s_logStores = false;
+    g_logStores = false;
     const x86::CPU native = cpu;
     snapshot(s.spans, s.nativeAfter);
     restoreSpans(s.spans, s.guestAfter);
@@ -1185,37 +1106,9 @@ void shadow(Leaf leaf, WinApplication* app, x86::CPU& cpu)
 
     ++s.calls;
     char text[200] = {};
-    bool same = sameCalls(s.capture, text, sizeof(text)) && sameState(info, guest, native, text, sizeof(text));
-    if (same)
-    {
-        size_t at = 0;
-        for (const Span& span : s.spans)
-        {
-            for (reg32 i = 0; same && i < span.size; ++i, ++at)
-            {
-                if (s.guestAfter[at] != s.nativeAfter[at])
-                {
-                    snprintf(text, sizeof(text), "byte at 0x%08x guest 0x%02x native 0x%02x",
-                             unsigned(span.address + i), unsigned(s.guestAfter[at]), unsigned(s.nativeAfter[at]));
-                    same = false;
-                }
-            }
-            if (!same)
-                break;
-        }
-    }
-    for (size_t k = 0; same && k < s_stores.size(); ++k)
-    {
-        const reg32 address = s_stores[k];
-        bool inside = false;
-        for (const Span& span : s.spans)
-            inside |= address - span.address < span.size && address + 4 - span.address <= span.size;
-        if (!inside)
-        {
-            snprintf(text, sizeof(text), "native stored at 0x%08x outside the guest's stores", unsigned(address));
-            same = false;
-        }
-    }
+    const bool same = sameCalls(s.capture, text, sizeof(text))
+                      && sameState(info.registers, info.flags, guest, native, text, sizeof(text))
+                      && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     if (!same)
     {
         ++s.differing;
@@ -1273,6 +1166,138 @@ void dispatch(Leaf leaf, WinApplication* app, x86::CPU& cpu)
 
 }
 
+bool g_logStores = false;
+std::vector<reg32> g_stores;
+
+void runLeaf(Leaf leaf, WinApplication* app, x86::CPU& cpu)
+{
+    const LeafInfo& info = s_leaves[leaf];
+    ++s_calls[leaf];
+    if (settings().native)
+    {
+        info.native(app, cpu);
+        return;
+    }
+    ++s_depth;
+    info.guest(app, cpu);
+    --s_depth;
+}
+
+bool nativeLeaves()
+{
+    return settings().native;
+}
+
+bool shadowCompare()
+{
+    return settings().shadow;
+}
+
+void snapshot(const std::vector<Span>& spans, std::vector<reg8>& bytes)
+{
+    bytes.clear();
+    for (const Span& s : spans)
+        bytes.insert(bytes.end(), rc::host(s.address), rc::host(s.address) + s.size);
+}
+
+void restoreSpans(const std::vector<Span>& spans, const std::vector<reg8>& bytes)
+{
+    size_t at = 0;
+    for (const Span& s : spans)
+    {
+        memcpy(rc::host(s.address), bytes.data() + at, s.size);
+        at += s.size;
+    }
+}
+
+bool sameState(uint8_t registers, uint8_t flagMask, const x86::CPU& g, const x86::CPU& n, char* text, size_t size)
+{
+    const struct { const char* name; uint8_t bit; reg32 a, b; } regs[] = {
+        {"eax", RegEax, g.eax, n.eax}, {"ecx", RegEcx, g.ecx, n.ecx}, {"edx", RegEdx, g.edx, n.edx},
+        {"ebx", RegEbx, g.ebx, n.ebx}, {"esp", RegEsp, g.esp, n.esp}, {"ebp", RegEbp, g.ebp, n.ebp},
+        {"esi", RegEsi, g.esi, n.esi}, {"edi", RegEdi, g.edi, n.edi},
+    };
+    for (const auto& r : regs)
+    {
+        if ((registers & r.bit) && r.a != r.b)
+        {
+            snprintf(text, size, "%s guest 0x%08x native 0x%08x", r.name, unsigned(r.a), unsigned(r.b));
+            return false;
+        }
+    }
+    const struct { const char* name; uint8_t bit; bool a, b; } flags[] = {
+        {"cf", FlagCf, bool(g.flags.cf), bool(n.flags.cf)}, {"pf", FlagPf, bool(g.flags.pf), bool(n.flags.pf)},
+        {"af", FlagAf, bool(g.flags.af), bool(n.flags.af)}, {"zf", FlagZf, bool(g.flags.zf), bool(n.flags.zf)},
+    };
+    for (const auto& f : flags)
+    {
+        if ((flagMask & f.bit) && f.a != f.b)
+        {
+            snprintf(text, size, "%s guest %d native %d", f.name, int(f.a), int(f.b));
+            return false;
+        }
+    }
+    if (g.fpu.count != n.fpu.count)
+    {
+        snprintf(text, size, "x87 depth guest %u native %u", unsigned(g.fpu.count), unsigned(n.fpu.count));
+        return false;
+    }
+    if ((flagMask & FlagFpu) && (g.fpu.status.word & 0x4500) != (n.fpu.status.word & 0x4500))
+    {
+        snprintf(text, size, "x87 status guest 0x%04x native 0x%04x", unsigned(g.fpu.status.word),
+                 unsigned(n.fpu.status.word));
+        return false;
+    }
+    return true;
+}
+
+bool sameCalls(const bridge::Capture& c, char* text, size_t size)
+{
+    if (c.differs)
+    {
+        snprintf(text, size, "device call %u: guest %s, native %s, word %u guest 0x%08x native 0x%08x",
+                 unsigned(c.differingCall), bridge::methodName(c.expected), bridge::methodName(c.got),
+                 unsigned(c.differingWord), unsigned(c.expectedWord), unsigned(c.gotWord));
+        return false;
+    }
+    if (c.replayed != c.calls.size())
+    {
+        snprintf(text, size, "device calls guest %u native %u", unsigned(c.calls.size()), unsigned(c.replayed));
+        return false;
+    }
+    return true;
+}
+
+bool sameMemory(const std::vector<Span>& spans, const std::vector<reg8>& guest, const std::vector<reg8>& native,
+                char* text, size_t size)
+{
+    size_t at = 0;
+    for (const Span& span : spans)
+    {
+        for (reg32 i = 0; i < span.size; ++i, ++at)
+        {
+            if (guest[at] != native[at])
+            {
+                snprintf(text, size, "byte at 0x%08x guest 0x%02x native 0x%02x", unsigned(span.address + i),
+                         unsigned(guest[at]), unsigned(native[at]));
+                return false;
+            }
+        }
+    }
+    for (const reg32 address : g_stores)
+    {
+        bool inside = false;
+        for (const Span& span : spans)
+            inside |= address - span.address < span.size && address + 4 - span.address <= span.size;
+        if (!inside)
+        {
+            snprintf(text, size, "native stored at 0x%08x outside the guest's stores", unsigned(address));
+            return false;
+        }
+    }
+    return true;
+}
+
 void logUsage(unsigned frames)
 {
     if (!frames)
@@ -1281,17 +1306,25 @@ void logUsage(unsigned frames)
     uint32_t total = 0;
     for (uint32_t n : s_calls)
         total += n;
+    const QueueUsage q = takeQueueUsage();
     pf::logInfo("draw: %s setup functions %u calls/frame, %.2f ms/frame (1 in %u timed); world %u, blend %u, "
                 "alpha test %u, packets %u, node %u, group %u, bones %u, model %u, lights %u, reflection %u, "
-                "material %u", !s.native ? "guest" : s.shadow ? "shadow" : "native", total / frames,
+                "material %u; %s queue: flush %u calls/frame, %.2f ms/frame, %u packets, %u draws, %u nodes; "
+                "enqueue %u, submit %u", !s.native ? "guest" : s.shadow ? "shadow" : "native", total / frames,
                 double(s_sampledUs) * double(SampleMask + 1) / 1000.0 / frames, unsigned(SampleMask + 1),
                 s_calls[LeafWorld] / frames, s_calls[LeafBlend] / frames, s_calls[LeafAlphaTest] / frames,
                 s_calls[LeafPackets] / frames, s_calls[LeafNode] / frames, s_calls[LeafGroup] / frames,
                 s_calls[LeafBones] / frames, s_calls[LeafModel] / frames, s_calls[LeafLights] / frames,
-                s_calls[LeafReflection] / frames, s_calls[LeafMaterial] / frames);
+                s_calls[LeafReflection] / frames, s_calls[LeafMaterial] / frames,
+                !nativeQueue() ? "guest" : s.shadow ? "shadow" : "native", q.flushes / frames,
+                double(q.flushUs) / 1000.0 / frames, q.packets / frames, q.draws / frames, q.nodes / frames,
+                q.enqueues / frames, q.submits / frames);
     if (s.native && s.shadow)
         pf::logInfo("shadow_draw: %u calls compared, %u differ", unsigned(s_shadow.calls),
                     unsigned(s_shadow.differing));
+    if (nativeQueue() && s.shadow)
+        pf::logInfo("shadow_draw: queue %u calls compared, %u differ, %u not compared", unsigned(q.compared),
+                    unsigned(q.differing), unsigned(q.skipped));
     memset(s_calls, 0, sizeof(s_calls));
     s_sampledUs = 0;
 }

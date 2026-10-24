@@ -2,6 +2,12 @@
 #define NFSU_DRAW_H_
 
 #include <lib/winapp.h>
+#include <winapi/d3d9_native.h>
+#include <recomp.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace nfsu { namespace draw
 {
@@ -12,10 +18,72 @@ namespace nfsu { namespace draw
 // read. Settings: draw_native=1 runs them natively (default 0: the guest code); shadow_draw=1 runs the guest code
 // with its device and effect calls recorded, then the native code against the recording, and logs the first
 // difference.
+//
+// The draw queue itself (flush.cpp): model submit 0x40c910, packet enqueue 0x40f1e0 and the flush 0x40ed50.
+// flush_native=1 runs them natively (default 0); with shadow_draw=1 each runs as guest code first, recorded, then
+// natively against the recording.
 
-// Perf builds: the call counts and time of the setup functions since the last call, logged as a "draw:" line; frames
-// is the number of frames they cover.
+// Perf builds: the call counts and time of the setup functions and of the queue since the last call, logged as a
+// "draw:" line; frames is the number of frames they cover.
 void logUsage(unsigned frames);
+
+// ---- Shared by draw.cpp and flush.cpp ----
+
+enum Leaf
+{
+    LeafWorld, LeafBlend, LeafAlphaTest, LeafPackets, LeafNode, LeafGroup, LeafBones, LeafModel, LeafLights,
+    LeafReflection, LeafMaterial, LeafCount
+};
+
+// Runs a setup function as a native caller does: the native body with draw_native=1, else the guest body; counted
+// for the perf line. cpu.esp points at the return address slot.
+void runLeaf(Leaf leaf, win32::WinApplication* app, x86::CPU& cpu);
+
+bool nativeLeaves();
+bool shadowCompare();
+
+// Guest stores of the native code; shadow compares log their addresses.
+extern bool g_logStores;
+extern std::vector<x86::reg32> g_stores;
+
+inline void store(x86::reg32 address, x86::reg32 value)
+{
+    if (__builtin_expect(g_logStores, 0))
+        g_stores.push_back(address);
+    rc::st32(address, value);
+}
+
+struct Span
+{
+    x86::reg32 address;
+    x86::reg32 size;
+};
+
+enum : uint8_t
+{
+    RegEax = 1, RegEcx = 2, RegEdx = 4, RegEbx = 8, RegEsp = 0x10, RegEbp = 0x20, RegEsi = 0x40, RegEdi = 0x80,
+    FlagCf = 1, FlagPf = 2, FlagAf = 4, FlagZf = 8, FlagFpu = 0x40
+};
+
+void snapshot(const std::vector<Span>& spans, std::vector<x86::reg8>& bytes);
+void restoreSpans(const std::vector<Span>& spans, const std::vector<x86::reg8>& bytes);
+// False with a text when a register or flag of the masks, or the x87 depth, differs.
+bool sameState(uint8_t registers, uint8_t flags, const x86::CPU& g, const x86::CPU& n, char* text, size_t size);
+// False with a text when the replay of a capture found a difference or did not use every recorded call.
+bool sameCalls(const win32::d3d9::bridge::Capture& c, char* text, size_t size);
+// False with a text at the first byte of the spans that differs, or the first logged store outside them.
+bool sameMemory(const std::vector<Span>& spans, const std::vector<x86::reg8>& guest,
+                const std::vector<x86::reg8>& native, char* text, size_t size);
+
+// Queue counters of flush.cpp for the perf line, reset by the call.
+struct QueueUsage
+{
+    uint32_t flushes, packets, draws, nodes, enqueues, submits;
+    uint64_t flushUs;
+    uint32_t compared, differing, skipped;
+};
+QueueUsage takeQueueUsage();
+bool nativeQueue();
 
 }}
 
