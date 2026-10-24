@@ -152,17 +152,30 @@ def ret_anchors(fn, infos):
     return out
 
 
-def analyze_function(fn, infos):
-    """StackInfo of one function, given the current infos of its callees. Where esp is unknown (after a call whose
-    esp change is unknown) and every path runs into a ret, esp is the ret anchor; the slots holding entry register
-    values above it are kept, the others dropped."""
+def jump_entries(fns):
+    """Entries reached by a jump (tail jumps, jump tables): esp there need not be where the return address is."""
+    out = set()
+    for fn in fns:
+        for i in fn.reachable:
+            for x in fn.exits[i]:
+                if x.kind == 'tail':
+                    out.add(x.target)
+                elif x.kind == 'dyntail':
+                    out.update(getattr(fn.instructions[i], 'potential_destinations', None) or ())
+    return out
+
+
+def analyze_function(fn, infos, anchored=True):
+    """StackInfo of one function, given the current infos of its callees. With anchored, where esp is unknown
+    (after a call whose esp change is unknown) and every path runs into a ret, esp is the ret anchor; the slots
+    holding entry register values above it are kept, the others dropped."""
     n = fn.n
     state_in = [None] * n
     state_in[fn.entry] = entry_state()
     info = StackInfo()
     preserved = C.ALL_REGS
     deltas = set()
-    anchors = ret_anchors(fn, infos)
+    anchors = ret_anchors(fn, infos) if anchored else {}
     work = [fn.entry]
     while work:
         i = work.pop()
@@ -334,13 +347,14 @@ def analyze(program, fns):
     """StackInfo per function entry; iterates from no knowledge until the summaries stop changing. Each round
     only refines summaries that are already sound, so stopping at the round limit is conservative."""
     infos = {}
+    jumped = jump_entries(fns)
     changed = True
     rounds = 0
     while changed and rounds < 20:
         rounds += 1
         changed = False
         for fn in fns:
-            info = analyze_function(fn, infos)
+            info = analyze_function(fn, infos, fn.entry_address not in jumped)
             old = infos.get(fn.entry_address)
             if old is None or old.preserved != info.preserved or old.delta != info.delta:
                 infos[fn.entry_address] = info
