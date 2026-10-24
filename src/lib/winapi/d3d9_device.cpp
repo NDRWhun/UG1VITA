@@ -1190,7 +1190,7 @@ HRESULT Device::SetSamplerState(WinApplication* app, x86::CPU& cpu, DWORD sample
     {
         const uint32_t bit = type == D3DSAMP_ADDRESSU ? DeviceAddressU : type == D3DSAMP_ADDRESSV ? DeviceAddressV
                            : type == D3DSAMP_MAGFILTER ? DeviceMagFilter : type == D3DSAMP_MINFILTER ? DeviceMinFilter
-                           : type == D3DSAMP_MIPFILTER ? DeviceMipFilter : 0;
+                           : type == D3DSAMP_MIPFILTER ? DeviceMipFilter : 0u;
         m_deviceSamplers |= bit << (sampler * 8);
     }
     if (m_state.samplerStates[sampler][type] == value)
