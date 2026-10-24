@@ -138,8 +138,11 @@ void audio(Audio counter, uint32_t value);
 void renderLocked(const char* reason, uint32_t address);
 // Game thread: kept linear texture copies at the moment.
 void uploadCache(uint32_t bytes, uint32_t levels);
-// Render thread, after each game frame it queued; logs one line about every 5 s.
+// Render thread, after each game frame it queued, with the timing log on or a frame observer set: calls the observer
+// and, with the timing log on, logs one line about every 5 s.
 void framePresented(uint32_t drawCalls, uint32_t triangles);
+// True when a frame observer is set.
+bool frameObserved();
 // Called on the render thread after each log line with the interval length in microseconds.
 typedef void (*Reporter)(uint32_t intervalUs);
 void setReporter(Reporter reporter);

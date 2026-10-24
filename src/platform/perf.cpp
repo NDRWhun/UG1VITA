@@ -418,8 +418,19 @@ void timerFired(uint32_t callback, uint32_t microseconds)
     }
 }
 
+bool frameObserved()
+{
+    return s_frameObserver.load(std::memory_order_relaxed) != nullptr;
+}
+
 void framePresented(uint32_t drawCalls, uint32_t triangles)
 {
+    if (!g_enabled)
+    {
+        if (FrameObserver observer = s_frameObserver.load(std::memory_order_acquire))
+            observer(now());
+        return;
+    }
     ++s_frames;
     s_drawCalls += drawCalls;
     s_triangles += triangles;
