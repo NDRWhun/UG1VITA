@@ -250,6 +250,33 @@ void buildInterface(WinApplication* app, Kind kind, const char* interfaceName, c
 // The effect interfaces (d3dx9.cpp).
 void initEffectInterfaces(WinApplication* app);
 
+// Guest entries of the methods native code calls directly (d3d9_native.cpp, d3d9_native.h).
+namespace guest
+{
+
+void SetTransform(WinApplication* app, x86::CPU& cpu);
+void SetMaterial(WinApplication* app, x86::CPU& cpu);
+void SetLight(WinApplication* app, x86::CPU& cpu);
+void LightEnable(WinApplication* app, x86::CPU& cpu);
+void SetRenderState(WinApplication* app, x86::CPU& cpu);
+void SetTexture(WinApplication* app, x86::CPU& cpu);
+void SetVertexDeclaration(WinApplication* app, x86::CPU& cpu);
+void EffectSetInt(WinApplication* app, x86::CPU& cpu);
+void EffectSetFloat(WinApplication* app, x86::CPU& cpu);
+void EffectSetVector(WinApplication* app, x86::CPU& cpu);
+void EffectSetVectorArray(WinApplication* app, x86::CPU& cpu);
+void EffectSetMatrix(WinApplication* app, x86::CPU& cpu);
+void EffectSetMatrixArray(WinApplication* app, x86::CPU& cpu);
+void EffectSetTexture(WinApplication* app, x86::CPU& cpu);
+void EffectBegin(WinApplication* app, x86::CPU& cpu);
+void EffectPass(WinApplication* app, x86::CPU& cpu);
+void EffectEnd(WinApplication* app, x86::CPU& cpu);
+
+}
+
+#define D3D_GUEST(fn) { #fn, &win32::d3d9::guest::fn }
+#define D3D_GUEST_NAMED(name, fn) { name, &win32::d3d9::guest::fn }
+
 #define D3D_METHOD(cls, fn) { #fn, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
 #define D3D_NAMED(name, cls, fn) { name, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
 #define D3D_TRAP(fn) { #fn, nullptr }
