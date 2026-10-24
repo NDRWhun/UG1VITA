@@ -96,7 +96,8 @@ struct Writer
     std::vector<Undo> undo;
     reg32 lockedBegin = 0, lockedEnd = 0;
     reg32 lockSlot = 0;
-    std::vector<reg8> texture;
+    reg32 lockedTexture = 0;
+    std::vector<reg8> texture, original;
 
     [[gnu::noinline, gnu::cold]] void log(reg32 address, reg32 size)
     {
@@ -110,14 +111,17 @@ struct Writer
         if (__builtin_expect(record, 0))
             log(address, size);
     }
-    // The level at bits, its address stored at slot by the lock.
-    void locked(reg32 slot, reg32 bits, reg32 size)
+    // Level 0 of texture at bits, its address stored at slot by the lock; its contents at the lock are kept in
+    // original.
+    void locked(reg32 texture, reg32 slot, reg32 bits, reg32 size)
     {
-        if (record && size <= 0x1000000)
+        if (record && size <= 0x1000000 && win32::MemMap::isGuestRange(bits, size))
         {
+            lockedTexture = texture;
             lockSlot = slot;
             lockedBegin = bits;
             lockedEnd = bits + size;
+            original.assign(rc::host(bits), rc::host(bits) + size);
         }
     }
     void unlocking()
@@ -483,7 +487,7 @@ bool compositeNative(win32::WinApplication* app, x86::CPU& cpu, Writer& w)
     const reg32 width = reg32(sreg32(sreg16(rc::ld16(r.edi + 0x44))));
     const reg32 height = reg32(sreg32(sreg16(rc::ld16(r.edi + 0x46))));
     const reg32 bits = rc::ld32(s + 0x40);
-    w.locked(s + 0x40, bits, height * width * 4);
+    w.locked(rc::ld32(rc::ld32(r.edi) + 0x18), s + 0x40, bits, height * width * 4);
     r.edx = bits;
     w.st32(s + 0x28, width);
     w.st32(s + 0x30, bits);
@@ -1266,7 +1270,8 @@ void report()
                 unsigned(s.relocated[EntryComposite]), unsigned(s.relocated[EntryTexture]), unsigned(s.uncompared));
 }
 
-void result(Entry entry, bool same, const char* text, reg32 caller)
+// esp: the guest's esp at the call.
+void result(Entry entry, bool same, const char* text, reg32 esp)
 {
     Shadow& s = s_shadow;
     ++s.calls[entry];
@@ -1276,8 +1281,8 @@ void result(Entry entry, bool same, const char* text, reg32 caller)
         if (s.logged < ShadowLogLimit)
         {
             ++s.logged;
-            pf::logInfo("shadow_load: %s call %u (caller 0x%08x): %s", EntryNames[entry], unsigned(s.calls[entry]),
-                        unsigned(caller), text);
+            pf::logInfo("shadow_load: %s call %u (esp 0x%08x): %s", EntryNames[entry], unsigned(s.calls[entry]),
+                        unsigned(esp), text);
         }
     }
     report();
@@ -1291,9 +1296,10 @@ struct Region
     std::vector<bool> stored;
 };
 
-// Level 0 of a texture interface read through a read-only lock below the guest's stack; false when the lock fails.
-bool readTexture(win32::WinApplication* app, x86::CPU& cpu, reg32 texture, reg32 level, reg32 size,
-                 std::vector<reg8>& out)
+// A level of a texture interface locked below the guest's stack: read into out (read-only lock), or with write
+// given, its first size bytes replaced by write. False when the lock fails.
+bool accessTexture(win32::WinApplication* app, x86::CPU& cpu, reg32 texture, reg32 level, reg32 size,
+                   std::vector<reg8>& out, const std::vector<reg8>* write = nullptr)
 {
     const reg32 ReadOnly = 0x10;
     const x86::CPU saved = cpu;
@@ -1303,7 +1309,7 @@ bool readTexture(win32::WinApplication* app, x86::CPU& cpu, reg32 texture, reg32
     rc::st32(base + 8, level);
     rc::st32(base + 0xc, rect);
     rc::st32(base + 0x10, 0);
-    rc::st32(base + 0x14, ReadOnly);
+    rc::st32(base + 0x14, write ? 0 : ReadOnly);
     cpu.esp = base;
     cpu.ip = rc::ld32(rc::ld32(texture) + 0x4c);
     app->dynamic_call(cpu.ip, cpu);
@@ -1311,8 +1317,10 @@ bool readTexture(win32::WinApplication* app, x86::CPU& cpu, reg32 texture, reg32
     if (ok)
     {
         const reg32 bits = rc::ld32(rect + 4);
-        ok = win32::MemMap::isGuestRange(bits, size);
-        if (ok)
+        ok = win32::MemMap::isGuestRange(bits, size) && (!write || write->size() >= size);
+        if (ok && write)
+            memcpy(rc::host(bits), write->data(), size);
+        else if (ok)
             out.assign(rc::host(bits), rc::host(bits) + size);
         rc::st32(base + 4, texture);
         rc::st32(base + 8, level);
@@ -1364,11 +1372,26 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
         r.stored.assign(r.size, false);
     }
 
+    // The locked level gets back the contents the native code found in it.
+    bool restored = true;
+    if (w.lockedTexture && !w.original.empty())
+    {
+        std::vector<reg8> unused;
+        restored = accessTexture(app, cpu, w.lockedTexture, 0, reg32(w.original.size()), unused, &w.original);
+        if (cpu.terminate)
+            return;
+    }
+
     cpu = start;
     guest(app, cpu);
     if (cpu.terminate)
         return;
     char text[200] = {};
+    if (!restored)
+    {
+        result(entry, false, "texture contents not restored before the guest run", start.esp);
+        return;
+    }
     // A lock that gave the guest another address than the native code: only the texture is compared.
     const bool relocated = w.lockSlot && rc::ld32(w.lockSlot) != w.lockedBegin;
     if (relocated)
@@ -1415,7 +1438,7 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
         same = check(app, cpu, start, w, text, sizeof(text));
     if (cpu.terminate)
         return;
-    result(entry, same, text, rc::ld32(start.esp));
+    result(entry, same, text, start.esp);
 }
 
 bool noCheck(win32::WinApplication*, x86::CPU&, const x86::CPU&, const Writer&, char*, size_t)
@@ -1432,7 +1455,7 @@ bool checkSkinTexture(win32::WinApplication* app, x86::CPU& cpu, reg32 params, c
     if (!texture || w.texture.empty())
         return true;
     std::vector<reg8> guest;
-    if (!readTexture(app, cpu, rc::ld32(rc::ld32(texture) + 0x18), 0, reg32(w.texture.size()), guest))
+    if (!accessTexture(app, cpu, rc::ld32(rc::ld32(texture) + 0x18), 0, reg32(w.texture.size()), guest))
     {
         snprintf(text, size, "texture not readable");
         return false;
@@ -1505,7 +1528,7 @@ void shadowJdlz(win32::WinApplication* app, x86::CPU& cpu)
                      unsigned(rc::ld8(frame + i)), unsigned(nativeFrame[i]), unsigned(frame + i));
         }
     }
-    result(EntryJdlz, same, text, rc::ld32(start.esp));
+    result(EntryJdlz, same, text, start.esp);
 }
 
 // The bytes the texture creation of record t copies into each level, as the guest computes them.
@@ -1575,7 +1598,7 @@ void shadowTexture(win32::WinApplication* app, x86::CPU& cpu)
     std::vector<std::vector<reg8>> guestLevels(sizes.size());
     bool readable = true;
     for (size_t level = 0; guestTexture && readable && level < sizes.size(); ++level)
-        readable = readTexture(app, cpu, guestTexture, reg32(level), sizes[level], guestLevels[level]);
+        readable = accessTexture(app, cpu, guestTexture, reg32(level), sizes[level], guestLevels[level]);
     if (cpu.terminate)
         return;
     for (const Saved& s : saved)
@@ -1621,7 +1644,7 @@ void shadowTexture(win32::WinApplication* app, x86::CPU& cpu)
     for (size_t level = 0; same && guestTexture && level < sizes.size(); ++level)
     {
         std::vector<reg8> native;
-        if (!nativeTexture || !readTexture(app, cpu, nativeTexture, reg32(level), sizes[level], native))
+        if (!nativeTexture || !accessTexture(app, cpu, nativeTexture, reg32(level), sizes[level], native))
         {
             same = false;
             snprintf(text, sizeof(text), "native texture level %u not readable", unsigned(level));
@@ -1655,7 +1678,7 @@ void shadowTexture(win32::WinApplication* app, x86::CPU& cpu)
         if (terminate)
             return;
     }
-    result(EntryTexture, same, text, rc::ld32(start.esp));
+    result(EntryTexture, same, text, start.esp);
 }
 
 // ---- perf builds: time per second of game time ----
