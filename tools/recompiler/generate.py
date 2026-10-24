@@ -94,6 +94,12 @@ NATIVE_OVERRIDES = [
     # Render preparation (src/nfsu/prep.cpp): per-instance light-context fills on the workers.
     0x446730,   # StuffScenery: fill light contexts and submit the view's instances
     0x40a580,   # frame render and present
+    # Resource loading (src/nfsu/load.cpp): the JDLZ decompressor, the 8-bit palette texture expansion and the car
+    # skin compositor with its pixel blend.
+    0x58d190,   # JDLZ decompressor
+    0x407db0,   # texture creation: palette textures expanded to A8R8G8B8, levels copied into the D3D texture
+    0x5a8a50,   # CompositeSkin32: car skin layers blended into a 32-bit texture
+    0x5a8640,   # weighted sum of up to n pixels
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
