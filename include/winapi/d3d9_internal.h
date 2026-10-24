@@ -581,6 +581,7 @@ struct DrawRecord
     EffectDraw                      effect;
     const render::TextureStorage*   textures[render::MaxSamplers];  // stage 0, or the pass's samplers
     uint32_t                        deviceSamplers; // effect draws: Device::deviceSamplers() at the draw
+    const render::BufferStorage*    vertexStorage;  // the vertex buffer the geometry is in; null: frame arena
 };
 
 // ---- Effects (d3dx9.cpp) -------------------------------------------------------------------------------------------
