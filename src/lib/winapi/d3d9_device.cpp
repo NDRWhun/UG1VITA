@@ -1284,6 +1284,36 @@ HRESULT Device::DrawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, DWORD t
                 decl->texComponents(), decl->positionT(), vb->storage(), ib->storage());
 }
 
+void* Device::frameVertices(WinApplication* app, x86::CPU& cpu, uint32_t bytes)
+{
+    render::Frame* f = frame(app, cpu);
+    void* data = render::allocateVertices(*f, bytes);
+    if (!data)
+    {
+        if (!m_frameFull)
+            pf::logError("d3d9: frame %u: vertex arena full, draws dropped", f->index);
+        m_frameFull = true;
+    }
+    return data;
+}
+
+HRESULT Device::drawIndexedFrameVertices(WinApplication* app, x86::CPU& cpu, DWORD type, UINT minIndex, UINT vertices,
+                                         UINT startIndex, UINT count, const void* data)
+{
+    const DrawTimer timer;
+    Buffer* vb = m_state.stream;
+    Buffer* ib = m_state.indices;
+    VertexDeclaration* decl = m_state.declaration ? m_state.declaration
+                            : m_state.fvf ? fvfDeclaration(m_state.fvf) : nullptr;
+    if (!vb || !ib || !decl || !m_state.streamStride)
+        return D3DERR_INVALIDCALL;
+    if (!data)
+        return D3D_OK;
+    const uint16_t* indices = static_cast<const uint16_t*>(ib->storage()->data) + startIndex;
+    return draw(app, cpu, type, count, data, indices, minIndex + vertices, decl->layout(m_state.streamStride),
+                decl->texComponents(), decl->positionT(), nullptr, ib->storage());
+}
+
 HRESULT Device::DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, UINT count, const void* data,
                                 UINT stride)
 {

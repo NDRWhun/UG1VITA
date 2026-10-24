@@ -75,6 +75,7 @@ struct Settings
     bool native;        // the draw
     bool update;        // the update
     bool parallel;
+    bool direct;        // the draw's quads from frame memory instead of the locked vertex buffers
     bool shadow;
 };
 
@@ -82,12 +83,14 @@ const Settings& settings()
 {
     static const Settings s = []
     {
-        const bool native = pf::Config::getBool("particles_native", false);
+        const bool native = pf::Config::getBool("particles_native", true);
         const Settings r = { native, native && pf::Config::getBool("particles_update", true),
                              pf::Config::getBool("particles_parallel", true),
+                             pf::Config::getBool("particles_direct", true),
                              pf::Config::getBool("shadow_particles", false) };
         const char* mode = r.shadow ? "guest with shadow compare" : r.native ? "native" : "guest";
-        pf::logInfo("particles: particle draw %s, update %s%s", mode, r.update ? mode : "guest",
+        pf::logInfo("particles: particle draw %s%s, update %s%s", mode,
+                    !r.shadow && r.native && r.direct ? " from frame memory" : "", r.update ? mode : "guest",
                     !r.shadow && r.native && r.parallel ? ", per-particle work on the job workers" : "");
         return r;
     }();
@@ -398,6 +401,33 @@ bool drawBatch(win32::WinApplication* app, x86::CPU& c, reg32 device, uint32_t c
         && com(app, c, device, DrawIndexedPrimitive, { 4, 0, 0, count * 4, 0, count * 2 }, at[3]);
 }
 
+// The quads of the batch being collected (indices in s_quads), for the direct draw.
+uint32_t s_pending[BatchParticles];
+
+// The guest's batch draw with the buffer's vertices taken from frame memory: the stream source, indices and blend
+// state calls as the guest makes them, then the indexed draw of count quads copied from s_pending.
+bool drawDirect(win32::WinApplication* app, x86::CPU& c, reg32 device, uint32_t count, const reg32* at)
+{
+    const reg32 buffer = currentBuffer();
+    if (!com(app, c, device, SetStreamSource, { 0, buffer, 0, VertexStride }, at[0])
+        || !com(app, c, device, SetIndices, { rc::ld32(IndexBuffer) }, at[1])
+        || !com(app, c, device, SetRenderState, { AlphaBlendEnable, 1 }, at[2]))
+        return false;
+    win32::d3d9::Object* object = win32::d3d9::lookup(device);
+    if (!object || object->kind() != win32::d3d9::KindDevice)
+        return true;
+    win32::d3d9::Device* d = static_cast<win32::d3d9::Device*>(object);
+    const uint32_t bytes = count * QuadWords * 4;
+    uint8_t* data = static_cast<uint8_t*>(d->frameVertices(app, c, bytes));
+    if (c.terminate)
+        return false;
+    if (data)
+        for (uint32_t i = 0; i < count; ++i)
+            memcpy(data + i * QuadWords * 4, s_quads[s_pending[i]].words, QuadWords * 4);
+    c.eax = reg32(d->drawIndexedFrameVertices(app, c, 4, 0, count * 4, 0, count * 2, data));
+    return !c.terminate;
+}
+
 struct PerfSums
 {
     uint64_t us = 0, updateUs = 0;
@@ -471,11 +501,41 @@ void drawNative(win32::WinApplication* app, x86::CPU& cpu)
         if (!call(app, c, &sub_40f3d0, 0x40433a))
             break;
         c.esp = esp0;
+        uint32_t batch = 0, drawn = 0;
+        bool running = true;
+        if (settings().direct)
+        {
+            // The quads of a batch go into the frame's vertex memory and are drawn from there; the particle
+            // vertex buffers are not locked.
+            for (uint32_t i = s.first; running && i < s.first + s.count; ++i)
+            {
+                if (!s_quads[i].keep)
+                    continue;
+                s_pending[batch] = i;
+                ++s_perf.quads;
+                if (++batch != BatchParticles)
+                    continue;
+                running = drawDirect(app, c, device, batch, FullBatchCalls);
+                if (!running)
+                    break;
+                advanceBuffer();
+                drawn += batch;
+                batch = 0;
+            }
+            if (!running)
+                break;
+            if (batch)
+            {
+                if (!drawDirect(app, c, device, batch, LastBatchCalls))
+                    break;
+                advanceBuffer();
+            }
+            total += drawn + batch;
+            continue;
+        }
         if (!com(app, c, currentBuffer(), Lock, { 0, 0, esp0 + 0xc, LockDiscard }, 0x4043ea))
             break;
         reg32 write = rc::ld32(esp0 + 0xc);
-        uint32_t batch = 0, drawn = 0;
-        bool running = true;
         for (uint32_t i = s.first; running && i < s.first + s.count; ++i)
         {
             const Quad& q = s_quads[i];
