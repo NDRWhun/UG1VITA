@@ -526,13 +526,60 @@ void drawNative(win32::WinApplication* app, x86::CPU& cpu)
 }
 
 // Shadow: the native quads of the call against the vertices the guest body wrote into the vertex buffers, and the
-// count, the buffer index and the list fields the guest updates.
+// count, the buffer index and the list fields the guest updates. The guest's buffer contents are read at each
+// Unlock of one of the 30 particle buffers, before a later batch of the same call can lock that buffer again: the
+// call's n-th Unlock is compared with the n-th one the native model of the call expects (a batch of 300 quads, the
+// last batch of a system, or an Unlock with no quad written).
 struct Shadow
 {
-    uint32_t calls = 0, differing = 0, logged = 0, unchecked = 0;
+    uint32_t calls = 0, differing = 0, logged = 0;
+    uint32_t batches = 0;       // drawn batches compared
+    uint32_t reused = 0;        // of them in a buffer a later batch of the same call locked again
+    uint32_t maxBatches = 0;    // most drawn batches in one call
 };
 Shadow s_shadow;
 const uint32_t ShadowLogLimit = 20;
+
+// The Unlocks the native model expects, and what the observer saw during the guest run.
+struct UnlockCheck
+{
+    std::vector<std::vector<reg32>> expected;  // words of each Unlock; empty for one with no quad written
+    reg32 buffers[BufferCount];
+    size_t seen = 0;
+    bool same = true;
+    char text[200] = {};
+};
+UnlockCheck s_unlocks;
+
+void unlockObserved(reg32 buffer, reg32 data, win32::UINT size)
+{
+    UnlockCheck& u = s_unlocks;
+    if (std::find(u.buffers, u.buffers + BufferCount, buffer) == u.buffers + BufferCount)
+        return;
+    const size_t n = u.seen++;
+    if (!u.same || n >= u.expected.size())
+        return;
+    const std::vector<reg32>& words = u.expected[n];
+    if (words.size() * 4 > size)
+    {
+        u.same = false;
+        snprintf(u.text, sizeof(u.text), "unlock %u: locked range %u bytes, %u quads expected", unsigned(n),
+                 unsigned(size), unsigned(words.size() / QuadWords));
+        return;
+    }
+    for (size_t i = 0; i < words.size(); ++i)
+    {
+        const reg32 g = rc::ld32(data + reg32(4 * i));
+        if (g != words[i])
+        {
+            u.same = false;
+            snprintf(u.text, sizeof(u.text), "unlock %u quad %u vertex %u word %u: guest 0x%08x native 0x%08x",
+                     unsigned(n), unsigned(i / QuadWords), unsigned(i % QuadWords / 6), unsigned(i % 6),
+                     unsigned(g), unsigned(words[i]));
+            return;
+        }
+    }
+}
 
 void drawShadow(win32::WinApplication* app, x86::CPU& cpu)
 {
@@ -541,13 +588,21 @@ void drawShadow(win32::WinApplication* app, x86::CPU& cpu)
     const reg32 count54 = reset ? 0 : rc::ld32(list + 0x54), count58 = reset ? 0 : rc::ld32(list + 0x58);
     const reg32 index0 = rc::ld32(BufferIndex);
     const bool empty = rc::ld32(list) == list;
-    std::vector<std::vector<reg32>> batches;    // expected words of each drawn batch
+    UnlockCheck& u = s_unlocks;
+    u.expected.clear();
+    u.seen = 0;
+    u.same = true;
+    u.text[0] = 0;
+    for (uint32_t i = 0; i < BufferCount; ++i)
+        u.buffers[i] = rc::ld32(VertexBuffers + 4 * i);
     reg32 total = 0;
+    uint32_t drawn = 0;     // batches drawn
     if (!empty)
     {
         prepare(list, view);
         for (const System& s : s_systems)
         {
+            // Lock, an Unlock after every 300 quads (then Lock again), an Unlock at the end of the system.
             std::vector<reg32> current;
             uint32_t batch = 0;
             for (uint32_t i = s.first; i < s.first + s.count; ++i)
@@ -559,54 +614,39 @@ void drawShadow(win32::WinApplication* app, x86::CPU& cpu)
                 ++total;
                 if (++batch == BatchParticles)
                 {
-                    batches.push_back(std::move(current));
+                    u.expected.push_back(std::move(current));
                     current.clear();
                     batch = 0;
+                    ++drawn;
                 }
             }
-            if (batch)
-                batches.push_back(std::move(current));
+            drawn += batch ? 1 : 0;
+            u.expected.push_back(std::move(current));
         }
     }
 
+    win32::d3d9::Buffer::setUnlockObserver(&unlockObserved);
     sub_404110_guest(app, cpu);
+    win32::d3d9::Buffer::setUnlockObserver(nullptr);
     if (cpu.terminate)
         return;
     ++s_shadow.calls;
+    s_shadow.batches += drawn;
+    s_shadow.reused += drawn > BufferCount ? drawn - BufferCount : 0;
+    s_shadow.maxBatches = std::max(s_shadow.maxBatches, drawn);
     char text[200] = {};
-    const reg32 index = reg32((index0 + batches.size()) % BufferCount);
+    const reg32 index = reg32((index0 + drawn) % BufferCount);
     bool same = rc::ld32(list + 0x54) == count54 + total && rc::ld32(list + 0x58) == count58
                 && rc::ld32(BufferIndex) == index;
     if (!same)
         snprintf(text, sizeof(text), "count 0x%08x/0x%08x field 0x58 0x%08x/0x%08x buffer %u/%u",
                  unsigned(rc::ld32(list + 0x54)), unsigned(count54 + total), unsigned(rc::ld32(list + 0x58)),
                  unsigned(count58), unsigned(rc::ld32(BufferIndex)), unsigned(index));
-    // Batches whose buffer a later batch of the call reused are not checked.
-    const size_t first = batches.size() > BufferCount ? batches.size() - BufferCount : 0;
-    s_shadow.unchecked += uint32_t(first);
-    for (size_t b = first; same && b < batches.size(); ++b)
-    {
-        const reg32 guest = rc::ld32(VertexBuffers + 4 * reg32((index0 + b) % BufferCount));
-        win32::d3d9::Object* object = win32::d3d9::lookup(guest);
-        if (!object || object->kind() != win32::d3d9::KindVertexBuffer)
-        {
-            ++s_shadow.unchecked;
-            continue;
-        }
-        const reg32 data = static_cast<win32::d3d9::Buffer*>(object)->shadowAddress();
-        const std::vector<reg32>& words = batches[b];
-        for (size_t i = 0; same && i < words.size(); ++i)
-        {
-            const reg32 g = rc::ld32(data + reg32(4 * i));
-            if (g != words[i])
-            {
-                same = false;
-                snprintf(text, sizeof(text), "batch %u quad %u vertex %u word %u: guest 0x%08x native 0x%08x",
-                         unsigned(b), unsigned(i / QuadWords), unsigned(i % QuadWords / 6), unsigned(i % 6),
-                         unsigned(g), unsigned(words[i]));
-            }
-        }
-    }
+    else if (!u.same)
+        same = false, snprintf(text, sizeof(text), "%s", u.text);
+    else if (u.seen != u.expected.size())
+        same = false, snprintf(text, sizeof(text), "%u unlocks of the particle buffers, %u expected",
+                               unsigned(u.seen), unsigned(u.expected.size()));
     if (!same)
     {
         ++s_shadow.differing;
@@ -1159,9 +1199,11 @@ void report(uint32_t frames)
     const Settings& s = settings();
     if (s.shadow)
     {
-        pf::logInfo("shadow_particles: draw %u calls compared, %u differ, %u batches not checked; update %u calls"
-                    " compared, %u differ", unsigned(s_shadow.calls), unsigned(s_shadow.differing),
-                    unsigned(s_shadow.unchecked), unsigned(s_updateShadow.calls), unsigned(s_updateShadow.differing));
+        pf::logInfo("shadow_particles: draw %u calls compared, %u differ, %u batches compared (%u in a buffer the"
+                    " same call reused, at most %u in one call); update %u calls compared, %u differ",
+                    unsigned(s_shadow.calls), unsigned(s_shadow.differing), unsigned(s_shadow.batches),
+                    unsigned(s_shadow.reused), unsigned(s_shadow.maxBatches), unsigned(s_updateShadow.calls),
+                    unsigned(s_updateShadow.differing));
         return;
     }
     if (!s.native || !frames)

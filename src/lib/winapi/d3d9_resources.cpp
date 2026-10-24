@@ -755,6 +755,13 @@ x86::reg32 Buffer::shadowAddress() const
     return m_shadow ? m_shadow->getBlockStart() : 0;
 }
 
+static Buffer::UnlockObserver s_unlockObserver = nullptr;
+
+void Buffer::setUnlockObserver(UnlockObserver observer)
+{
+    s_unlockObserver = observer;
+}
+
 HRESULT Buffer::Unlock(WinApplication* app, x86::CPU& cpu)
 {
     RC_USE(app);
@@ -763,6 +770,8 @@ HRESULT Buffer::Unlock(WinApplication* app, x86::CPU& cpu)
         return D3DERR_INVALIDCALL;
     if (--m_locks)
         return D3D_OK;
+    if (s_unlockObserver && m_shadow)
+        s_unlockObserver(guest(), m_shadow->getBlockStart() + m_lockOffset, m_lockSize);
     if (m_lockFlags & D3DLOCK_READONLY)
         return D3D_OK;
     const uint8_t* shadow = host(m_shadow->getBlockStart());

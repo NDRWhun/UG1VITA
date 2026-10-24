@@ -457,6 +457,10 @@ public:
     DWORD format() const                    { return m_format; }
     // Guest address of the memory Lock hands out (offset 0); it keeps the bytes written until the next write.
     x86::reg32 shadowAddress() const;
+    // Game thread: called at each last Unlock with the buffer's guest COM pointer and the locked range of its
+    // memory, before the bytes go to the GPU copy; null stops it.
+    typedef void (*UnlockObserver)(x86::reg32 buffer, x86::reg32 data, UINT size);
+    static void setUnlockObserver(UnlockObserver observer);
 
     HRESULT GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* device);
     DWORD SetPriority(WinApplication* app, x86::CPU& cpu, DWORD priority);
