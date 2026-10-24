@@ -1042,12 +1042,10 @@ void flareQuad(win32::WinApplication* app, x86::CPU& cpu)
     for (int i = 0; i < PolyWords; ++i)
         if (polyWord(i))
             rc::st32(poly + 4 * i, Poison);
-    rc::st32(sp - 0xc, Poison);
     sub_5443f0_guest(app, cpu);
-    d.texture = rc::ld32(sp - 0xc);
-    d.drawn = d.texture != Poison;
-    if (!d.drawn)
-        d.texture = 0;
+    // Quad word +0x90: written by the guest only when it submits.
+    d.drawn = rc::ld32(poly + 0x90) != Poison;
+    d.texture = d.drawn ? rc::ld32(sp - 0xc) : 0;
     for (int i = 0; i < PolyWords; ++i)
         d.poly[i] = d.drawn && polyWord(i) ? rc::ld32(poly + 4 * i) : 0;
     s_capture->push_back(d);
