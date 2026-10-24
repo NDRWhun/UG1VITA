@@ -76,7 +76,7 @@ inline bool pf(reg32 value) { return !parity8(reg8(value)); }
 // _ftol2 as the game's native override computes it.
 inline reg64 ftol(double value)
 {
-    return reg64(x86::fistInteger<sreg64>(std::trunc(value)));
+    return reg64(x86::truncInteger64(value));
 }
 
 // The status bits and ax after fcom a, b; fnstsw ax.

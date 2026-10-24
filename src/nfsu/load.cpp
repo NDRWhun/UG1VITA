@@ -291,7 +291,7 @@ inline sreg64 truncate(double x)
 {
     if (__builtin_expect(std::fabs(x) < 2147483648.0, 1))
         return sreg32(x);
-    return x86::fistInteger<sreg64>(std::trunc(x));
+    return x86::truncInteger64(x);
 }
 
 // (pixels, weights, n, alpha max): each pixel's B, G, R bytes times its float weight, truncated, summed when the

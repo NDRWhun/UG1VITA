@@ -133,7 +133,7 @@ const Settings& settings()
 inline reg32 ftol2(x86::CPU& cpu, reg32 depth, double value)
 {
     cpu.fpu.regs[(depth + 1) & 7] = value;
-    cpu.edx_eax = reg64(x86::fistInteger<sreg64>(std::trunc(value)));
+    cpu.edx_eax = reg64(x86::truncInteger64(value));
     return cpu.eax;
 }
 
