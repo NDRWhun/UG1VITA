@@ -552,7 +552,8 @@ class Function:
             for x in self.exits[i]:
                 stored = dirty & self.boundary_registers(i, x)
                 if x.edge != 'call':
-                    stored |= clobbered & preserved
+                    # A preserved register holds its entry value here, as cpu does unless clobbered.
+                    stored = (stored & ~preserved) | (clobbered & preserved)
                 if stored:
                     key = (i, x.edge)
                     self.reg_stores[key] = self.reg_stores.get(key, 0) | stored
@@ -777,17 +778,23 @@ class Program:
                     taken.add(value)
         return taken & entries
 
+    def kept(self, a, stack_infos=None):
+        """Registers direct callers of a keep in their locals across the call: the ones it restores before
+        returning, and esp when its change is known."""
+        stack_infos = self.stack if stack_infos is None else stack_infos
+        info = stack_infos.get(a) if stack_infos else None
+        if not info:
+            return 0
+        mask = info.preserved << REG_SHIFT
+        if info.delta is not None:
+            mask |= C.REG_BIT['esp'] << REG_SHIFT
+        return mask
+
     def compute_may_def(self, fns, stack_infos=None):
         """State each function may change, its callees included. With stack_infos, registers a function restores
         before returning and an esp change known to its callers do not count."""
         def kept(a):
-            info = stack_infos.get(a) if stack_infos else None
-            if not info:
-                return 0
-            mask = info.preserved << REG_SHIFT
-            if info.delta is not None:
-                mask |= C.REG_BIT['esp'] << REG_SHIFT
-            return mask
+            return self.kept(a, stack_infos or {})
         local = dict((fn.entry_address, fn.may_def_local() & ~kept(fn.entry_address)) for fn in fns)
         callees = dict((fn.entry_address, set(x.target for i in fn.reachable for x in fn.exits[i]
                                               if x.kind in ('call', 'tail'))) for fn in fns)
@@ -959,7 +966,8 @@ class Program:
                     for x in fn.exits[i]:
                         if x.kind == 'call':
                             if x.target in ret_live:
-                                ret_live[x.target] |= fn.live_out[i] & self.result_mask(x.target)
+                                ret_live[x.target] |= fn.live_out[i] & self.result_mask(x.target) & \
+                                    ~self.kept(x.target)
                         elif x.kind == 'dyncall':
                             indirect_ret |= fn.live_out[i] & self.indirect_mask
                         elif x.kind == 'tail':
