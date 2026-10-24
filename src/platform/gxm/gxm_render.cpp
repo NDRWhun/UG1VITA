@@ -84,6 +84,22 @@ void writeSwizzled(const Texture& t, uint32_t face, uint32_t level, const void* 
                           base + texture::levelOffset(d.format, d.width, d.height, level));
 }
 
+// The smallest alpha of a written level of a 2D texture (render::TextureStorage::levelAlpha).
+void noteAlpha(Texture& t, uint32_t level, const void* data, uint32_t pitch)
+{
+    const render::TextureDesc& d = t.desc;
+    if (d.cube || d.target || level >= 16)
+        return;
+    t.levelAlpha[level].store(texture::minAlpha(d.format, d.width, d.height, level, data, pitch),
+                              std::memory_order_relaxed);
+}
+
+void copyAlpha(Texture& to, const Texture& from)
+{
+    for (uint32_t level = 0; level < 16; ++level)
+        to.levelAlpha[level].store(from.levelAlpha[level].load(std::memory_order_relaxed), std::memory_order_relaxed);
+}
+
 SceGxmBlendFactor blendFactor(uint8_t factor)
 {
     switch (factor)
@@ -720,6 +736,7 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
         perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
     }
     uint8_t* base = static_cast<uint8_t*>(t->data) + face * t->faceStride;
+    noteAlpha(*t, level, data, pitch);
     if (t->stride)
     {
         const uint32_t rowBytes = d.width * texture::unitBytes(d.format);
@@ -760,7 +777,10 @@ void FrameRenderer::copyTexture(render::TextureStorage* to, const render::Textur
     settle(dst);
     settle(src);
     if (dst->bytes == src->bytes)
+    {
         memcpy(dst->data, src->data, dst->bytes);
+        copyAlpha(*dst, *src);
+    }
 }
 
 uint32_t FrameRenderer::writeTextureAsync(render::TextureStorage* storage, uint32_t face, uint32_t level,
@@ -823,9 +843,15 @@ void FrameRenderer::runUpload(void* argument)
     const bool timed = perf::enabled();
     const uint32_t start = timed ? perf::now() : 0;
     if (u->from)
+    {
         memcpy(u->to->data, u->from->data, u->to->bytes);
+        copyAlpha(*u->to, *u->from);
+    }
     else
+    {
         writeSwizzled(*u->to, u->face, u->level, u->data, u->pitch);
+        noteAlpha(*u->to, u->level, u->data, u->pitch);
+    }
     __asm__ volatile("dsb" : : : "memory");
     if (timed)
         perf::upload(perf::UploadWorkerUs, perf::now() - start);
