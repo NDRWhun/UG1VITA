@@ -1,7 +1,7 @@
 """Which registers a function gives back unchanged, and how far it moves esp.
 
 Forward symbolic execution over the function: esp and every register is either its entry value, entry esp + k,
-or unknown; stack slots written at known esp offsets remember what was stored there. A register is preserved
+a constant or unknown; stack slots written at known esp offsets remember what was stored there. A register is preserved
 when it holds its entry value at every return (typically push on entry, pop before ret).
 
 Stores through registers that do not point into this frame are assumed not to hit the frame's save slots, as
@@ -87,14 +87,82 @@ def store(slots, address, size, value):
         slots[k] = value
 
 
+STRING_STORES = {'stos': 0, 'stosb': 1, 'stosw': 2, 'stosd': 4, 'movs': 0, 'movsb': 1, 'movsw': 2, 'movsd': 4}
+
+
+def string_store_size(fn, ins, regs):
+    """Bytes a stos/movs writes upwards from edi: one element, or ecx elements with rep and a constant ecx; None
+    when not known or the function may set the direction flag."""
+    element = STRING_STORES[ins.mnemonic.split()[-1]] or ins.operands[0].size
+    if not element or any(x.mnemonic == 'std' for x in fn.instructions):
+        return None
+    if ins.mnemonic.split()[0] in ('rep', 'repe', 'repne', 'repz', 'repnz') or ins.bytes[0] in (0xf2, 0xf3):
+        count = regs.get('ecx')
+        return element * count[1] if count and count[0] == 'const' else None
+    return element
+
+
+ESP_MOVES = {'pushfd': -4, 'popfd': 4, 'pushf': -2, 'popf': 2, 'pushal': -32, 'popal': 32}
+
+
+def esp_move(fn, i, infos):
+    """How far instruction i moves esp when it runs to its successor, or None when that is not known."""
+    ins = fn.instructions[i]
+    mnemonic = ins.mnemonic.split()[-1]
+    kind = fn.branch[i][0]
+    e = fn.effects[i]
+    if kind == 'call':
+        callee = infos.get(fn.branch[i][1])
+        return callee.delta - 4 if callee and callee.delta is not None else None
+    if kind != 'next':
+        return None if kind == 'dyncall' or (e.reg_def | e.reg_partial) & C.REG_BIT['esp'] else 0
+    if mnemonic in ('push', 'pop'):
+        if ins.operands[0].type == X.X86_OP_REG and ins.reg_name(ins.operands[0].reg) in ('esp', 'sp'):
+            return None
+        return stack_slot(ins) * (1 if mnemonic == 'pop' else -1)
+    if mnemonic in ESP_MOVES:
+        return ESP_MOVES[mnemonic]
+    if mnemonic in ('add', 'sub') and ins.operands[0].type == X.X86_OP_REG and \
+            ins.reg_name(ins.operands[0].reg) == 'esp' and ins.operands[1].type == X.X86_OP_IMM:
+        return ins.operands[1].imm * (1 if mnemonic == 'add' else -1)
+    return None if (e.reg_def | e.reg_partial) & C.REG_BIT['esp'] else 0
+
+
+def ret_anchors(fn, infos):
+    """esp offset before each instruction from which every path runs into a ret, moving esp by known amounts: the
+    ret needs esp at the entry offset."""
+    out = {}
+    for i in fn.reachable:
+        if fn.branch[i][0] == 'ret':
+            out[i] = 0
+    work = list(out)
+    while work:
+        j = work.pop()
+        for p in fn.pred[j]:
+            if p in out or any(x.edge != 'call' for x in fn.exits[p]):
+                continue
+            succ = set(fn.succ[p])
+            if not succ <= set(out):
+                continue
+            move = esp_move(fn, p, infos)
+            offsets = set(out[s] - move for s in succ) if move is not None else None
+            if offsets and len(offsets) == 1:
+                (out[p],) = offsets
+                work.append(p)
+    return out
+
+
 def analyze_function(fn, infos):
-    """StackInfo of one function, given the current infos of its callees."""
+    """StackInfo of one function, given the current infos of its callees. Where esp is unknown (after a call whose
+    esp change is unknown) and every path runs into a ret, esp is the ret anchor; the slots holding entry register
+    values above it are kept, the others dropped."""
     n = fn.n
     state_in = [None] * n
     state_in[fn.entry] = entry_state()
     info = StackInfo()
     preserved = C.ALL_REGS
     deltas = set()
+    anchors = ret_anchors(fn, infos)
     work = [fn.entry]
     while work:
         i = work.pop()
@@ -105,6 +173,9 @@ def analyze_function(fn, infos):
         e = fn.effects[i]
         mnemonic = ins.mnemonic.split()[-1]
         esp = regs['esp'] if regs['esp'] and regs['esp'][0] == 'esp' else None
+        if esp is None and i in anchors:
+            esp = ('esp', anchors[i])
+            slots = dict((k, v) for k, v in slots.items() if k >= esp[1] and v and v[0] == 'orig')
         regs['esp'] = esp
         kind = fn.branch[i][0]
         handled = False
@@ -120,6 +191,23 @@ def analyze_function(fn, infos):
             store(slots, ('esp', esp[1] - size), size, value)
             regs['esp'] = ('esp', esp[1] - size)
             handled = True
+        elif mnemonic in ('pushfd', 'pushf', 'popfd', 'popf') and esp:
+            size = 4 if mnemonic.endswith('d') else 2
+            if mnemonic.startswith('push'):
+                store(slots, ('esp', esp[1] - size), size, None)
+                size = -size
+            regs['esp'] = ('esp', esp[1] + size)
+            handled = True
+        elif mnemonic == 'pushal' and esp:
+            for n, r in enumerate(('eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi')):
+                store(slots, ('esp', esp[1] - 4 * (n + 1)), 4, esp if r == 'esp' else regs[r])
+            regs['esp'] = ('esp', esp[1] - 32)
+            handled = True
+        elif mnemonic == 'popal' and esp:
+            for offset, r in ((0, 'edi'), (4, 'esi'), (8, 'ebp'), (16, 'ebx'), (20, 'edx'), (24, 'ecx'), (28, 'eax')):
+                regs[r] = slots.get(esp[1] + offset)
+            regs['esp'] = ('esp', esp[1] + 32)
+            handled = True
         elif mnemonic == 'pop' and esp and ins.operands[0].type == X.X86_OP_REG:
             name = ins.reg_name(ins.operands[0].reg)
             value = slots.get(esp[1])
@@ -132,12 +220,19 @@ def analyze_function(fn, infos):
         elif mnemonic == 'mov' and ins.operands[0].type == X.X86_OP_REG and ins.operands[0].size == 4:
             name = ins.reg_name(ins.operands[0].reg)
             src = ins.operands[1]
-            regs[name] = reg_symbol(regs, ins, src) if src.type == X.X86_OP_REG and src.size == 4 else None
+            if src.type == X.X86_OP_IMM:
+                regs[name] = ('const', src.imm & 0xffffffff)
+            else:
+                regs[name] = reg_symbol(regs, ins, src) if src.type == X.X86_OP_REG and src.size == 4 else None
             handled = True
         elif mnemonic == 'lea' and ins.operands[0].size == 4:
             name = ins.reg_name(ins.operands[0].reg)
-            a = address_symbol(regs, ins, ins.operands[1])
-            regs[name] = a if isinstance(a, tuple) else None
+            m = ins.operands[1].mem
+            if m.base and ins.reg_name(m.base) == name and not m.index and not m.disp and not m.segment:
+                pass    # lea r, [r]: no change
+            else:
+                a = address_symbol(regs, ins, ins.operands[1])
+                regs[name] = a if isinstance(a, tuple) else None
             handled = True
         elif mnemonic in ('add', 'sub') and ins.operands[0].type == X.X86_OP_REG and \
                 ins.operands[1].type == X.X86_OP_IMM and ins.operands[0].size == 4:
@@ -178,11 +273,18 @@ def analyze_function(fn, infos):
             else:
                 for op in written_memory(ins):
                     store(slots, address_symbol(regs, ins, op), op.size, None)
-                if mnemonic in ('stos', 'stosb', 'stosw', 'stosd', 'movs', 'movsb', 'movsw', 'movsd', 'pushal',
-                                'enter', 'pushfd', 'pushf'):
+                if mnemonic in STRING_STORES:
                     d = regs.get('edi')
-                    if mnemonic in ('pushal', 'enter', 'pushfd', 'pushf') or (d and d[0] == 'esp'):
-                        slots.clear()
+                    if d and d[0] == 'esp':
+                        size = string_store_size(fn, ins, regs)
+                        if size is None:
+                            slots.clear()
+                        else:
+                            for s in list(slots):
+                                if s < d[1] + size and d[1] < s + 4:
+                                    del slots[s]
+                elif mnemonic in ('pushal', 'enter', 'pushfd', 'pushf'):
+                    slots.clear()
                 written = e.reg_def | e.reg_partial
                 for r in C.REGS:
                     if written & C.REG_BIT[r]:
