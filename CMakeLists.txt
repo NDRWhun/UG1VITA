@@ -2,7 +2,8 @@
 cmake_minimum_required(VERSION 3.16)
 
 option(NFSU_RUNTIME_CHECK "Only compile the runtime sources that build without the generated code (CI)" OFF)
-# gcc: VitaSDK's compiler. clang: clang and lld (cmake/vita-clang.cmake, LLVM from NFSU_LLVM), ThinLTO, PGO.
+# gcc: VitaSDK's compiler, PGO (cmake/gcc.cmake). clang: clang and lld (cmake/vita-clang.cmake, LLVM from NFSU_LLVM),
+# ThinLTO, PGO.
 set(NFSU_COMPILER "gcc" CACHE STRING "Compiler: gcc (VitaSDK) or clang (LLVM)")
 set_property(CACHE NFSU_COMPILER PROPERTY STRINGS gcc clang)
 
@@ -42,6 +43,12 @@ set(VITA_VERSION  "00.01")
 
 option(NFSU_LOG_DEBUG        "Verbose runtime logging" OFF)
 option(NFSU_ASSERT_SOFT      "Log failed assertions instead of trapping" OFF)
+# Profile-guided optimisation: cmake/gcc.cmake, cmake/clang.cmake.
+option(NFSU_PGO_GENERATE "Instrument for a PGO profile" OFF)
+set(NFSU_PGO_USE "" CACHE STRING "Profile to optimise with: nfsu.gcov files (gcc, a list) or an indexed .profdata (clang)")
+if(NFSU_PGO_GENERATE AND NFSU_PGO_USE)
+  message(FATAL_ERROR "NFSU_PGO_GENERATE and NFSU_PGO_USE exclude each other")
+endif()
 
 include(cmake/shaders.cmake)
 include(cmake/sources.cmake)
@@ -55,6 +62,8 @@ else()
 endif()
 set(NFSU_COMMON_FLAGS
   ${NFSU_ARCH_FLAGS}
+  # Math functions do not set errno: sqrt is a single vsqrt.f64.
+  -fno-math-errno
   -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables
   -ffunction-sections -fdata-sections
   -Wall -Wextra
@@ -62,8 +71,6 @@ set(NFSU_COMMON_FLAGS
   -ffile-prefix-map=${CMAKE_SOURCE_DIR}/=
 )
 # Generated code only sees the stable defines; debug switches stay in the runtime to avoid full rebuilds.
-  # Math functions do not set errno: sqrt is a single vsqrt.f64.
-  -fno-math-errno
 set(NFSU_DEFINES VITA __vita__ WITH_MMX)
 set(NFSU_RUNTIME_DEFINES ${NFSU_DEFINES})
 if(NFSU_LOG_DEBUG)
@@ -98,13 +105,14 @@ if(NFSU_CLANG)
   include(cmake/clang.cmake)
   set(NFSU_NO_SLP -fno-slp-vectorize)
 else()
+  include(cmake/gcc.cmake)
   set(NFSU_NO_SLP -fno-tree-slp-vectorize)
 endif()
 
 # Generated game code: large, optimise for size and compile time.
 add_library(nfsu_game OBJECT ${NFSU_GENERATED_SOURCES})
 # No SLP vectorisation: it packs guest stores into NEON stores through the stack (store forwarding stalls).
-target_compile_options(nfsu_game PRIVATE ${NFSU_COMMON_FLAGS} -O2 ${NFSU_NO_SLP} -Wno-unused-label -Wno-unused-variable -Wno-unused-parameter ${NFSU_CLANG_GAME_FLAGS})
+target_compile_options(nfsu_game PRIVATE ${NFSU_COMMON_FLAGS} -O2 ${NFSU_NO_SLP} -Wno-unused-label -Wno-unused-variable -Wno-unused-parameter ${NFSU_CLANG_GAME_FLAGS} ${NFSU_GCC_GAME_FLAGS})
 # Start-up method registration (nfsu.cpp, runs once) gains nothing from -O2 and compiles much faster at -Og.
 set(NFSU_LIGHT_SOURCES ${NFSU_GENERATED_SOURCES})
 list(FILTER NFSU_LIGHT_SOURCES INCLUDE REGEX "/nfsu\\.cpp$")
@@ -117,12 +125,13 @@ target_include_directories(nfsu_game PRIVATE ${NFSU_INCLUDES})
 
 # Runtime and Vita backend.
 add_library(nfsu_runtime OBJECT ${NFSU_RUNTIME_SOURCES} ${NFSU_SHADER_SOURCES})
-target_compile_options(nfsu_runtime PRIVATE ${NFSU_COMMON_FLAGS} -O3 ${NFSU_CLANG_FLAGS})
+target_compile_options(nfsu_runtime PRIVATE ${NFSU_COMMON_FLAGS} -O3 ${NFSU_CLANG_FLAGS} ${NFSU_GCC_FLAGS})
 target_compile_definitions(nfsu_runtime PRIVATE ${NFSU_RUNTIME_DEFINES})
 target_include_directories(nfsu_runtime PRIVATE ${NFSU_INCLUDES})
 
-add_executable(NFSUG1VITA.elf src/nfsu/main.cpp ${NFSU_CLANG_SOURCES} $<TARGET_OBJECTS:nfsu_game> $<TARGET_OBJECTS:nfsu_runtime>)
-target_compile_options(NFSUG1VITA.elf PRIVATE ${NFSU_COMMON_FLAGS} -O2 ${NFSU_CLANG_FLAGS})
+add_executable(NFSUG1VITA.elf src/nfsu/main.cpp ${NFSU_CLANG_SOURCES} ${NFSU_GCC_SOURCES}
+               $<TARGET_OBJECTS:nfsu_game> $<TARGET_OBJECTS:nfsu_runtime>)
+target_compile_options(NFSUG1VITA.elf PRIVATE ${NFSU_COMMON_FLAGS} -O2 ${NFSU_CLANG_FLAGS} ${NFSU_GCC_FLAGS})
 target_compile_definitions(NFSUG1VITA.elf PRIVATE ${NFSU_RUNTIME_DEFINES})
 target_include_directories(NFSUG1VITA.elf PRIVATE ${NFSU_INCLUDES})
 # Nothing references the main thread's stack size; keep it from being collected so the loader sees it.
@@ -131,6 +140,8 @@ if(NFSU_CLANG)
   target_link_options(NFSUG1VITA.elf PRIVATE ${NFSU_CLANG_LINK_FLAGS})
   target_link_libraries(NFSUG1VITA.elf ${NFSU_CLANG_LIBRARIES})
   set_target_properties(NFSUG1VITA.elf PROPERTIES LINK_DEPENDS "${NFSU_LLD_SCRIPT}")
+else()
+  target_link_options(NFSUG1VITA.elf PRIVATE ${NFSU_GCC_LINK_FLAGS})
 endif()
 target_link_libraries(NFSUG1VITA.elf
   stdc++
