@@ -277,9 +277,12 @@ const uint32_t MaxArrayFloats = 1024;
 // The queue thread makes its progress visible every this many records.
 const uint32_t ReadPublishMask = 255;
 // The queue thread spins this long for more calls before it sleeps; a drain spins this long before it sleeps.
-const uint32_t IdleSpinUs = 30;
+const uint32_t IdleSpinUs = 10;
 const uint32_t WaitSpinUs = 50;
 const uint32_t SpinClockMask = 15;
+const HRESULT NotReturned = HRESULT(0xffffffffu);   // result word of a call whose caller got no checked result
+// Draws queued between two publications of the written records.
+const uint32_t PublishDraws = 8;
 const uint32_t ResultLogLimit = 10;     // mismatches logged
 const uint32_t ErrorLogLimit = 3;       // calls logged per operation whose result is not D3D_OK
 const uint32_t LoggedWords = 6;
@@ -330,6 +333,8 @@ struct Deferral
     Site sites[DeferSiteCount] = {};
     bool frameScope = true;             // calls stay queued between windows
     uint32_t head = 0;                  // words written
+    uint32_t statsHead = 0;             // head at the last statistics
+    uint32_t unpublishedDraws = 0;
     uint32_t roomEnd = QueueWords;      // the head may advance to here without overwriting unrun records
     uint32_t drained = 0;               // head at the last completed drain
     uint32_t fpscr = 0;
@@ -572,7 +577,7 @@ void noteResult(uint32_t op, const uint32_t* w, uint32_t length, HRESULT h, HRES
             at += snprintf(words + at, sizeof(words) - at, " 0x%08x", unsigned(w[i]));
         return words;
     };
-    if (h != expected)
+    if (h != expected && expected != NotReturned)
     {
         d.mismatches.fetch_add(1, std::memory_order_relaxed);
         if (d.logged < ResultLogLimit)
@@ -595,11 +600,19 @@ void noteResult(uint32_t op, const uint32_t* w, uint32_t length, HRESULT h, HRES
     }
 }
 
-// The result a queued call returns to its caller, that of the last record put; stored as its last word.
+// The result a queued call returns to its caller, that of the last record put; stored as its last word. Inside a
+// flush: D3D_OK, stored as NotReturned, except for calls that change what draws need bound.
 inline HRESULT queued()
 {
     Deferral& d = s_defer;
-    const HRESULT h = expected(d.lastOp, d.last);
+    const uint32_t op = d.lastOp;
+    if (d.inWindow && op != MethodSetStreamSource && op != MethodSetIndices && op != MethodSetVertexDeclaration
+        && op != OpSetFVF && op != MethodDrawPrimitiveUP)
+    {
+        d.last[d.lastWords] = NotReturned;
+        return D3D_OK;
+    }
+    const HRESULT h = expected(op, d.last);
     d.last[d.lastWords] = h;
     return h;
 }
@@ -825,6 +838,7 @@ int queueEntry(void*)
 void publish()
 {
     Deferral& d = s_defer;
+    d.unpublishedDraws = 0;
     if (d.mode != DeferThread)
         return;
     d.write.store(d.head, std::memory_order_seq_cst);
@@ -879,13 +893,11 @@ void makeRoom(uint32_t words)
     d.roomEnd = d.read.load(std::memory_order_acquire) + QueueWords;
 }
 
-// Appends a record of words payload words and the result word, and returns its payload.
-uint32_t* put(uint32_t op, uint32_t words)
+// put when the record does not fit before the ring's end or before the unrun records.
+__attribute__((noinline)) uint32_t* putSlow(uint32_t op, uint32_t words)
 {
     Deferral& d = s_defer;
-    d.lastWords = words;
-    ++words;
-    const uint32_t need = words + 1;
+    const uint32_t need = words + 2;
     uint32_t at = d.head & QueueMask;
     if (at + need > QueueWords)
     {
@@ -900,14 +912,41 @@ uint32_t* put(uint32_t op, uint32_t words)
         makeRoom(need);
     }
     uint32_t* p = d.ring + at;
-    p[0] = op | words << 8;
+    p[0] = op | (words + 1) << 8;
     d.head += need;
     ++d.stats.calls;
-    d.stats.words += need;
     g_deferPending = true;
     d.last = p + 1;
+    d.lastWords = words;
     d.lastOp = op;
     return p + 1;
+}
+
+// Appends a record of words payload words and the result word, and returns its payload.
+inline uint32_t* put(uint32_t op, uint32_t words)
+{
+    Deferral& d = s_defer;
+    const uint32_t need = words + 2;
+    const uint32_t at = d.head & QueueMask;
+    if (__builtin_expect(at + need > QueueWords || int32_t(d.head + need - d.roomEnd) > 0, 0))
+        return putSlow(op, words);
+    uint32_t* p = d.ring + at;
+    p[0] = op | (words + 1) << 8;
+    d.head += need;
+    ++d.stats.calls;
+    g_deferPending = true;
+    d.last = p + 1;
+    d.lastWords = words;
+    d.lastOp = op;
+    return p + 1;
+}
+
+// A draw was queued: the records are published every PublishDraws draws.
+inline void publishDraw()
+{
+    Deferral& d = s_defer;
+    if (++d.unpublishedDraws >= PublishDraws)
+        publish();
 }
 
 inline void copyWords(uint32_t* to, const void* from, uint32_t words)
@@ -1120,6 +1159,8 @@ DeferStats takeDeferStats()
 {
     Deferral& d = s_defer;
     DeferStats s = d.stats;
+    s.words = d.head - d.statsHead;
+    d.statsHead = d.head;
     s.runUs = d.runUs.exchange(0, std::memory_order_relaxed);
     s.mismatches = d.mismatches.exchange(0, std::memory_order_relaxed);
     s.passes = d.passes.exchange(0, std::memory_order_relaxed);
@@ -1172,6 +1213,24 @@ void countBoundOnly(int delta)
 }
 
 // ---- Device ----
+
+// The calls that are not queued, of the methods called most.
+#define NFSU_DIRECT static __attribute__((noinline)) HRESULT
+NFSU_DIRECT setRenderStateDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD state, DWORD value);
+NFSU_DIRECT setTextureDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage, reg32 texture);
+NFSU_DIRECT drawIndexedPrimitiveDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD type, LONG baseVertex,
+                                       UINT minIndex, UINT vertices, UINT startIndex, UINT count);
+NFSU_DIRECT effectSetIntDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, x86::sreg32 value);
+NFSU_DIRECT effectSetFloatDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, float value);
+NFSU_DIRECT effectSetVectorDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, const float* vector);
+NFSU_DIRECT effectSetVectorArrayDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle,
+                                       const float* vectors, UINT count);
+NFSU_DIRECT effectSetMatrixDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, const float* matrix);
+NFSU_DIRECT effectSetMatrixProductDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle,
+                                         const float* a, const float* b, const float* c);
+NFSU_DIRECT effectSetTextureDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, reg32 texture);
+NFSU_DIRECT effectPassDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT pass);
+#undef NFSU_DIRECT
 
 HRESULT setTransform(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD state, const float* matrix)
 {
@@ -1303,6 +1362,11 @@ HRESULT setRenderState(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD st
         w[2] = value;
         return queued();
     }
+    return setRenderStateDirect(app, cpu, guest, state, value);
+}
+
+HRESULT setRenderStateDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD state, DWORD value)
+{
     drain();
     if (active())
     {
@@ -1401,7 +1465,7 @@ HRESULT clear(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD count, cons
         if (words)
             copyWords(w + 7, rects, words);
         const HRESULT h = queued();
-        publish();
+        publishDraw();
         return h;
     }
     if (deferring(cpu))
@@ -1474,7 +1538,7 @@ HRESULT drawFrameVertices(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD
             memcpy(w + 7, data, bytes);
         }
         const HRESULT h = queued();
-        publish();
+        publishDraw();
         return h;
     }
     if (deferring(cpu))
@@ -1499,6 +1563,11 @@ HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage,
         w[2] = texture;
         return queued();
     }
+    return setTextureDirect(app, cpu, guest, stage, texture);
+}
+
+HRESULT setTextureDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage, reg32 texture)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -1638,9 +1707,15 @@ HRESULT drawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, reg32 guest, DW
         w[5] = startIndex;
         w[6] = count;
         const HRESULT h = queued();
-        publish();
+        publishDraw();
         return h;
     }
+    return drawIndexedPrimitiveDirect(app, cpu, guest, type, baseVertex, minIndex, vertices, startIndex, count);
+}
+
+HRESULT drawIndexedPrimitiveDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD type, LONG baseVertex,
+                                   UINT minIndex, UINT vertices, UINT startIndex, UINT count)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -1686,7 +1761,7 @@ HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD t
             memcpy(w + 5, data, bytes);
         }
         const HRESULT h = queued();
-        publish();
+        publishDraw();
         return h;
     }
     if (deferring(cpu))
@@ -1726,6 +1801,11 @@ HRESULT effectSetInt(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 hand
         w[2] = reg32(value);
         return queued();
     }
+    return effectSetIntDirect(app, cpu, guest, handle, value);
+}
+
+HRESULT effectSetIntDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, x86::sreg32 value)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -1757,6 +1837,11 @@ HRESULT effectSetFloat(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 ha
         w[2] = bits(value);
         return queued();
     }
+    return effectSetFloatDirect(app, cpu, guest, handle, value);
+}
+
+HRESULT effectSetFloatDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, float value)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -1790,6 +1875,11 @@ HRESULT effectSetVector(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 h
             copyWords(w + 3, vector, 4);
         return queued();
     }
+    return effectSetVectorDirect(app, cpu, guest, handle, vector);
+}
+
+HRESULT effectSetVectorDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, const float* vector)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -1826,6 +1916,12 @@ HRESULT effectSetVectorArray(WinApplication* app, x86::CPU& cpu, reg32 guest, re
             copyWords(w + 4, vectors, floats);
         return queued();
     }
+    return effectSetVectorArrayDirect(app, cpu, guest, handle, vectors, count);
+}
+
+HRESULT effectSetVectorArrayDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, const float* vectors,
+                                   UINT count)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -1860,6 +1956,11 @@ HRESULT effectSetMatrix(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 h
             copyWords(w + 3, matrix, 16);
         return queued();
     }
+    return effectSetMatrixDirect(app, cpu, guest, handle, matrix);
+}
+
+HRESULT effectSetMatrixDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, const float* matrix)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -1935,6 +2036,13 @@ HRESULT effectSetMatrixProduct(WinApplication* app, x86::CPU& cpu, reg32 guest, 
             copyWords(w + 36, c, 16);
         return queued();
     }
+    return effectSetMatrixProductDirect(app, cpu, guest, handle, a, b, c);
+}
+
+HRESULT effectSetMatrixProductDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, const float* a,
+                                     const float* b, const float* c)
+{
+    const uint32_t count = c ? 3 : 2;
     if (deferring(cpu))
         fallback();
     drain();
@@ -1960,6 +2068,11 @@ HRESULT effectSetTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 
         w[2] = texture;
         return queued();
     }
+    return effectSetTextureDirect(app, cpu, guest, handle, texture);
+}
+
+HRESULT effectSetTextureDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, reg32 texture)
+{
     if (deferring(cpu))
         fallback();
     drain();
@@ -2025,6 +2138,11 @@ HRESULT effectPass(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT pass)
         w[1] = pass;
         return queued();
     }
+    return effectPassDirect(app, cpu, guest, pass);
+}
+
+HRESULT effectPassDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT pass)
+{
     drain();
     if (active())
     {
