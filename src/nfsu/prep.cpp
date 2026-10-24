@@ -6,6 +6,7 @@
 #include "flares.h"
 #include "draw.h"
 #include "mathfn.h"
+#include "particles.h"
 #include "phases.h"
 
 #include <platform/config.h>
@@ -360,6 +361,7 @@ void frame(win32::WinApplication* app, x86::CPU& cpu)
     if (s.native && s.shadow)
         pf::logInfo("shadow_prep: %u calls compared, %u differ", unsigned(s_shadow.calls), unsigned(s_shadow.differing));
     flares::report(s_frames);
+    particles::report(s_frames);
     draw::logUsage(s_frames);
     s_perf = PerfSums();
     s_frames = 0;

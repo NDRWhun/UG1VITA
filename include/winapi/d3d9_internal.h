@@ -455,6 +455,8 @@ public:
     bool valid() const                      { return m_storage != nullptr; }
     UINT size() const                       { return m_size; }
     DWORD format() const                    { return m_format; }
+    // Guest address of the memory Lock hands out (offset 0); it keeps the bytes written until the next write.
+    x86::reg32 shadowAddress() const;
 
     HRESULT GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* device);
     DWORD SetPriority(WinApplication* app, x86::CPU& cpu, DWORD priority);

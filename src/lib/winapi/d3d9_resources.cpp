@@ -750,6 +750,11 @@ HRESULT Buffer::Lock(WinApplication* app, x86::CPU& cpu, UINT offset, UINT size,
     return D3D_OK;
 }
 
+x86::reg32 Buffer::shadowAddress() const
+{
+    return m_shadow ? m_shadow->getBlockStart() : 0;
+}
+
 HRESULT Buffer::Unlock(WinApplication* app, x86::CPU& cpu)
 {
     RC_USE(app);

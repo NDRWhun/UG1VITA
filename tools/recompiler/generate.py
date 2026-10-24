@@ -141,6 +141,8 @@ NATIVE_OVERRIDES = [
     0x409580,   # world views of the frame render
     0x40ed50,   # draw queue flush
     0x571050,   # RenderCars
+    # Particle draw (src/nfsu/particles.cpp): the quads of every particle on the workers, the draws in order.
+    0x404110,   # particle system list draw for a view
 ]
 
 # Byte patches applied to the code before discovery: (address, original bytes, new bytes) in hex. Generation stops
