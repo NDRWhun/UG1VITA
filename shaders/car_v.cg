@@ -44,6 +44,8 @@ void main(
     vTex1 = r.x * uWorldView[0].xyz + r.y * uWorldView[1].xyz + r.z * uWorldView[2].xyz;
 
     float4 s = harmonic(r, uHarmonic);
-    float lum = pow(saturate(s.w), uPowers.x);
+    // pow(0, 0) is 1 and pow(0, p > 0) is 0.
+    float specularW = saturate(s.w);
+    float lum = specularW > 0.0 ? pow(specularW, uPowers.x) : (uPowers.x == 0.0 ? 1.0 : 0.0);
     vSpecular = saturate(float4(s.xyz * lum * specularScale.xyz * 0.5, env));
 }
