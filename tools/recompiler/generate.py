@@ -71,6 +71,7 @@ NATIVE_OVERRIDES = [
     0x64e330,   # SND tick
     0x64e2f0,   # millisecond callbacks (the bank tick)
     0x655880,   # stream notifications to the game's callbacks
+    0x64bbd0,   # object release: listeners, then the free at the last reference
     0x656d70,   # render frames into the DirectSound buffer
     0x65a880,   # dst += src * gain
     0x65a9a0,   # 16-bit -> float

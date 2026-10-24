@@ -644,9 +644,9 @@ private:
 
 // Library functions (table 0x6E9AE8) a routine calls without the execution lock in the render loop: they read and
 // write only the data their arguments point at (the routine's and the bank's), the SND random generator state
-// (0x6511B0) and constants, and call nothing else. The others (instance teardown 0x64C690 with listener callbacks,
-// the game's allocator and the SND mutex, sound starts 0x64D860, the listener walks 0x64C800, 0x64C870, 0x64C9B0)
-// take the lock for the call.
+// (0x6511B0) and constants, and call nothing else. The sound state 0x64D860 and the instance teardown 0x64C690 run
+// without it when their audit passes (mixer::libraryAudited); the others (the listener walks 0x64C800, 0x64C870,
+// 0x64C9B0) and failed audits take the lock for the rest of the render loop's run.
 const x86::reg32 s_unlockedLibrary[] = {
     0x64c650, 0x64c660, 0x64c670, 0x64c680, 0x64ca00, 0x64ca50, 0x64ca80, 0x64cb30, 0x64cb90, 0x64cbd0, 0x64cc20,
     0x64cc60, 0x64ccc0, 0x64cdd0, 0x64cef0, 0x64cf90, 0x64cfb0, 0x64cff0, 0x64d020, 0x64d030, 0x64d060, 0x64d070,
@@ -655,22 +655,24 @@ const x86::reg32 s_unlockedLibrary[] = {
 };
 
 // A routine's call of cpu.ip. In the render loop without the execution lock, a call of a translated function
-// outside the list above runs with the lock; calls of bank code run as they are.
+// outside the list above that fails its audit takes the lock for the rest of the loop's run; calls of bank code run
+// as they are.
 void callTarget(win32::WinApplication* app, x86::CPU& cpu)
 {
     const x86::reg32 target = cpu.ip;
+    const char* reason = nullptr;
+    x86::reg32 value = 0;
     if (mixer::unlocked(cpu)
         && !std::binary_search(std::begin(s_unlockedLibrary), std::end(s_unlockedLibrary), target)
-        && app->getMethodName(target))
+        && app->getMethodName(target)
+        && !mixer::libraryAudited(target, cpu, reason, value))
     {
-        mixer::Locked locked(app, cpu);
-        app->dynamic_call(target, cpu);
+        mixer::lockRest(app, cpu);
         if (pf::perf::enabled())
         {
             pf::perf::audio(pf::perf::AudioLibraryLocked, 1);
-            pf::perf::audioLocked("library call", target);
+            pf::perf::audioLocked(reason, value);
         }
-        return;
     }
     app->dynamic_call(target, cpu);
 }

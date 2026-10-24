@@ -88,10 +88,10 @@ enum Audio
     AudioRenderLockedUs,
     AudioLoopsUnlocked,         // runs of the render loop 0x654050 without the execution lock
     AudioLoopUnlockedUs,        // their time, the parts that took the lock again included
-    AudioTicksLocked,           // SND ticks (0x64E330) that took the lock again (the audit failed)
-    AudioCallbacksLocked,       // millisecond callback walks (0x64E2F0) that took the lock again
-    AudioNotificationsLocked,   // stream notification deliveries (0x655880) that took the lock again
-    AudioLibraryLocked,         // library calls of bank routines that took the lock again
+    AudioTicksLocked,           // SND ticks (0x64E330) that took the lock for the rest of the loop (audit failed)
+    AudioCallbacksLocked,       // millisecond callback walks (0x64E2F0) that took it for the rest of the loop
+    AudioNotificationsLocked,   // stream notification deliveries (0x655880) that took it for the call
+    AudioLibraryLocked,         // library calls of bank routines and object releases that took it for the rest
     AudioBankRuns,              // bank routines run
     AudioBankUs,                // their time, called library functions included
     AudioBankInstructions,      // bank instructions interpreted
