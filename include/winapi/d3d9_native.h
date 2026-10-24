@@ -169,16 +169,24 @@ inline void drain()
         drainSlow();
 }
 
-// Queue statistics since the last call, for perf logs.
+enum { DeferOpCount = 32 };
+
+// Queue statistics since the last call, for perf logs. A queued call returns the result its arguments give (handle,
+// index and object kind checks); draws return D3D_OK.
 struct DeferStats
 {
     uint32_t windows, calls, words, fallbacks;  // fallbacks: calls of a window that ran at once
     uint32_t drains, windowDrains;              // drains that waited; of them, inside a window
     uint64_t waitUs, runUs;                     // drain waits of the caller; queue run time
-    uint32_t results, passes;                   // queued calls whose result was not D3D_OK; Begin pass counts that differ
+    uint32_t mismatches, passes;                // queued calls whose result differs from the one returned; Begin pass
+                                                // counts that differ
     uint32_t deletes;                           // objects released by queued calls, deleted by a drain
+    uint32_t errors[DeferOpCount];              // per operation: queued calls whose result was not D3D_OK
+    HRESULT errorCodes[DeferOpCount];           // the last such result
 };
 DeferStats takeDeferStats();
+// Name of a queue operation (DeferStats::errors index).
+const char* deferOpName(uint32_t op);
 
 // ---- Effect parts used by the bridge (d3dx9.cpp) ----
 
@@ -198,6 +206,13 @@ HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handl
 HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UINT count, uint32_t fpscr);
 // The pass count Begin stores.
 UINT passCount(reg32 effect);
+// The results the setters return for these arguments, without setting: float setters (data: not null), SetInt,
+// SetFloat, SetTexture, Pass.
+HRESULT checkFloats(reg32 effect, reg32 handle, bool data);
+HRESULT checkInt(reg32 effect, reg32 handle);
+HRESULT checkFloat(reg32 effect, reg32 handle);
+HRESULT checkTexture(reg32 effect, reg32 handle, reg32 texture);
+HRESULT checkPass(reg32 effect, UINT pass);
 HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags);
 HRESULT pass(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass);
 HRESULT end(WinApplication* app, x86::CPU& cpu, reg32 effect);

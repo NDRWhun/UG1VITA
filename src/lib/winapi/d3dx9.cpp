@@ -363,6 +363,31 @@ public:
     HRESULT setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count, uint32_t fpscr);
     // The pass count Begin stores.
     UINT passCount() const                  { return info().passes[m_technique]; }
+    // The results of the setters for these arguments, without setting.
+    HRESULT checkFloats(x86::reg32 handle, bool data) const
+    {
+        const int p = param(handle);
+        return p < 0 || !data || s_params[p].type != TypeFloat ? D3DERR_INVALIDCALL : D3D_OK;
+    }
+    HRESULT checkInt(x86::reg32 handle) const
+    {
+        const int p = param(handle);
+        return p >= 0 && (s_params[p].type == TypeInt || s_params[p].type == TypeFloat) ? D3D_OK : D3DERR_INVALIDCALL;
+    }
+    HRESULT checkFloat(x86::reg32 handle) const
+    {
+        const int p = param(handle);
+        return p >= 0 && s_params[p].type == TypeInt ? D3D_OK : checkFloats(handle, true);
+    }
+    HRESULT checkTexture(x86::reg32 handle, const Object* texture) const
+    {
+        const int p = param(handle);
+        if (p < 0 || s_params[p].type != TypeTexture)
+            return D3DERR_INVALIDCALL;
+        return texture && texture->kind() != KindTexture && texture->kind() != KindCubeTexture ? D3DERR_INVALIDCALL
+                                                                                                : D3D_OK;
+    }
+    HRESULT checkPass(UINT pass) const      { return pass >= info().passes[m_technique] ? D3DERR_INVALIDCALL : D3D_OK; }
 
 private:
     // Writes n floats of a parameter; a change is sent to the render thread.
@@ -1190,6 +1215,31 @@ HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UIN
 UINT passCount(reg32 effect)
 {
     return object(effect)->passCount();
+}
+
+HRESULT checkFloats(reg32 effect, reg32 handle, bool data)
+{
+    return object(effect)->checkFloats(handle, data);
+}
+
+HRESULT checkInt(reg32 effect, reg32 handle)
+{
+    return object(effect)->checkInt(handle);
+}
+
+HRESULT checkFloat(reg32 effect, reg32 handle)
+{
+    return object(effect)->checkFloat(handle);
+}
+
+HRESULT checkTexture(reg32 effect, reg32 handle, reg32 texture)
+{
+    return object(effect)->checkTexture(handle, lookup(texture));
+}
+
+HRESULT checkPass(reg32 effect, UINT pass)
+{
+    return object(effect)->checkPass(pass);
 }
 
 HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags)

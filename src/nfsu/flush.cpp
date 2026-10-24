@@ -1157,12 +1157,21 @@ void logDeferral(unsigned frames)
     if (!frames || settings().async == bridge::DeferOff)
         return;
     const bridge::DeferStats d = bridge::takeDeferStats();
+    char errors[512] = {};
+    int at = 0;
+    for (uint32_t op = 0; op < bridge::DeferOpCount && at < int(sizeof(errors)); ++op)
+    {
+        if (d.errors[op])
+            at += snprintf(errors + at, sizeof(errors) - at, " %s %.1f/frame (0x%08x),", bridge::deferOpName(op),
+                           double(d.errors[op]) / frames, unsigned(d.errorCodes[op]));
+    }
     pf::logInfo("flush_async: %u windows/frame, %u queued calls/frame (%u KiB), %u ran at once; queue run %.2f ms/frame;"
-                " drains that waited %u/frame (%u inside a flush), wait %.2f ms/frame; results not D3D_OK %u, Begin"
-                " pass counts that differ %u, late deletes %u (in these frames)", d.windows / frames, d.calls / frames,
-                d.words / frames / 256, d.fallbacks / frames, double(d.runUs) / 1000.0 / frames, d.drains / frames,
-                d.windowDrains / frames, double(d.waitUs) / 1000.0 / frames, unsigned(d.results), unsigned(d.passes),
-                unsigned(d.deletes));
+                " drains that waited %u/frame (%u inside a flush), wait %.2f ms/frame; in these frames: results that"
+                " differ from the returned ones %u, Begin pass counts that differ %u, late deletes %u; results not"
+                " D3D_OK by method:%s", d.windows / frames, d.calls / frames, d.words / frames / 256,
+                d.fallbacks / frames, double(d.runUs) / 1000.0 / frames, d.drains / frames, d.windowDrains / frames,
+                double(d.waitUs) / 1000.0 / frames, unsigned(d.mismatches), unsigned(d.passes), unsigned(d.deletes),
+                at ? errors : " none");
 }
 
 }

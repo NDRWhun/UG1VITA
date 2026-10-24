@@ -259,8 +259,10 @@ enum : uint8_t
     OpSetSamplerState,
     OpSetMatrixProduct,     // effect, handle, count, FPSCR, count matrices
     OpFpscr,                // the FPSCR the following calls run with
-    OpWrap                  // the next record is at the start of the ring
+    OpWrap,                 // the next record is at the start of the ring
+    OpCount
 };
+static_assert(uint32_t(OpCount) <= uint32_t(DeferOpCount),"DeferStats has a slot per operation");
 
 const uint32_t QueueWords = 1u << 18;           // 1 MiB ring
 const uint32_t QueueMask = QueueWords - 1;
@@ -272,7 +274,9 @@ const uint32_t ReadPublishMask = 255;
 const uint32_t IdleSpinUs = 30;
 const uint32_t WaitSpinUs = 50;
 const uint32_t SpinClockMask = 15;
-const uint32_t ResultLogLimit = 10;
+const uint32_t ResultLogLimit = 10;     // mismatches logged
+const uint32_t ErrorLogLimit = 3;       // calls logged per operation whose result is not D3D_OK
+const uint32_t LoggedWords = 6;
 const uint32_t QueueStack = 64 * 1024;
 
 const char* opName(uint32_t op)
@@ -318,10 +322,16 @@ struct Deferral
     bool runningInline = false;
     x86::CPU runCpu;                    // passed to the queued methods, not read by them
 
+    const uint32_t* last = nullptr;     // the payload and operation of the last record put
+    uint32_t lastOp = 0;
+
     // Statistics.
     DeferStats stats = {};
-    std::atomic<uint32_t> runUs{0}, results{0}, passes{0};
+    std::atomic<uint32_t> runUs{0}, mismatches{0}, passes{0};
+    std::atomic<uint32_t> errors[DeferOpCount] = {};
+    std::atomic<HRESULT> errorCodes[DeferOpCount] = {};
     uint32_t logged = 0;
+    uint32_t errorsLogged[DeferOpCount] = {};
 };
 
 Deferral s_defer;
@@ -366,15 +376,96 @@ void notifyDrain()
         d.done->post();
 }
 
-void noteResult(uint32_t op, HRESULT result)
+inline bool isKind(const Object* object, Kind kind)
+{
+    return object && object->kind() == kind;
+}
+
+// The result of a queued call for its payload w: the method's checks of arguments, handles and object kinds; D3D_OK
+// for draws.
+HRESULT predict(uint32_t op, const uint32_t* w)
+{
+    const HRESULT invalid = D3DERR_INVALIDCALL;
+    switch (op)
+    {
+    case MethodSetTransform:        return w[2] ? D3D_OK : invalid;
+    case MethodSetMaterial:         return w[1] ? D3D_OK : invalid;
+    case MethodSetLight:            return w[2] && w[1] < 8 ? D3D_OK : invalid;
+    case MethodLightEnable:         return w[1] < 8 ? D3D_OK : invalid;
+    case MethodSetRenderState:      return w[1] < MaxRenderStates ? D3D_OK : invalid;
+    case OpSetTextureStageState:    return w[1] < MaxStages && w[2] < D3DTSS_COUNT ? D3D_OK : invalid;
+    case MethodSetTexture:
+    {
+        if (w[1] >= MaxSamplerStages)
+            return D3D_OK;
+        const Object* t = lookup(w[2]);
+        return !t || isKind(t, KindTexture) || isKind(t, KindCubeTexture) ? D3D_OK : invalid;
+    }
+    case MethodSetStreamSource:
+    {
+        if (w[1] != 0)
+            return D3D_OK;
+        const Object* b = lookup(w[2]);
+        return !b || isKind(b, KindVertexBuffer) ? D3D_OK : invalid;
+    }
+    case MethodSetIndices:
+    {
+        const Object* b = lookup(w[1]);
+        return !b || isKind(b, KindIndexBuffer) ? D3D_OK : invalid;
+    }
+    case MethodDrawPrimitiveUP:         return w[4] && w[3] ? D3D_OK : invalid;
+    case MethodEffectSetInt:            return effect::checkInt(w[0], w[1]);
+    case MethodEffectSetFloat:          return effect::checkFloat(w[0], w[1]);
+    case MethodEffectSetVector:
+    case MethodEffectSetMatrix:         return effect::checkFloats(w[0], w[1], w[2] != 0);
+    case MethodEffectSetVectorArray:
+    case MethodEffectSetMatrixArray:    return effect::checkFloats(w[0], w[1], w[3] != 0);
+    case OpSetMatrixProduct:            return effect::checkFloats(w[0], w[1], true);
+    case MethodEffectSetTexture:        return effect::checkTexture(w[0], w[1], w[2]);
+    case MethodEffectPass:              return effect::checkPass(w[0], w[1]);
+    default:                            return D3D_OK;
+    }
+}
+
+// The record's call ran with result h and returned expected to its caller; w: its payload of length words.
+void noteResult(uint32_t op, const uint32_t* w, uint32_t length, HRESULT h, HRESULT expected)
 {
     Deferral& d = s_defer;
-    d.results.fetch_add(1, std::memory_order_relaxed);
-    if (d.logged < ResultLogLimit)
+    char words[LoggedWords * 11 + 1] = {};
+    const auto text = [&]
     {
-        ++d.logged;
-        pf::logInfo("flush_async: queued %s returned 0x%08x, its caller got D3D_OK", opName(op), unsigned(result));
+        int at = 0;
+        for (uint32_t i = 0; i < length && i < LoggedWords; ++i)
+            at += snprintf(words + at, sizeof(words) - at, " 0x%08x", unsigned(w[i]));
+        return words;
+    };
+    if (h != expected)
+    {
+        d.mismatches.fetch_add(1, std::memory_order_relaxed);
+        if (d.logged < ResultLogLimit)
+        {
+            ++d.logged;
+            pf::logInfo("flush_async: queued %s returned 0x%08x, its caller got 0x%08x; words%s", opName(op),
+                        unsigned(h), unsigned(expected), text());
+        }
     }
+    if (h != D3D_OK)
+    {
+        d.errors[op].fetch_add(1, std::memory_order_relaxed);
+        d.errorCodes[op].store(h, std::memory_order_relaxed);
+        if (d.errorsLogged[op] < ErrorLogLimit)
+        {
+            ++d.errorsLogged[op];
+            pf::logInfo("flush_async: %s returned 0x%08x (its caller got 0x%08x); words%s", opName(op), unsigned(h),
+                        unsigned(expected), text());
+        }
+    }
+}
+
+// The result a queued call returns to its caller: that of the last record put.
+inline HRESULT queued()
+{
+    return predict(s_defer.lastOp, s_defer.last);
 }
 
 // Runs the record at p; returns its length in words.
@@ -485,8 +576,12 @@ uint32_t runRecord(const uint32_t* p)
     default:
         pf::fatal("flush_async: queue record 0x%08x", unsigned(p[0]));
     }
-    if (__builtin_expect(h != D3D_OK, 0))
-        noteResult(op, h);
+    if (op != OpFpscr)
+    {
+        const HRESULT expected = predict(op, w);
+        if (__builtin_expect(h != D3D_OK || h != expected, 0))
+            noteResult(op, w, length, h, expected);
+    }
     return 1 + length;
 }
 
@@ -646,6 +741,8 @@ uint32_t* put(uint32_t op, uint32_t words)
     ++d.stats.calls;
     d.stats.words += need;
     g_deferPending = true;
+    d.last = p + 1;
+    d.lastOp = op;
     return p + 1;
 }
 
@@ -831,10 +928,20 @@ DeferStats takeDeferStats()
     Deferral& d = s_defer;
     DeferStats s = d.stats;
     s.runUs = d.runUs.exchange(0, std::memory_order_relaxed);
-    s.results = d.results.exchange(0, std::memory_order_relaxed);
+    s.mismatches = d.mismatches.exchange(0, std::memory_order_relaxed);
     s.passes = d.passes.exchange(0, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < DeferOpCount; ++i)
+    {
+        s.errors[i] = d.errors[i].exchange(0, std::memory_order_relaxed);
+        s.errorCodes[i] = d.errorCodes[i].load(std::memory_order_relaxed);
+    }
     d.stats = DeferStats{};
     return s;
+}
+
+const char* deferOpName(uint32_t op)
+{
+    return opName(op);
 }
 
 bool onQueueThread()
@@ -868,7 +975,7 @@ HRESULT setTransform(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stat
         w[2] = matrix ? 1 : 0;
         if (matrix)
             copyWords(w + 3, matrix, 16);
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
@@ -898,7 +1005,7 @@ HRESULT setMaterial(WinApplication* app, x86::CPU& cpu, reg32 guest, const DWORD
         w[1] = material ? 1 : 0;
         if (material)
             copyWords(w + 2, material, 17);
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
@@ -928,7 +1035,7 @@ HRESULT setLight(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD index, c
         w[2] = light ? 1 : 0;
         if (light)
             copyWords(w + 3, light, 26);
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
@@ -957,7 +1064,7 @@ HRESULT lightEnable(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD index
         w[0] = guest;
         w[1] = index;
         w[2] = reg32(enable);
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
@@ -986,7 +1093,7 @@ HRESULT setRenderState(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD st
         w[0] = guest;
         w[1] = state;
         w[2] = value;
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
@@ -1016,7 +1123,7 @@ HRESULT setTextureStageState(WinApplication* app, x86::CPU& cpu, reg32 guest, DW
         w[1] = stage;
         w[2] = type;
         w[3] = value;
-        return D3D_OK;
+        return queued();
     }
     drain();
     return device(guest)->SetTextureStageState(app, cpu, stage, type, value);
@@ -1031,7 +1138,7 @@ HRESULT setSamplerState(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD s
         w[1] = sampler;
         w[2] = type;
         w[3] = value;
-        return D3D_OK;
+        return queued();
     }
     drain();
     return device(guest)->SetSamplerState(app, cpu, sampler, type, value);
@@ -1045,7 +1152,7 @@ HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage,
         w[0] = guest;
         w[1] = stage;
         w[2] = texture;
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1075,7 +1182,7 @@ HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 guest, re
         uint32_t* w = put(MethodSetVertexDeclaration, 2);
         w[0] = guest;
         w[1] = declaration;
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1109,7 +1216,7 @@ HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT st
         w[2] = buffer;
         w[3] = offset;
         w[4] = stride;
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1142,7 +1249,7 @@ HRESULT setIndices(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 buffer
         uint32_t* w = put(MethodSetIndices, 2);
         w[0] = guest;
         w[1] = buffer;
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1178,7 +1285,7 @@ HRESULT drawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, reg32 guest, DW
         w[5] = startIndex;
         w[6] = count;
         publish();
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1225,7 +1332,7 @@ HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD t
             memcpy(w + 5, data, bytes);
         }
         publish();
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1260,7 +1367,7 @@ HRESULT effectSetInt(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 hand
         w[0] = guest;
         w[1] = handle;
         w[2] = reg32(value);
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1291,7 +1398,7 @@ HRESULT effectSetFloat(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 ha
         w[0] = guest;
         w[1] = handle;
         w[2] = bits(value);
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1324,7 +1431,7 @@ HRESULT effectSetVector(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 h
         w[2] = vector ? 1 : 0;
         if (vector)
             copyWords(w + 3, vector, 4);
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1360,7 +1467,7 @@ HRESULT effectSetVectorArray(WinApplication* app, x86::CPU& cpu, reg32 guest, re
         w[3] = vectors ? 1 : 0;
         if (vectors)
             copyWords(w + 4, vectors, floats);
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1394,7 +1501,7 @@ HRESULT effectSetMatrix(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 h
         w[2] = matrix ? 1 : 0;
         if (matrix)
             copyWords(w + 3, matrix, 16);
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1430,7 +1537,7 @@ HRESULT effectSetMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 guest, re
         w[3] = matrices ? 1 : 0;
         if (matrices)
             copyWords(w + 4, matrices, floats);
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1469,7 +1576,7 @@ HRESULT effectSetMatrixProduct(WinApplication* app, x86::CPU& cpu, reg32 guest, 
         copyWords(w + 20, b, 16);
         if (c)
             copyWords(w + 36, c, 16);
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1494,7 +1601,7 @@ HRESULT effectSetTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 
         w[0] = guest;
         w[1] = handle;
         w[2] = texture;
-        return D3D_OK;
+        return queued();
     }
     if (deferring(cpu))
         fallback();
@@ -1529,7 +1636,7 @@ HRESULT effectBegin(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT* passe
         w[3] = count;
         if (passes)
             *passes = count;
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
@@ -1559,7 +1666,7 @@ HRESULT effectPass(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT pass)
         uint32_t* w = put(MethodEffectPass, 2);
         w[0] = guest;
         w[1] = pass;
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
@@ -1584,7 +1691,7 @@ HRESULT effectEnd(WinApplication* app, x86::CPU& cpu, reg32 guest)
     if (deferring(cpu))
     {
         put(MethodEffectEnd, 1)[0] = guest;
-        return D3D_OK;
+        return queued();
     }
     drain();
     if (active())
