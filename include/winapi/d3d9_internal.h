@@ -785,6 +785,12 @@ public:
     HRESULT DrawPrimitive(WinApplication* app, x86::CPU& cpu, DWORD type, UINT start, UINT count);
     HRESULT DrawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, DWORD type, LONG baseVertex, UINT minIndex,
                                  UINT vertices, UINT startIndex, UINT count);
+    // Native callers: memory of the frame being recorded for vertex data (null when the frame's vertex arena is
+    // full), and DrawIndexedPrimitive with base vertex 0 that reads the stream's vertices from such memory instead of
+    // the stream's buffer; stream stride, declaration and indices as set.
+    void* frameVertices(WinApplication* app, x86::CPU& cpu, uint32_t bytes);
+    HRESULT drawIndexedFrameVertices(WinApplication* app, x86::CPU& cpu, DWORD type, UINT minIndex, UINT vertices,
+                                     UINT startIndex, UINT count, const void* data);
     HRESULT DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, UINT count, const void* data,
                             UINT stride);
     HRESULT DrawIndexedPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, UINT minIndex, UINT vertices,
