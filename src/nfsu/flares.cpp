@@ -89,6 +89,8 @@ const uint32_t ShadowLogLimit = 20;
 inline double ld(reg32 address) { return double(rc::ldf32(address)); }
 inline reg32 bits(float value) { reg32 r; memcpy(&r, &value, 4); return r; }
 inline float real(reg32 value) { float r; memcpy(&r, &value, 4); return r; }
+float real(float) = delete;
+float real(double) = delete;
 
 // The words of the quad record that 0x5443f0 writes.
 inline bool polyWord(int w) { return w >= 20 || (w >= 4 && (w & 3) != 3); }
@@ -410,7 +412,7 @@ void visibility(Flare& f)
     {
         f.b(double(dot), ld(Zero));
         if (double(dot) < ld(Zero))
-            facing = real(0);
+            facing = real(0u);
     }
     const float p1[4] = { p[0], p[1], p[2], 1.0f };
     float q[4];
@@ -559,7 +561,7 @@ bool quad(win32::WinApplication* app, x86::CPU& cpu, const Flare& f, reg32 type,
     colour[0] = bits(float((ld(type + 0x18) - ld(type + 8)) * intensity + ld(type + 8)));
     colour[1] = bits(float((ld(type + 0x1c) - ld(type + 0xc)) * intensity + ld(type + 0xc)));
     colour[2] = bits(float((ld(type + 0x20) - ld(type + 0x10)) * intensity + ld(type + 0x10)));
-    const double alpha = (intensity * (ld(type + 0x24) - ld(type + 0x14)) + ld(type + 0x14)) * double(real(f.fade));
+    const double alpha = (intensity * (ld(type + 0x24) - ld(type + 0x14)) + ld(type + 0x14)) * double(f.fade);
     colour[3] = bits(float(alpha));
     const double top = ld(ColourMax);
     for (int i = 0; i < 3; ++i)
