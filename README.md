@@ -66,6 +66,10 @@ Not final yet.
 Optional settings go in `ux0:data/NFSUG1VITA/nfsug1vita.cfg`, one `key=value` per line. The list of settings is not
 final yet. The log is written to `ux0:data/NFSUG1VITA/nfsug1vita.log`.
 
+Screen: `widescreen=1` (default) renders at the display's 960x544 with the 4:3 vertical view and a wider horizontal
+one, and centres the 2D screens and the HUD at 4:3; `widescreen=0` keeps the game's resolution option (800x600 by
+default) scaled to the display.
+
 Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your
 car; the timing log is on and a `bench: summary` line gives the fps and frame times from the start signal to the
 finish. Off by default; the other keys need `bench=1`:
