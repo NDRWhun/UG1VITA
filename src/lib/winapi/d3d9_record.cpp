@@ -3,7 +3,9 @@
 // (programs, fixed function, alpha test, blend factor, constants) before the frame is drawn.
 
 #include <winapi/d3d9_internal.h>
+#include <platform/config.h>
 #include <platform/log.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 
@@ -100,6 +102,7 @@ public:
 
 private:
     bool fillState(render::Frame& frame, const DrawRecord& record, render::DrawCall& draw);
+    bool alphaTestPasses(const DrawRecord& record, const render::DrawCall& draw, const float test[2]) const;
     const float* block(uint16_t id) const
     {
         return id < m_blocks.size() && !m_blocks[id].empty() ? m_blocks[id].data() : nullptr;
@@ -117,6 +120,90 @@ private:
 };
 
 Resolver s_resolver;
+
+const uint32_t FrameVertexScan = 4096;      // most vertices of a frame-arena draw scanned for their alpha
+const uint8_t BufferScans = 4;              // scans of one vertex buffer before its alpha counts as unknown
+
+// Smallest vertex alpha a draw reads (the alpha byte of its colour element), 0 when unknown. Vertex buffers: the
+// smallest over the whole buffer at the element's position, kept until the buffer is written in place again.
+uint8_t vertexAlpha(const DrawRecord& record, const render::DrawCall& draw)
+{
+    const render::VertexLayout& l = render::layout(record.layout);
+    const render::VertexElement* color = nullptr;
+    for (uint32_t i = 0; i < l.count; ++i)
+    {
+        if (l.elements[i].usage == render::UsageColor
+            && (l.elements[i].type == render::TypeColor || l.elements[i].type == render::TypeUByte4N))
+            color = &l.elements[i];
+    }
+    if (!color || !l.stride || !draw.vertices)
+        return 0;
+    const uint32_t stride = l.stride;
+    render::BufferStorage* b = const_cast<render::BufferStorage*>(record.vertexStorage);
+    if (!b)
+    {
+        if (draw.vertexCount > FrameVertexScan)
+            return 0;
+        const uint8_t* p = static_cast<const uint8_t*>(draw.vertices) + color->offset + 3;
+        uint8_t lowest = 255;
+        for (uint32_t i = 0; i < draw.vertexCount && lowest; ++i)
+            lowest = p[size_t(i) * stride] < lowest ? p[size_t(i) * stride] : lowest;
+        return lowest;
+    }
+    const ptrdiff_t start = static_cast<const uint8_t*>(draw.vertices) - static_cast<const uint8_t*>(b->data);
+    if (start < 0 || uint32_t(start) >= b->size)
+        return 0;
+    const uint32_t offset = uint32_t(start + color->offset + 3) % stride;
+    const uint32_t writes = b->writes.load(std::memory_order_acquire);
+    if (b->alphaWrites == writes && b->alphaStride == stride && b->alphaOffset == offset)
+        return b->alpha;
+    if (b->alphaScans >= BufferScans)
+        return 0;
+    ++b->alphaScans;
+    const uint8_t* data = static_cast<const uint8_t*>(b->data);
+    uint8_t lowest = 255;
+    for (uint32_t i = offset; i < b->size && lowest; i += stride)
+        lowest = data[i] < lowest ? data[i] : lowest;
+    b->alphaWrites = writes;
+    b->alphaStride = uint16_t(stride);
+    b->alphaOffset = uint16_t(offset);
+    b->alpha = lowest;
+    return lowest;
+}
+
+// True when the alpha test of a draw (discard when test[0] * saturate(alpha) < test[1]) discards no fragment.
+bool Resolver::alphaTestPasses(const DrawRecord& record, const render::DrawCall& draw, const float test[2]) const
+{
+    const render::DrawState& state = draw.state;
+    switch (state.fragmentProgram)
+    {
+    case render::FpWorldReflect:
+    case render::FpWorldHeadlightReflect:
+        // Alpha 1: the programs discard when test[0] < test[1].
+        return !(test[0] < test[1]);
+    case render::FpWorld:
+    case render::FpWorldProjected:
+    case render::FpWorldHeadlight:
+        break;
+    default:
+        return false;
+    }
+    // Alpha = texel alpha * vertex alpha * 2, from programs that pass the vertex colour through.
+    if (state.vertexProgram != render::VpWorld && state.vertexProgram != render::VpWorldProjected
+        && state.vertexProgram != render::VpWorldHeadlight)
+        return false;
+    if (test[0] <= 0.0f || !state.textures[0])
+        return false;
+    const uint8_t texel = render::minAlpha(*state.textures[0]);
+    if (!texel)
+        return false;
+    const uint8_t vertex = vertexAlpha(record, draw);
+    if (!vertex)
+        return false;
+    // Two steps below the lowest product for filtering and interpolation rounding.
+    const float lowest = float(texel) / 255.0f * float(vertex) / 255.0f * 2.0f - 2.0f / 255.0f;
+    return test[0] * std::min(lowest, 1.0f) >= test[1];
+}
 
 bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::DrawCall& draw)
 {
@@ -219,6 +306,10 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
 
     float test[2] = { 0.0f, 0.0f };
     state.alphaTest = alphaEnabled && alphaTest(rs[D3DRS_ALPHAFUNC], alphaRef, test) ? 1 : 0;
+    // A test that discards nothing: the program without it (the draw becomes opaque to the GPU).
+    static const bool s_elide = pf::Config::getBool("alpha_test_elide", true);
+    if (state.alphaTest && s_elide && alphaTestPasses(record, draw, test))
+        state.alphaTest = 0;
 
     const render::FragmentProgramInfo& fragment =
         render::fragmentProgram(render::FragmentProgram(state.fragmentProgram));

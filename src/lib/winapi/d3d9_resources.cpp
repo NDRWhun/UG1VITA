@@ -774,6 +774,7 @@ HRESULT Buffer::Unlock(WinApplication* app, x86::CPU& cpu)
         }
     }
     memcpy(static_cast<uint8_t*>(m_storage->data) + m_lockOffset, shadow + m_lockOffset, m_lockSize);
+    m_storage->writes.fetch_add(1, std::memory_order_release);
     return D3D_OK;
 }
 

@@ -44,6 +44,9 @@ struct TextureStorage : Resource
 {
     TextureDesc desc;
     std::atomic<uint32_t> uploads{0};   // writes into it queued on worker threads and not finished
+    // Smallest alpha of each level as last written (2D textures that are not targets), 0 while unknown. Set by the
+    // write before its uploads decrement.
+    std::atomic<uint8_t> levelAlpha[16] = {};
 };
 
 struct DepthStorage : Resource
@@ -55,6 +58,12 @@ struct BufferStorage : Resource
 {
     uint32_t    size;
     void*       data;       // vertex or index data the GPU reads; written by the layer
+    std::atomic<uint32_t> writes{0};    // in-place writes of the layer
+    // Render thread (d3d9 resolver): smallest byte at alphaOffset + n * alphaStride over the buffer, read when writes
+    // was alphaWrites; alphaScans counts the scans.
+    uint32_t    alphaWrites = ~0u;
+    uint16_t    alphaStride = 0, alphaOffset = 0;
+    uint8_t     alpha = 0, alphaScans = 0;
 };
 
 // ---- Programs ------------------------------------------------------------------------------------------------------
@@ -416,6 +425,9 @@ struct Frame
     uint32_t    commandCount;                       // words
     bool        uploads;                            // a texture it reads had uploads when it was recorded
 };
+
+// Smallest alpha a sampler reads from a texture (all levels): 0 when unknown or while writes are queued.
+uint8_t minAlpha(const TextureStorage& texture);
 
 // Arena helpers: null when the arena is full.
 float* allocateConstants(Frame& frame, uint32_t count, uint32_t* offset);

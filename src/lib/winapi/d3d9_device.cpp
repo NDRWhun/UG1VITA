@@ -380,6 +380,7 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     r.layout = layout;
     r.texComponents = uint8_t(texComponents);
     r.positionT = positionT ? 1 : 0;
+    r.vertexStorage = vertexStorage;
     if (m_effectPass)
     {
         m_effectPass->record(r.effect, r.textures);

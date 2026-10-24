@@ -59,6 +59,10 @@ void unswizzleLevel(Format format, uint32_t width, uint32_t height, uint32_t lev
 void decodeLevel(Format format, uint32_t width, uint32_t height, uint32_t level, const void* src, uint32_t pitch,
                  uint32_t* rgba);
 
+// Smallest alpha (0..255) of the texels of one level in the Direct3D layout; BC1 texels of index 3 in three-colour
+// blocks have alpha 0, all others 255.
+uint8_t minAlpha(Format format, uint32_t width, uint32_t height, uint32_t level, const void* src, uint32_t pitch);
+
 }}
 
 #endif

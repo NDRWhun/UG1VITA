@@ -255,4 +255,49 @@ void decodeLevel(Format format, uint32_t width, uint32_t height, uint32_t level,
     }
 }
 
+
+uint8_t minAlpha(Format format, uint32_t width, uint32_t height, uint32_t level, const void* src, uint32_t pitch)
+{
+    const uint32_t w = levelDim(width, level), h = levelDim(height, level);
+    const uint8_t* in = static_cast<const uint8_t*>(src);
+    uint32_t lowest = 255;
+    if (format == FormatARGB8888)
+    {
+        for (uint32_t y = 0; y < h && lowest; ++y)
+        {
+            const uint8_t* row = in + size_t(y) * pitch;
+            for (uint32_t x = 0; x < w; ++x)
+                lowest = row[x * 4 + 3] < lowest ? row[x * 4 + 3] : lowest;
+        }
+        return uint8_t(lowest);
+    }
+    if (!isBlock(format))
+        return 0;
+    const uint32_t bw = levelUnits(format, width, level), bh = levelUnits(format, height, level);
+    for (uint32_t by = 0; by < bh && lowest; ++by)
+    {
+        for (uint32_t bx = 0; bx < bw && lowest; ++bx)
+        {
+            const uint8_t* block = in + size_t(by) * pitch + size_t(bx) * unitBytes(format);
+            const uint8_t* color = format == FormatBC2 ? block + 8 : block;
+            const uint16_t c0 = uint16_t(color[0] | color[1] << 8), c1 = uint16_t(color[2] | color[3] << 8);
+            const bool threeColor = format == FormatBC1 && c0 <= c1;
+            const uint32_t bits = uint32_t(color[4]) | uint32_t(color[5]) << 8 | uint32_t(color[6]) << 16
+                                | uint32_t(color[7]) << 24;
+            for (uint32_t i = 0; i < 16; ++i)
+            {
+                if (bx * 4 + (i & 3) >= w || by * 4 + (i >> 2) >= h)
+                    continue;
+                uint32_t a = 255;
+                if (format == FormatBC2)
+                    a = ((block[i / 2] >> ((i & 1) * 4)) & 15) * 17;
+                else if (threeColor && ((bits >> (2 * i)) & 3) == 3)
+                    a = 0;
+                lowest = a < lowest ? a : lowest;
+            }
+        }
+    }
+    return uint8_t(lowest);
+}
+
 }}

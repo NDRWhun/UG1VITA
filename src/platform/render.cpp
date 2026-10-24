@@ -186,6 +186,20 @@ const VertexLayout& layout(uint8_t id)
     return s_layouts[id < MaxLayouts ? id : 0];
 }
 
+uint8_t minAlpha(const TextureStorage& texture)
+{
+    const TextureDesc& d = texture.desc;
+    if (d.cube || d.target || !d.levels || d.levels > 16 || texture.uploads.load(std::memory_order_acquire))
+        return 0;
+    uint8_t lowest = 255;
+    for (uint32_t level = 0; level < d.levels; ++level)
+    {
+        const uint8_t a = texture.levelAlpha[level].load(std::memory_order_relaxed);
+        lowest = a < lowest ? a : lowest;
+    }
+    return lowest;
+}
+
 float* allocateConstants(Frame& frame, uint32_t count, uint32_t* offset)
 {
     if (frame.constantCount + count > frame.constantCapacity)
