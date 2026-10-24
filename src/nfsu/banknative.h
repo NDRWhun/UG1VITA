@@ -48,7 +48,7 @@ struct Recording
         rc::st8(address, value);
     }
 
-    // Puts the replaced values back, last store first, and clears the log.
+    // Puts the replaced values back, last store first; the log is kept.
     void undo()
     {
         for (auto it = stores.rbegin(); it != stores.rend(); ++it)
@@ -58,7 +58,6 @@ struct Recording
             else
                 rc::st8(it->address, x86::reg8(it->previous));
         }
-        stores.clear();
     }
 };
 
