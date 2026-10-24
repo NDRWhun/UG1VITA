@@ -6,11 +6,6 @@
 #   NFSU_PGO_USE=<file>    optimise with an indexed profile (llvm-profdata merge)
 
 option(NFSU_LTO "ThinLTO (clang)" ON)
-option(NFSU_PGO_GENERATE "Instrument for a PGO profile (clang)" OFF)
-set(NFSU_PGO_USE "" CACHE FILEPATH "Indexed PGO profile to optimise with (clang)")
-if(NFSU_PGO_GENERATE AND NFSU_PGO_USE)
-  message(FATAL_ERROR "NFSU_PGO_GENERATE and NFSU_PGO_USE exclude each other")
-endif()
 
 include(cmake/vita-lld.cmake)
 nfsu_lld_script(NFSU_LLD_SCRIPT)

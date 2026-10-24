@@ -244,7 +244,7 @@ int main(int, char**)
     pf::perf::init(pf::Config::getBool("perf_log", false)
                    || (pf::Config::getBool("bench", false) && pf::Config::getBool("bench_perf", false)));
 #ifdef NFSU_PGO_GENERATE
-    pf::pgo::start(dataPath("nfsu.profraw").c_str());
+    pf::pgo::start(dataPath(pf::pgo::FileName).c_str());
 #endif
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 

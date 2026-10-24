@@ -251,7 +251,7 @@ sreg32 pixelSize(reg32 pos, reg32 info, float radius, X87& x87)
         value = value / double(distance) * double(radius);
     // _ftol2: truncation, the low dword.
     x87.convert(value);
-    return sreg32(x86::fistInteger<sreg64>(std::trunc(value)));
+    return sreg32(x86::truncInteger64(value));
 }
 
 struct Candidate

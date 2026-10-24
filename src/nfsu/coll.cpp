@@ -209,7 +209,7 @@ reg32 expandBox(double px, double py, reg32 lo, reg32 hi, double r, Writer& w)
 double gridCorner(double value)
 {
     const double scaled = value * ld(ToFixed);
-    const reg32 fixed = reg32(x86::fistInteger<sreg64>(std::trunc(scaled))) & 0xffe00000u;
+    const reg32 fixed = reg32(x86::truncInteger64(scaled)) & 0xffe00000u;
     return double(sreg32(fixed)) * ld(FromFixed);
 }
 

@@ -4,7 +4,8 @@
 #include <cstdint>
 #include <cstring>
 
-// Checks the inline x87 rounding against libm in all four rounding modes and logs each mismatch.
+// Checks the inline x87 rounding against libm in all four rounding modes, and the inline truncation to 64 bits
+// against trunc and the libgcc conversion; logs each mismatch.
 namespace x86
 {
 
@@ -42,6 +43,17 @@ void check(double value)
                          (unsigned long long)toBits(value), (unsigned long long)toBits(actual),
                          (unsigned long long)toBits(expected));
         }
+    }
+    volatile double input = value;
+    const double truncated = trunc(input);
+    const bool inRange = (uint32_t(toBits(truncated) >> 32) & 0x7fffffffu) < (uint32_t(1023 + 63) << 20);
+    const volatile int64_t expected = inRange ? int64_t(truncated) : INT64_MIN;
+    const int64_t actual = truncInteger64(input);
+    ++s_checked;
+    if (actual != expected && ++s_failures <= 20)
+    {
+        pf::logError("fpu self-test truncation: %.17g (%016llx) gave %lld, libm %lld", value,
+                     (unsigned long long)toBits(value), (long long)actual, (long long)expected);
     }
 }
 
@@ -94,9 +106,9 @@ void fpuSelfTest()
         check(fromBits(nextRandom() & 0x800fffffffffffffull));
 
     if (s_failures == 0)
-        pf::logInfo("fpu self-test passed (%d roundings)", s_checked);
+        pf::logInfo("fpu self-test passed (%d roundings and truncations)", s_checked);
     else
-        pf::logError("fpu self-test: %d of %d roundings differ from libm", s_failures, s_checked);
+        pf::logError("fpu self-test: %d of %d roundings and truncations differ from libm", s_failures, s_checked);
 }
 
 }

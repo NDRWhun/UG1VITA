@@ -46,7 +46,7 @@ inline x86::reg32 argument(x86::CPU& cpu, int n)
 void floatToInteger(x86::CPU& cpu)
 {
     const double value = double(cpu.fpu.pop());
-    cpu.edx_eax = x86::reg64(x86::fistInteger<x86::sreg64>(std::trunc(value)));
+    cpu.edx_eax = x86::reg64(x86::truncInteger64(value));
     cpu.esp += 4;
 }
 

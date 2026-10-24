@@ -132,6 +132,16 @@ Profile-guided optimisation, with a profile from your own runs:
    `& "$env:NFSU_LLVM/bin/llvm-profdata" merge -o nfsu.profdata run*.profraw`, then
    `tools/build.ps1 -Compiler clang -PgoUse nfsu.profdata`.
 
+### Profile-guided optimisation with gcc
+
+1. `tools/build.ps1 -PgoGenerate` builds the instrumented game (`build-release-gcov/`; edge counters only, slower).
+2. Install it and play the scenes that matter. The game writes its counters to `ux0:data/NFSUG1VITA/nfsu.gcov` every
+   30 seconds and at exit; the file holds the whole session. Copy it off after each session under its own name, e.g.
+   `run1.gcov`.
+3. `tools/build.ps1 -PgoUse run1.gcov,run2.gcov` merges the runs with `gcov-tool merge-stream` into
+   `build-release-pgo/` and builds the optimised game there. The profile matches only the sources and options of
+   the instrumented build; functions changed since then are built without it.
+
 | Path | Contents |
 |------|----------|
 | `include/` | virtual x86 CPU (cpu/fpu/mmx), `lib/` runtime headers, `winapi/` shim headers, `platform/` |

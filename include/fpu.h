@@ -373,9 +373,24 @@ namespace x86
         constexpr uint32_t limit = uint32_t(1023 + 8 * sizeof(T) - 1) << 20;
         uint64_t bits;
         memcpy(&bits, &value, sizeof(bits));
-        if (__builtin_expect((uint32_t(bits >> 32) & 0x7fffffffu) < limit, 1))
+        const uint32_t high = uint32_t(bits >> 32) & 0x7fffffffu;
+        // |value| < 2^31 converts with one vcvt instead of __aeabi_d2lz.
+        if (sizeof(T) == 8 && __builtin_expect(high < (uint32_t(1023 + 31) << 20), 1))
+            return T(sreg32(value));
+        if (__builtin_expect(high < limit, 1))
             return T(value);
         return std::numeric_limits<T>::min();
+    }
+
+    // _ftol: fistInteger<sreg64>(trunc(value)). |value| < 2^31 converts with one vcvt (it rounds toward zero),
+    // without the trunc and __aeabi_d2lz calls.
+    inline sreg64 truncInteger64(double value)
+    {
+        uint64_t bits;
+        memcpy(&bits, &value, sizeof(bits));
+        if (__builtin_expect((uint32_t(bits >> 32) & 0x7fffffffu) < (uint32_t(1023 + 31) << 20), 1))
+            return sreg32(value);
+        return fistInteger<sreg64>(trunc(value));
     }
 
     // fild qword: the exact sum of the two halves rounded once, as the soft-float __aeabi_l2d gives it, but in VFP

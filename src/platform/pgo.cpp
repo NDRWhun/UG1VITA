@@ -5,8 +5,10 @@
 #include <string>
 
 extern "C" {
+#ifndef NFSU_PGO_GCOV
 int __llvm_profile_runtime = 0;
-// src/platform/pgo_writer.c
+#endif
+// src/platform/pgo_writer.c (clang), src/platform/pgo_gcov.cpp (gcc)
 int nfsu_profile_write(FILE* file);
 }
 

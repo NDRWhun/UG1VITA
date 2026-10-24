@@ -589,7 +589,7 @@ bool quad(win32::WinApplication* app, x86::CPU& cpu, const Flare& f, reg32 type,
     }
     reg32 rgba = 0;
     for (int i = 0; i < 4; ++i)
-        rgba |= reg32(reg8(x86::fistInteger<sreg64>(std::trunc(double(real(colour[i])))))) << (8 * i);
+        rgba |= reg32(reg8(x86::truncInteger64(double(real(colour[i]))))) << (8 * i);
     const double t1 = double(c[0]) - double(rx);
     const double t2 = double(c[1]) - double(ry);
     const double t3 = double(c[2]) - rz;

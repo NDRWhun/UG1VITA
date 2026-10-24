@@ -119,7 +119,7 @@ inline float floatOf(reg32 b)
 // _ftol2: truncation to 64 bits, the low half.
 inline reg32 truncate(double value)
 {
-    return reg32(x86::fistInteger<x86::sreg64>(std::trunc(value)));
+    return reg32(x86::truncInteger64(value));
 }
 
 // The 0x401cd0 copy of a matrix.
