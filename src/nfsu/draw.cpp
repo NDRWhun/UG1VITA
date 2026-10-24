@@ -1268,6 +1268,7 @@ void logUsage(unsigned frames)
     if (nativeQueue() && s.shadow)
         pf::logInfo("shadow_draw: queue %u calls compared, %u differ, %u not compared", unsigned(q.compared),
                     unsigned(q.differing), unsigned(q.skipped));
+    logDeferral(frames);
     memset(s_calls, 0, sizeof(s_calls));
     s_sampledUs = 0;
 }

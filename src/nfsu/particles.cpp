@@ -413,6 +413,7 @@ bool drawDirect(win32::WinApplication* app, x86::CPU& c, reg32 device, uint32_t 
         || !com(app, c, device, SetIndices, { rc::ld32(IndexBuffer) }, at[1])
         || !com(app, c, device, SetRenderState, { AlphaBlendEnable, 1 }, at[2]))
         return false;
+    win32::d3d9::bridge::drain();
     win32::d3d9::Object* object = win32::d3d9::lookup(device);
     if (!object || object->kind() != win32::d3d9::KindDevice)
         return true;

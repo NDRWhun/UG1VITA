@@ -22,6 +22,11 @@ namespace nfsu { namespace draw
 // The draw queue itself (flush.cpp): model submit 0x40c910, packet enqueue 0x40f1e0 and the flush 0x40ed50.
 // flush_native=1 runs them natively (default 0); with shadow_draw=1 each runs as guest code first, recorded, then
 // natively against the recording.
+//
+// flush_async (with flush_native=1, without shadow_draw): 1 queues the native flush's device and effect calls
+// (d3d9_native.h deferral) and a queue thread runs them while the game thread goes on; 2 queues them and the next
+// drain runs them on the game thread; 0 (default) calls them at once. flush_async_core (1-3, default 1) and
+// flush_async_priority (default 70) place the queue thread.
 
 // Perf builds: the call counts and time of the setup functions and of the queue since the last call, logged as a
 // "draw:" line; frames is the number of frames they cover.
@@ -85,6 +90,8 @@ struct QueueUsage
 };
 QueueUsage takeQueueUsage();
 bool nativeQueue();
+// Perf builds: the "flush_async:" line of the flush's deferred device calls, when they are on.
+void logDeferral(unsigned frames);
 
 }}
 

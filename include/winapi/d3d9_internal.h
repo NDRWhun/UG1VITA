@@ -10,6 +10,7 @@
 #include <lib/winapp.h>
 #include <lib/memmap.h>
 #include <winapi/types.h>
+#include <winapi/d3d9_native.h>
 #include <winapi/wrapper.h>
 #include <platform/log.h>
 #include <platform/render.h>
@@ -234,6 +235,10 @@ public:
     // container's references, as in Direct3D.
     virtual ULONG addRef()          { return ++m_refs; }
     virtual ULONG release();
+    // A reference of a binding that deferred calls change (device texture stages, vertex declaration, stream and
+    // indices; effect textures), counted apart as well.
+    void bind()                     { ++m_bindings; addRef(); }
+    ULONG unbind()                  { --m_bindings; return release(); }
 
     HRESULT QueryInterface(WinApplication* app, x86::CPU& cpu, const GUID* iid, x86::reg32* object);
     ULONG AddRef(WinApplication* app, x86::CPU& cpu);
@@ -245,6 +250,8 @@ private:
     Kind        m_kind;
     uint32_t    m_refs;
     x86::reg32  m_guest;
+    uint32_t    m_bindings = 0;
+    bool        m_boundOnly = false;    // counted in bridge::countBoundOnly
 };
 
 // Gives a host object its guest COM object (the vtable of its kind) and returns the guest address.
@@ -253,6 +260,27 @@ x86::reg32 publish(WinApplication* app, Object* object);
 Object* lookup(x86::reg32 guest);
 // Builds the vtables and registers the methods, once.
 void initInterfaces(WinApplication* app);
+
+namespace bridge
+{
+
+// True on the thread that runs deferred calls (d3d9_native.h).
+bool onQueueThread();
+// Queue thread: the object is deleted by the next drain.
+void deleteLater(Object* object);
+// Objects that only bindings hold: +1 when one becomes so, -1 when it is deleted. While there are any, calls that
+// change bindings are not deferred. Game thread.
+void countBoundOnly(int delta);
+
+}
+
+// A guest method that drains the deferred calls (d3d9_native.h) before it runs.
+template< MethodPtr M >
+void drained(WinApplication* app, x86::CPU& cpu)
+{
+    bridge::drain();
+    M(app, cpu);
+}
 
 // A vtable slot: the method, or null for one that logs its name and guest address and traps.
 struct MethodEntry
@@ -275,6 +303,8 @@ void SetMaterial(WinApplication* app, x86::CPU& cpu);
 void SetLight(WinApplication* app, x86::CPU& cpu);
 void LightEnable(WinApplication* app, x86::CPU& cpu);
 void SetRenderState(WinApplication* app, x86::CPU& cpu);
+void SetTextureStageState(WinApplication* app, x86::CPU& cpu);
+void SetSamplerState(WinApplication* app, x86::CPU& cpu);
 void SetTexture(WinApplication* app, x86::CPU& cpu);
 void SetVertexDeclaration(WinApplication* app, x86::CPU& cpu);
 void SetStreamSource(WinApplication* app, x86::CPU& cpu);
@@ -297,8 +327,8 @@ void EffectEnd(WinApplication* app, x86::CPU& cpu);
 #define D3D_GUEST(fn) { #fn, &win32::d3d9::guest::fn }
 #define D3D_GUEST_NAMED(name, fn) { name, &win32::d3d9::guest::fn }
 
-#define D3D_METHOD(cls, fn) { #fn, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
-#define D3D_NAMED(name, cls, fn) { name, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
+#define D3D_METHOD(cls, fn) { #fn, &win32::d3d9::drained<&win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall> }
+#define D3D_NAMED(name, cls, fn) { name, &win32::d3d9::drained<&win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall> }
 #define D3D_TRAP(fn) { #fn, nullptr }
 
 // Logs a message once per call site.
@@ -861,6 +891,8 @@ private:
     void defaults();
     void resetBackBuffer(const D3DPRESENT_PARAMETERS& params);
     template< typename T > void hold(T*& slot, T* object);
+    // hold for the slots deferred calls change, with binding references (Object::bind).
+    template< typename T > void bindSlot(T*& slot, T* object);
     render::Frame* frame(WinApplication* app, x86::CPU& cpu);
     render::Scene* scene();
     uint16_t viewportIndex(render::Frame& frame, const render::Viewport& viewport);

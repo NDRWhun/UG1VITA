@@ -60,6 +60,8 @@ x86::reg32 allocateBlock()
 
 Object::~Object()
 {
+    if (m_boundOnly)
+        bridge::countBoundOnly(-1);
     if (!m_guest || !s_app)
         return;
     const uint32_t handle = s_app->getMemory<x86::reg32>(m_guest + 4);
@@ -77,7 +79,17 @@ ULONG Object::release()
 {
     const ULONG refs = --m_refs;
     if (!refs)
-        delete this;
+    {
+        if (bridge::onQueueThread())
+            bridge::deleteLater(this);
+        else
+            delete this;
+    }
+    else if (refs == m_bindings && !m_boundOnly && !bridge::onQueueThread())
+    {
+        m_boundOnly = true;
+        bridge::countBoundOnly(1);
+    }
     return refs;
 }
 
@@ -257,9 +269,9 @@ const MethodEntry s_device[] = {
     D3D_METHOD(Device, GetTexture),
     D3D_GUEST(SetTexture),
     D3D_METHOD(Device, GetTextureStageState),
-    D3D_METHOD(Device, SetTextureStageState),
+    D3D_GUEST(SetTextureStageState),
     D3D_METHOD(Device, GetSamplerState),
-    D3D_METHOD(Device, SetSamplerState),
+    D3D_GUEST(SetSamplerState),
     D3D_METHOD(Device, ValidateDevice),
     D3D_TRAP(SetPaletteEntries),
     D3D_TRAP(GetPaletteEntries),
@@ -659,6 +671,7 @@ x86::reg32 Direct3DCreate9(WinApplication* app, x86::CPU& cpu, UINT SDKVersion)
         pf::logError("d3d9: Direct3DCreate9(%u): unsupported SDK version", SDKVersion);
         return 0;
     }
+    bridge::drain();
     return publish(app, new Direct3D());
 }
 

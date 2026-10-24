@@ -8,6 +8,12 @@
 // A capture records the calls in order (method, object, arguments, pointed-to data, result). In replay mode each
 // call is compared with the next recorded one instead of running, and returns the recorded result; guest calls
 // made through callGuest are replayed the same way, with the CPU state the recorded call returned.
+//
+// A deferral window (deferBegin) queues the calls one guest CPU makes, with their pointed-to data copied, and returns
+// D3D_OK at once (Begin stores its pass count at once); the queue runs in order on the queue thread, or on the
+// calling thread at the next drain. Every other access of the Direct3D and effect objects drains the queue first
+// (drain(): the D3D9 and effect methods the guest calls, the D3DX effect creation, native callers of the device), so
+// the calls run in the order they were made and the frame records them at the same place.
 
 #include <x86.h>
 #include <winapi/types.h>
@@ -33,6 +39,9 @@ HRESULT setMaterial(WinApplication* app, x86::CPU& cpu, reg32 device, const DWOR
 HRESULT setLight(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD index, const DWORD* light);
 HRESULT lightEnable(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD index, BOOL enable);
 HRESULT setRenderState(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD state, DWORD value);
+// Not recorded by a capture.
+HRESULT setTextureStageState(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD stage, DWORD type, DWORD value);
+HRESULT setSamplerState(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD sampler, DWORD type, DWORD value);
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD stage, reg32 texture);
 HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 device, reg32 declaration);
 HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 device, UINT stream, reg32 buffer, UINT offset,
@@ -133,6 +142,44 @@ void setCalloutTarget(uint32_t index, reg32 target);
 // Registers the callout methods; called with the Direct3D interfaces (d3d9.cpp).
 void init(WinApplication* app);
 
+// ---- Deferred calls ----
+
+enum DeferMode
+{
+    DeferOff,       // calls run at once
+    DeferThread,    // the queue thread runs the queue
+    DeferInline     // the next drain runs the queue on the draining thread
+};
+
+// Once, before the first window: the mode, and the core (1-3) and priority of the queue thread.
+void configureDeferral(DeferMode mode, int core, int priority);
+// Opens a window for the calls made with cpu (game thread, execution lock held); false when the mode is off, a
+// capture runs or the device has no frame open (no window then). Windows do not nest.
+bool deferBegin(WinApplication* app, x86::CPU& cpu, reg32 device);
+// Closes the window; the queued calls keep running.
+void deferEnd();
+
+extern bool g_deferPending;
+void drainSlow();
+// Waits until every queued call has run (runs them with DeferInline). Callers hold the execution lock, or no guest
+// code runs any more.
+inline void drain()
+{
+    if (__builtin_expect(g_deferPending, 0))
+        drainSlow();
+}
+
+// Queue statistics since the last call, for perf logs.
+struct DeferStats
+{
+    uint32_t windows, calls, words, fallbacks;  // fallbacks: calls of a window that ran at once
+    uint32_t drains, windowDrains;              // drains that waited; of them, inside a window
+    uint64_t waitUs, runUs;                     // drain waits of the caller; queue run time
+    uint32_t results, passes;                   // queued calls whose result was not D3D_OK; Begin pass counts that differ
+    uint32_t deletes;                           // objects released by queued calls, deleted by a drain
+};
+DeferStats takeDeferStats();
+
 // ---- Effect parts used by the bridge (d3dx9.cpp) ----
 
 namespace effect
@@ -147,7 +194,10 @@ HRESULT setMatrix(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle
 HRESULT setMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrices,
                        UINT count);
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, reg32 texture);
-HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UINT count);
+// fpscr: the FPSCR the product is multiplied with.
+HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UINT count, uint32_t fpscr);
+// The pass count Begin stores.
+UINT passCount(reg32 effect);
 HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags);
 HRESULT pass(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass);
 HRESULT end(WinApplication* app, x86::CPU& cpu, reg32 effect);

@@ -209,7 +209,7 @@ struct Values
     {
         for (Object* t : textures)
             if (t)
-                t->release();
+                t->unbind();
         s_blocks[id] = nullptr;
         if (dirty)
             s_dirty.erase(std::find(s_dirty.begin(), s_dirty.end(), id));
@@ -358,8 +358,11 @@ private:
     HRESULT setFloats(x86::reg32 handle, const float* data, uint32_t count, Type type);
 
 public:
-    // SetMatrix of the product of count (2 or 3) matrices, recorded unmultiplied; the render thread multiplies.
-    HRESULT setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count);
+    // SetMatrix of the product of count (2 or 3) matrices, recorded unmultiplied; the render thread multiplies with
+    // fpscr.
+    HRESULT setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count, uint32_t fpscr);
+    // The pass count Begin stores.
+    UINT passCount() const                  { return info().passes[m_technique]; }
 
 private:
     // Writes n floats of a parameter; a change is sent to the render thread.
@@ -445,12 +448,11 @@ void Effect::store(int p, const void* data, uint32_t n)
     memcpy(w + 2, floats(p), n * 4);
 }
 
-HRESULT Effect::setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count)
+HRESULT Effect::setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count, uint32_t fpscr)
 {
     float in[48];
     for (uint32_t i = 0; i < count; ++i)
         memcpy(in + 16 * i, matrices[i], 64);
-    const uint32_t fpscr = readFpscr();
     const int p = param(handle);
     Stream* stream = m_device->stream();
     if (p < 0 || s_params[p].type != TypeFloat || s_params[p].floats < 16 || !stream || values(p).dirty)
@@ -930,9 +932,9 @@ HRESULT Effect::SetTexture(WinApplication* app, x86::CPU& cpu, x86::reg32 handle
         return D3DERR_INVALIDCALL;
     Object*& slot = values(p).textures[p];
     if (texture)
-        texture->addRef();
+        texture->bind();
     if (slot)
-        slot->release();
+        slot->unbind();
     slot = texture;
     // The active pass samples the new value from now on (it was set after any device SetTexture of the stage).
     if (const EffectPass* active = m_device->effectPass())
@@ -1180,9 +1182,14 @@ HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handl
     return object(effect)->SetTexture(app, cpu, handle, lookup(texture));
 }
 
-HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UINT count)
+HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UINT count, uint32_t fpscr)
 {
-    return object(effect)->setProduct(handle, matrices, count);
+    return object(effect)->setProduct(handle, matrices, count, fpscr);
+}
+
+UINT passCount(reg32 effect)
+{
+    return object(effect)->passCount();
 }
 
 HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags)
@@ -1331,12 +1338,14 @@ namespace win32 { namespace d3dx9
 void CreateEffectPool(WinApplication* app, x86::CPU& cpu)
 {
     d3d9::initInterfaces(app);
+    d3d9::bridge::drain();
     Wrapper<decltype(&d3d9::createEffectPool), &d3d9::createEffectPool>::stdcall(app, cpu);
 }
 
 void CreateEffect(WinApplication* app, x86::CPU& cpu)
 {
     d3d9::initInterfaces(app);
+    d3d9::bridge::drain();
     Wrapper<decltype(&d3d9::createEffect), &d3d9::createEffect>::stdcall(app, cpu);
 }
 
