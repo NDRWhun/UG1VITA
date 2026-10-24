@@ -690,6 +690,8 @@ render::TextureStorage* FrameRenderer::createTexture(const render::TextureDesc& 
         sceGxmTextureInitCube(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
     else
         sceGxmTextureInitSwizzled(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
+    // LOD bias 0, the Direct3D default: the field holds bias * 8 + 31.
+    sceGxmTextureSetLodBias(&t->texture, 31);
     if (desc.target)
     {
         // Cube target: each face a swizzled colour surface.
