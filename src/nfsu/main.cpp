@@ -23,6 +23,7 @@
 #include <psp2/power.h>
 #include <psp2/kernel/processmgr.h>
 #include <sys/stat.h>
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -117,6 +118,28 @@ static void setPadBindings()
         guestDword(0x00704268 + 4 * i) = s_raceActions[i];
         guestDword(0x007042A8 + 4 * i) = s_menuActions[i];
     }
+}
+
+// Env cube faces drawn per frame (0x40AD60, patched in generate.py PATCHES to read the copy written here): frame
+// counter [0x7364DC] modulo the divisor of the reflection level [0x700E74] picks one of that level's six rows of six
+// face flags. The game's levels: 1 one face a frame, 2 faces 0 and 4 every frame and one of the others, 3 all six.
+// envmap_rate=n (2..6, default 1: the game's) spreads level 3 over n frames, face f drawn when the counter modulo n
+// is f modulo n.
+static void setEnvmapSchedule()
+{
+    const x86::reg32 GameDivisors = 0x00702AAC, GameRows = 0x00702AC0, Divisors = 0x006D3800, Rows = 0x006D3810;
+    for (x86::reg32 i = 0; i < 4; ++i)
+        guestDword(Divisors + 4 * i) = guestDword(GameDivisors + 4 * i);
+    for (x86::reg32 i = 0; i < 18 * 6; ++i)
+        guestDword(Rows + 4 * i) = guestDword(GameRows + 4 * i);
+    const int rate = std::min(std::max(pf::Config::getInt("envmap_rate", 1), 1), 6);
+    if (rate == 1)
+        return;
+    guestDword(Divisors + 4 * 3) = x86::reg32(rate);
+    for (x86::reg32 row = 0; row < 6; ++row)
+        for (x86::reg32 face = 0; face < 6; ++face)
+            guestDword(Rows + 4 * ((12 + row) * 6 + face)) = row < x86::reg32(rate) && face % rate == row ? 1 : 0;
+    pf::logInfo("envmap: the highest reflection level draws the six cube faces over %d frames (envmap_rate)", rate);
 }
 
 // Text fields (docs/re/input.md section 6). Every edit of the game's line editor sets its active flag [0x007363A8],
@@ -239,6 +262,7 @@ int main(int, char**)
         nfsu::Application app(s_commandLine, imageSections(image));
         std::vector<uint8_t>().swap(image);
         setPadBindings();
+        setEnvmapSchedule();
         nfsu::bench::configure(app);
         win32::Gamepad::setPollHook(padPollHook);
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))

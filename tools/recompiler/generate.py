@@ -152,6 +152,10 @@ PATCHES = [
     (0x40c062, 'd825bcc76c00', 'd82544346d00'),
     # Full-screen quad of the rear-view mirror frame and mask 0x409180: world _11 = [0x6D3444], as the 2D polygons.
     (0x409274, 'c74424200000803f c744242400000000', '8b0d44346d00 894c2420 8364242400 90'),
+    # Env cube face schedule 0x40AD60: the update divisor per reflection level [0x702AAC] and the face rows
+    # [0x702AC0] are read from a copy at 0x6D3800 / 0x6D3810 (nfsu::envmap, envmap_rate).
+    (0x40af38, 'f7348dac2a7000', 'f7348d00386d00'),
+    (0x40af64, '8d04c5c02a7000', '8d04c510386d00'),
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
