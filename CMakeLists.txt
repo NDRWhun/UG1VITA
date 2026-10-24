@@ -62,6 +62,8 @@ set(NFSU_COMMON_FLAGS
   -ffile-prefix-map=${CMAKE_SOURCE_DIR}/=
 )
 # Generated code only sees the stable defines; debug switches stay in the runtime to avoid full rebuilds.
+  # Math functions do not set errno: sqrt is a single vsqrt.f64.
+  -fno-math-errno
 set(NFSU_DEFINES VITA __vita__ WITH_MMX)
 set(NFSU_RUNTIME_DEFINES ${NFSU_DEFINES})
 if(NFSU_LOG_DEBUG)
