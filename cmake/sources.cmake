@@ -98,6 +98,7 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/coll.cpp
   src/nfsu/cull.cpp
   src/nfsu/flares.cpp
+  src/nfsu/flush.cpp
   src/nfsu/draw.cpp
   src/nfsu/mathfn.cpp
   src/nfsu/load.cpp

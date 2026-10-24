@@ -24,7 +24,8 @@ reg32 s_calloutTargets[CalloutCount] = {};
 
 const char* const s_methodNames[MethodCount] = {
     "SetTransform", "SetMaterial", "SetLight", "LightEnable", "SetRenderState", "SetTexture",
-    "SetVertexDeclaration", "Effect::SetInt", "Effect::SetFloat", "Effect::SetVector", "Effect::SetVectorArray",
+    "SetVertexDeclaration", "SetStreamSource", "SetIndices", "DrawIndexedPrimitive", "DrawPrimitiveUP",
+    "Effect::SetInt", "Effect::SetFloat", "Effect::SetVector", "Effect::SetVectorArray",
     "Effect::SetMatrix", "Effect::SetMatrixArray", "Effect::SetTexture", "Effect::Begin", "Effect::Pass",
     "Effect::End", "guest call",
 };
@@ -81,6 +82,20 @@ public:
             return;
         for (uint32_t i = 0; i < count; ++i)
             word(values[i]);
+    }
+    // count bytes as words, the last one padded with zero bytes.
+    void bytes(const void* data, uint32_t count)
+    {
+        word(data ? 1 : 0);
+        if (!data)
+            return;
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        for (uint32_t i = 0; i < count; i += 4)
+        {
+            uint32_t w = 0;
+            memcpy(&w, p + i, count - i < 4 ? count - i : 4);
+            word(w);
+        }
     }
 
     bool replaying() const { return m_capture.mode == Capture::Replay; }
@@ -196,14 +211,29 @@ void callout(WinApplication* app, x86::CPU& cpu, uint32_t index)
         app->dynamic_call(target, cpu);
 }
 
-void callout0(WinApplication* app, x86::CPU& cpu)
+template< uint32_t I >
+void calloutAt(WinApplication* app, x86::CPU& cpu)
 {
-    callout(app, cpu, 0);
+    callout(app, cpu, I);
 }
 
-void callout1(WinApplication* app, x86::CPU& cpu)
+const MethodPtr s_calloutMethods[] = {
+    &calloutAt<0>, &calloutAt<1>, &calloutAt<2>, &calloutAt<3>, &calloutAt<4>, &calloutAt<5>, &calloutAt<6>,
+    &calloutAt<7>, &calloutAt<8>, &calloutAt<9>, &calloutAt<10>, &calloutAt<11>, &calloutAt<12>, &calloutAt<13>,
+    &calloutAt<14>, &calloutAt<15>,
+};
+static_assert(sizeof(s_calloutMethods) / sizeof(s_calloutMethods[0]) == CalloutCount, "one method per callout");
+
+// Vertices of a draw of count primitives.
+uint32_t primitiveVertices(DWORD type, UINT count)
 {
-    callout(app, cpu, 1);
+    switch (type)
+    {
+    case 4:  return count * 3;
+    case 5:
+    case 6:  return count + 2;
+    default: return 0;
+    }
 }
 
 }
@@ -260,13 +290,12 @@ void init(WinApplication* app)
 {
     s_app = app;
     s_calloutMemory = new MemMap(4096);
-    const MethodPtr methods[CalloutCount] = { &callout0, &callout1 };
     for (uint32_t i = 0; i < CalloutCount; ++i)
     {
         app->getMemory<x86::reg32>(calloutAddress(i)) = calloutAddress(i);
         char name[32];
         snprintf(name, sizeof(name), "d3d9 callout %u", unsigned(i));
-        app->registerMethod(calloutAddress(i), { name, methods[i] });
+        app->registerMethod(calloutAddress(i), { name, s_calloutMethods[i] });
     }
 }
 
@@ -419,6 +448,98 @@ HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 guest, re
     return device(guest)->SetVertexDeclaration(app, cpu, static_cast<VertexDeclaration*>(lookup(declaration)));
 }
 
+HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT stream, reg32 buffer, UINT offset,
+                        UINT stride)
+{
+    if (active())
+    {
+        Record r(MethodSetStreamSource);
+        r.word(guest);
+        r.word(stream);
+        r.word(buffer);
+        r.word(offset);
+        r.word(stride);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->SetStreamSource(app, cpu, stream, static_cast<Buffer*>(lookup(buffer)),
+                                                         offset, stride);
+        r.done(h);
+        return h;
+    }
+    return device(guest)->SetStreamSource(app, cpu, stream, static_cast<Buffer*>(lookup(buffer)), offset, stride);
+}
+
+HRESULT setIndices(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 buffer)
+{
+    if (active())
+    {
+        Record r(MethodSetIndices);
+        r.word(guest);
+        r.word(buffer);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->SetIndices(app, cpu, static_cast<Buffer*>(lookup(buffer)));
+        r.done(h);
+        return h;
+    }
+    return device(guest)->SetIndices(app, cpu, static_cast<Buffer*>(lookup(buffer)));
+}
+
+HRESULT drawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD type, LONG baseVertex,
+                             UINT minIndex, UINT vertices, UINT startIndex, UINT count)
+{
+    if (active())
+    {
+        Record r(MethodDrawIndexedPrimitive);
+        r.word(guest);
+        r.word(type);
+        r.word(reg32(baseVertex));
+        r.word(minIndex);
+        r.word(vertices);
+        r.word(startIndex);
+        r.word(count);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->DrawIndexedPrimitive(app, cpu, type, baseVertex, minIndex, vertices,
+                                                              startIndex, count);
+        r.done(h);
+        return h;
+    }
+    return device(guest)->DrawIndexedPrimitive(app, cpu, type, baseVertex, minIndex, vertices, startIndex, count);
+}
+
+HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD type, UINT count, const void* data,
+                        UINT stride)
+{
+    if (active())
+    {
+        Record r(MethodDrawPrimitiveUP);
+        r.word(guest);
+        r.word(type);
+        r.word(count);
+        r.word(stride);
+        r.bytes(data, primitiveVertices(type, count) * stride);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->DrawPrimitiveUP(app, cpu, type, count, data, stride);
+        r.done(h);
+        return h;
+    }
+    return device(guest)->DrawPrimitiveUP(app, cpu, type, count, data, stride);
+}
+
 // ---- Effect ----
 
 HRESULT effectSetInt(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, x86::sreg32 value)
@@ -543,6 +664,21 @@ HRESULT effectSetMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 guest, re
         return h;
     }
     return effect::setMatrixArray(app, cpu, guest, handle, matrices, count);
+}
+
+HRESULT effectSetMatrixProduct(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, const float* a,
+                               const float* b, const float* c)
+{
+    if (s_capture)
+    {
+        float m[16];
+        multiply(a, b, m);
+        if (c)
+            multiply(m, c, m);
+        return effectSetMatrix(app, cpu, guest, handle, m);
+    }
+    const float* matrices[3] = { a, b, c };
+    return effect::setProduct(guest, handle, matrices, c ? 3 : 2);
 }
 
 HRESULT effectSetTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, reg32 texture)
@@ -711,6 +847,32 @@ void SetVertexDeclaration(WinApplication* app, x86::CPU& cpu)
 {
     cpu.eax = bridge::setVertexDeclaration(app, cpu, arg(cpu, 0), arg(cpu, 1));
     cpu.esp += 12;
+}
+
+void SetStreamSource(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::setStreamSource(app, cpu, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3), arg(cpu, 4));
+    cpu.esp += 24;
+}
+
+void SetIndices(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::setIndices(app, cpu, arg(cpu, 0), arg(cpu, 1));
+    cpu.esp += 12;
+}
+
+void DrawIndexedPrimitive(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::drawIndexedPrimitive(app, cpu, arg(cpu, 0), arg(cpu, 1), LONG(arg(cpu, 2)), arg(cpu, 3),
+                                           arg(cpu, 4), arg(cpu, 5), arg(cpu, 6));
+    cpu.esp += 32;
+}
+
+void DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::drawPrimitiveUP(app, cpu, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), pointer<uint8_t>(arg(cpu, 3)),
+                                      arg(cpu, 4));
+    cpu.esp += 24;
 }
 
 void EffectSetInt(WinApplication* app, x86::CPU& cpu)

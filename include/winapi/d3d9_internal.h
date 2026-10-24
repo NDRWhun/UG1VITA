@@ -277,6 +277,10 @@ void LightEnable(WinApplication* app, x86::CPU& cpu);
 void SetRenderState(WinApplication* app, x86::CPU& cpu);
 void SetTexture(WinApplication* app, x86::CPU& cpu);
 void SetVertexDeclaration(WinApplication* app, x86::CPU& cpu);
+void SetStreamSource(WinApplication* app, x86::CPU& cpu);
+void SetIndices(WinApplication* app, x86::CPU& cpu);
+void DrawIndexedPrimitive(WinApplication* app, x86::CPU& cpu);
+void DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu);
 void EffectSetInt(WinApplication* app, x86::CPU& cpu);
 void EffectSetFloat(WinApplication* app, x86::CPU& cpu);
 void EffectSetVector(WinApplication* app, x86::CPU& cpu);
@@ -523,8 +527,34 @@ enum Command : uint8_t
     CmdViewport,            // D3DVIEWPORT9
     CmdFixedState,          // FixedState, whole
     CmdValues,              // header: block << 8; offset | count << 16; count floats
-    CmdDraw                 // DrawRecord
+    CmdDraw,                // DrawRecord
+    CmdProduct              // header: block << 8; offset | count << 16; FPSCR; count matrices, their product
 };
+
+// The VFP status and control register of the calling thread (0 and no effect off the Vita).
+inline uint32_t readFpscr()
+{
+#if defined(__arm__)
+    uint32_t value;
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(value));
+    return value;
+#else
+    return 0;
+#endif
+}
+
+inline void writeFpscr(uint32_t value)
+{
+#if defined(__arm__)
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(value) : "memory");
+#else
+    static_cast<void>(value);
+#endif
+}
+
+// out = m[0] * m[1] (* m[2]) for count 2 or 3, multiplied left to right as D3DXMatrixMultiply does, with the
+// thread's FPSCR set to fpscr.
+void matrixProduct(const float* matrices, uint32_t count, uint32_t fpscr, float* out);
 
 enum Transform : uint8_t
 {

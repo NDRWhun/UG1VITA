@@ -244,12 +244,6 @@ void sub_409580(win32::WinApplication* app, x86::CPU& cpu)
     sub_409580_guest(app, cpu);
 }
 
-void sub_40ed50(win32::WinApplication* app, x86::CPU& cpu)
-{
-    phases::Scope scope(phases::Flush);
-    sub_40ed50_guest(app, cpu);
-}
-
 void sub_571050(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::Cars);

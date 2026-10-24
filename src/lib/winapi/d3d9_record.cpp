@@ -456,6 +456,20 @@ void Resolver::resolve(render::Frame& f)
             ++m_effectVersion;
             break;
         }
+        case CmdProduct:
+        {
+            const uint32_t id = header >> 8, offset = w[0] & 0xffff, count = w[0] >> 16;
+            if (id >= m_blocks.size())
+                m_blocks.resize(id + 1);
+            std::vector<float>& values = m_blocks[id];
+            if (values.empty())
+                values.assign(effectBlockFloats(), 0.0f);
+            if (offset + 16 <= values.size())
+                matrixProduct(reinterpret_cast<const float*>(w + 2), count, w[1], values.data() + offset);
+            w += 2 + 16 * count;
+            ++m_effectVersion;
+            break;
+        }
         case CmdDraw:
         {
             DrawRecord r;

@@ -138,11 +138,15 @@ NATIVE_OVERRIDES = [
     0x445050,   # TrackStreamer::Service
     0x4483c0,   # ServiceResourceLoading
     0x409580,   # world views of the frame render
-    0x40ed50,   # draw queue flush
     0x571050,   # RenderCars
     # Particle draw (src/nfsu/particles.cpp): the quads of every particle on the workers, the draws in order.
     0x404110,   # particle system list draw for a view
     0x403a60,   # particle system update: emitters, then every particle's motion
+    # Draw queue (src/nfsu/flush.cpp): the model submission, the packet enqueue with its slot-pool pops and the
+    # flush of the queue with direct device and effect calls.
+    0x40c910,   # model submit: cull and enqueue each mesh part
+    0x40f1e0,   # enqueue a packet under its model's node
+    0x40ed50,   # flush the draw queue
 ]
 
 # Byte patches applied to the code before discovery: (address, original bytes, new bytes) in hex. Generation stops

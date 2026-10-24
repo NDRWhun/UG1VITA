@@ -147,13 +147,52 @@ struct Values;
 std::vector<Values*>    s_blocks;
 std::vector<uint16_t>   s_dirty;
 
+// A matrix parameter recorded as the product of 2 or 3 matrices (CmdProduct); its floats are computed when the game
+// thread reads them.
+struct Pending
+{
+    int         param;
+    uint32_t    count;
+    uint32_t    fpscr;
+    float       matrices[48];
+};
+
 // Parameter values: floats (ints stored as their bits) and textures.
 struct Values
 {
+    enum { PendingSlots = 4 };
+
     std::vector<float>  floats;
     Object*             textures[ParamCount] = {};
     uint16_t            id;
     bool                dirty = false;
+    uint32_t            pendingCount = 0;
+    Pending             pending[PendingSlots];
+
+    Pending* findPending(int p)
+    {
+        for (uint32_t i = 0; i < pendingCount; ++i)
+            if (pending[i].param == p)
+                return &pending[i];
+        return nullptr;
+    }
+    // Computes the floats of a pending parameter.
+    void settle(int p)
+    {
+        for (uint32_t i = 0; i < pendingCount; ++i)
+        {
+            if (pending[i].param != p)
+                continue;
+            matrixProduct(pending[i].matrices, pending[i].count, pending[i].fpscr, floats.data() + s_offsets[p]);
+            pending[i] = pending[--pendingCount];
+            return;
+        }
+    }
+    void settleAll()
+    {
+        while (pendingCount)
+            settle(pending[0].param);
+    }
 
     Values()
     {
@@ -307,10 +346,22 @@ private:
     int param(x86::reg32 handle) const;
     Values& values(int p)                   { return s_params[p].shared && m_pool ? m_pool->values : m_values; }
     const Values& values(int p) const       { return s_params[p].shared && m_pool ? m_pool->values : m_values; }
-    float* floats(int p)                    { return values(p).floats.data() + s_offsets[p]; }
-    const float* floats(int p) const        { return values(p).floats.data() + s_offsets[p]; }
+    float* floats(int p)
+    {
+        Values& v = values(p);
+        if (v.pendingCount)
+            v.settle(p);
+        return v.floats.data() + s_offsets[p];
+    }
+    const float* floats(int p) const        { return const_cast<Effect*>(this)->floats(p); }
     int intValue(int p) const               { x86::sreg32 v; memcpy(&v, floats(p), 4); return v; }
     HRESULT setFloats(x86::reg32 handle, const float* data, uint32_t count, Type type);
+
+public:
+    // SetMatrix of the product of count (2 or 3) matrices, recorded unmultiplied; the render thread multiplies.
+    HRESULT setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count);
+
+private:
     // Writes n floats of a parameter; a change is sent to the render thread.
     void store(int p, const void* data, uint32_t n);
     const EffectInfo& info() const          { return s_effects[m_kind]; }
@@ -394,6 +445,42 @@ void Effect::store(int p, const void* data, uint32_t n)
     memcpy(w + 2, floats(p), n * 4);
 }
 
+HRESULT Effect::setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count)
+{
+    float in[48];
+    for (uint32_t i = 0; i < count; ++i)
+        memcpy(in + 16 * i, matrices[i], 64);
+    const uint32_t fpscr = readFpscr();
+    const int p = param(handle);
+    Stream* stream = m_device->stream();
+    if (p < 0 || s_params[p].type != TypeFloat || s_params[p].floats < 16 || !stream || values(p).dirty)
+    {
+        float product[16];
+        matrixProduct(in, count, fpscr, product);
+        return setFloats(handle, product, 16, TypeFloat);
+    }
+    Values& v = values(p);
+    Pending* e = v.findPending(p);
+    if (e && e->count == count && e->fpscr == fpscr && sameWords(e->matrices, in, 16 * count))
+        return D3D_OK;
+    if (!e)
+    {
+        if (v.pendingCount == Values::PendingSlots)
+            v.settle(v.pending[0].param);
+        e = &v.pending[v.pendingCount++];
+        e->param = p;
+    }
+    e->count = count;
+    e->fpscr = fpscr;
+    memcpy(e->matrices, in, 64 * count);
+    uint32_t* w = stream->append(3 + 16 * count);
+    w[0] = CmdProduct | uint32_t(v.id) << 8;
+    w[1] = s_offsets[p] | count << 16;
+    w[2] = fpscr;
+    memcpy(w + 3, in, 64 * count);
+    return D3D_OK;
+}
+
 void Effect::record(EffectDraw& effect, const render::TextureStorage* textures[render::MaxSamplers]) const
 {
     effect.own = m_values.id;
@@ -418,6 +505,7 @@ void syncEffectValues(Stream& stream)
     for (uint16_t id : s_dirty)
     {
         Values* v = s_blocks[id];
+        v->settleAll();
         uint32_t* w = stream.append(2 + s_totalFloats);
         w[0] = CmdValues | uint32_t(id) << 8;
         w[1] = s_totalFloats << 16;
@@ -1090,6 +1178,11 @@ HRESULT setMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 h
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, reg32 texture)
 {
     return object(effect)->SetTexture(app, cpu, handle, lookup(texture));
+}
+
+HRESULT setProduct(reg32 effect, reg32 handle, const float* const* matrices, UINT count)
+{
+    return object(effect)->setProduct(handle, matrices, count);
 }
 
 HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags)
