@@ -3,18 +3,21 @@
 #include "gxm_render.h"
 #include <platform/config.h>
 #include <platform/cores.h>
+#include <platform/jobs.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <platform/texture.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 
 #define NFSU_SHADERS(X) \
-    X(ff_v) X(ff_screen_v) X(world_v) X(worldheadlight_v) X(worldreflect_v) X(worldheadlightreflect_v) \
-    X(worldbone_v) X(car_v) X(filter_v) X(clearz_v) \
+    X(ff_v) X(ff_screen_v) X(world_v) X(world_proj_v) X(worldheadlight_v) X(worldreflect_v) \
+    X(worldheadlightreflect_v) X(worldbone_v) X(car_v) X(filter_v) X(clearz_v) \
     X(ff_color_f) X(ff_color_f_atest) X(ff_tex_f) X(ff_tex_f_atest) X(ff_proj_f) X(ff_proj_f_atest) \
-    X(world_f) X(world_f_atest) X(worldheadlight_f) X(worldheadlight_f_atest) X(worldreflect_f) \
-    X(worldreflect_f_atest) X(worldheadlightreflect_f) X(worldheadlightreflect_f_atest) X(car_f) X(car_f_atest) \
+    X(world_f) X(world_f_atest) X(world_proj_f) X(world_proj_f_atest) X(worldheadlight_f) X(worldheadlight_f_atest) \
+    X(worldreflect_f) X(worldreflect_f_atest) X(worldheadlightreflect_f) X(worldheadlightreflect_f_atest) X(car_f) \
+    X(car_f_atest) \
     X(filter1_f) X(filter1_f_atest) X(filter2_f) X(filter2_f_atest) X(filter3_f) X(filter3_f_atest) \
     X(filter4_f) X(filter4_f_atest) X(clear_f) \
     X(filter1_f_bfcolor) X(filter1_f_bfalpha) X(filter1_f_bfscale) X(filter2_f_bfcolor) X(filter2_f_bfalpha) \
@@ -70,6 +73,15 @@ SceGxmTextureFormat textureFormat(texture::Format format)
     case texture::FormatBC2: return SCE_GXM_TEXTURE_FORMAT_UBC2_ABGR;
     default:                 return SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB;
     }
+}
+
+// One level of a swizzled texture from rows of pitch bytes.
+void writeSwizzled(const Texture& t, uint32_t face, uint32_t level, const void* data, uint32_t pitch)
+{
+    const render::TextureDesc& d = t.desc;
+    uint8_t* base = static_cast<uint8_t*>(t.data) + face * t.faceStride;
+    texture::swizzleLevel(d.format, d.width, d.height, level, data, pitch,
+                          base + texture::levelOffset(d.format, d.width, d.height, level));
 }
 
 SceGxmBlendFactor blendFactor(uint8_t factor)
@@ -352,8 +364,13 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     m_context = context;
     m_patcher = patcher;
     m_main.context = context;
+    m_uploadLock = new Mutex("gxm_uploads");
+    m_uploadDone = new CondVar("gxm_uploads", *m_uploadLock);
     m_precomputed = Config::getBool("gxm_precomputed", true);
     logInfo("gxm: %s draws", m_precomputed ? "precomputed" : "immediate");
+    m_cullSwap = Config::getBool("cull_swap", false);
+    if (m_cullSwap)
+        logInfo("gxm: cull winding swapped (cull_swap=1)");
     m_textureHeap = new GpuHeap("gxm_textures", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 16 * 1024 * 1024,
                                 SCE_GXM_MEMORY_ATTRIB_RW);
     m_bufferHeap = new GpuHeap("gxm_buffers", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, 8 * 1024 * 1024,
@@ -461,6 +478,12 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
 
 void FrameRenderer::shutdown()
 {
+    if (m_uploadLock)
+    {
+        LockGuard guard(*m_uploadLock);
+        while (!m_uploading.empty())
+            m_uploadDone->wait();
+    }
     shutdownLists();
     for (auto& v : m_vertexCache)
         sceGxmShaderPatcherReleaseVertexProgram(m_patcher, v.second.program);
@@ -477,6 +500,8 @@ void FrameRenderer::shutdown()
                 sceGxmShaderPatcherUnregisterProgram(m_patcher, m_fragmentPrograms[f][v].id);
     delete m_textureHeap;
     delete m_bufferHeap;
+    delete m_uploadDone;
+    delete m_uploadLock;
     if (m_arenaUid >= 0)
         sceKernelFreeMemBlock(m_arenaUid);
     if (m_sequenceUid >= 0)
@@ -544,6 +569,7 @@ render::Frame* FrameRenderer::beginFrame(uint32_t width, uint32_t height)
     f.resolve = nullptr;
     f.commands = nullptr;
     f.commandCount = 0;
+    f.uploads = false;
     return &f;
 }
 
@@ -562,7 +588,9 @@ void FrameRenderer::freePending()
     size_t kept = 0;
     for (size_t i = 0; i < m_pending.size(); ++i)
     {
-        if (m_pending[i].after <= m_completed)
+        // A texture is freed once no queued upload touches it either.
+        if (m_pending[i].after <= m_completed
+            && (m_pending[i].kind != 0 || uploadDone(static_cast<Texture*>(m_pending[i].object)->lastTicket)))
             destroy(m_pending[i].kind, m_pending[i].object);
         else
             m_pending[kept++] = m_pending[i];
@@ -665,6 +693,8 @@ render::TextureStorage* FrameRenderer::createTexture(const render::TextureDesc& 
         sceGxmTextureInitCube(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
     else
         sceGxmTextureInitSwizzled(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
+    // LOD bias 0, the Direct3D default: the field holds bias * 8 + 31.
+    sceGxmTextureSetLodBias(&t->texture, 31);
     if (desc.target)
     {
         // Cube target: each face a swizzled colour surface.
@@ -683,6 +713,12 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
     const render::TextureDesc& d = t->desc;
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return;
+    settle(t);
+    if (perf::enabled())
+    {
+        perf::upload(perf::UploadLevels, 1);
+        perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
+    }
     uint8_t* base = static_cast<uint8_t*>(t->data) + face * t->faceStride;
     if (t->stride)
     {
@@ -694,8 +730,7 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
                 memcpy(base + y * t->stride, static_cast<const uint8_t*>(data) + y * pitch, rowBytes);
         return;
     }
-    texture::swizzleLevel(d.format, d.width, d.height, level, data, pitch,
-                          base + texture::levelOffset(d.format, d.width, d.height, level));
+    writeSwizzled(*t, face, level, data, pitch);
 }
 
 void FrameRenderer::readTexture(const render::TextureStorage* storage, uint32_t face, uint32_t level, void* data,
@@ -705,6 +740,7 @@ void FrameRenderer::readTexture(const render::TextureStorage* storage, uint32_t 
     const render::TextureDesc& d = t->desc;
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return;
+    settle(t);
     const uint8_t* base = static_cast<const uint8_t*>(t->data) + face * t->faceStride;
     if (t->stride)
     {
@@ -721,8 +757,129 @@ void FrameRenderer::copyTexture(render::TextureStorage* to, const render::Textur
 {
     Texture* dst = static_cast<Texture*>(to);
     const Texture* src = static_cast<const Texture*>(from);
+    settle(dst);
+    settle(src);
     if (dst->bytes == src->bytes)
         memcpy(dst->data, src->data, dst->bytes);
+}
+
+uint32_t FrameRenderer::writeTextureAsync(render::TextureStorage* storage, uint32_t face, uint32_t level,
+                                          const void* data, uint32_t pitch)
+{
+    Texture* t = static_cast<Texture*>(storage);
+    const render::TextureDesc& d = t->desc;
+    if (level >= d.levels || face >= (d.cube ? 6u : 1u))
+        return 0;
+    if (t->stride)
+    {
+        writeTexture(storage, face, level, data, pitch);
+        return 0;
+    }
+    if (perf::enabled())
+    {
+        perf::upload(perf::UploadLevels, 1);
+        perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
+    }
+    t->uploads.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t ticket = queueUpload(new Upload{ this, 0, t->lastTicket, t, nullptr, face, level, pitch, data });
+    t->lastTicket = ticket;
+    return ticket;
+}
+
+uint32_t FrameRenderer::copyTextureAsync(render::TextureStorage* to, const render::TextureStorage* from)
+{
+    Texture* dst = static_cast<Texture*>(to);
+    Texture* src = const_cast<Texture*>(static_cast<const Texture*>(from));
+    if (dst->bytes != src->bytes)
+        return 0;
+    dst->uploads.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t ticket = queueUpload(new Upload{ this, 0, std::max(dst->lastTicket, src->lastTicket), dst, src,
+                                                    0, 0, 0, nullptr });
+    dst->lastTicket = ticket;
+    src->lastTicket = ticket;
+    return ticket;
+}
+
+uint32_t FrameRenderer::queueUpload(Upload* upload)
+{
+    const uint32_t ticket = m_nextTicket++;
+    upload->ticket = ticket;
+    {
+        LockGuard guard(*m_uploadLock);
+        m_uploading.push_back(ticket);
+        m_firstUploading.store(m_uploading.front(), std::memory_order_relaxed);
+    }
+    if (perf::enabled())
+        perf::upload(perf::UploadAsync, 1);
+    jobs::post(&runUpload, upload);
+    return ticket;
+}
+
+void FrameRenderer::runUpload(void* argument)
+{
+    Upload* u = static_cast<Upload*>(argument);
+    FrameRenderer* self = u->owner;
+    self->waitUpload(u->after);
+    const bool timed = perf::enabled();
+    const uint32_t start = timed ? perf::now() : 0;
+    if (u->from)
+        memcpy(u->to->data, u->from->data, u->to->bytes);
+    else
+        writeSwizzled(*u->to, u->face, u->level, u->data, u->pitch);
+    __asm__ volatile("dsb" : : : "memory");
+    if (timed)
+        perf::upload(perf::UploadWorkerUs, perf::now() - start);
+    {
+        LockGuard guard(*self->m_uploadLock);
+        const auto it = std::lower_bound(self->m_uploading.begin(), self->m_uploading.end(), u->ticket);
+        if (it != self->m_uploading.end() && *it == u->ticket)
+            self->m_uploading.erase(it);
+        self->m_firstUploading.store(self->m_uploading.empty() ? 0xffffffffu : self->m_uploading.front(),
+                                     std::memory_order_release);
+        u->to->uploads.fetch_sub(1, std::memory_order_release);
+        self->m_uploadDone->broadcast();
+    }
+    delete u;
+}
+
+bool FrameRenderer::uploadDone(uint32_t ticket)
+{
+    if (ticket < m_firstUploading.load(std::memory_order_acquire))
+        return true;
+    LockGuard guard(*m_uploadLock);
+    return !std::binary_search(m_uploading.begin(), m_uploading.end(), ticket);
+}
+
+void FrameRenderer::waitUpload(uint32_t ticket)
+{
+    if (!ticket)
+        return;
+    LockGuard guard(*m_uploadLock);
+    while (std::binary_search(m_uploading.begin(), m_uploading.end(), ticket))
+        m_uploadDone->wait();
+}
+
+void FrameRenderer::waitWrites(const render::TextureStorage* texture)
+{
+    if (!texture->uploads.load(std::memory_order_acquire))
+        return;
+    LockGuard guard(*m_uploadLock);
+    while (texture->uploads.load(std::memory_order_acquire))
+        m_uploadDone->wait();
+}
+
+void FrameRenderer::settle(const Texture* texture)
+{
+    if (uploadDone(texture->lastTicket))
+        return;
+    const bool timed = perf::enabled();
+    const uint32_t start = timed ? perf::now() : 0;
+    waitUpload(texture->lastTicket);
+    if (timed)
+    {
+        perf::upload(perf::UploadGameWaits, 1);
+        perf::upload(perf::UploadGameWaitUs, perf::now() - start);
+    }
 }
 
 render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height)
@@ -731,7 +888,7 @@ render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height
     Depth* d = new Depth();
     d->width = uint16_t(width);
     d->height = uint16_t(height);
-    // No stencil plane: the layer never enables the stencil test, so it would only be loaded and stored.
+    // Depth plane only, no stencil plane.
     d->data = m_textureHeap->allocate(w * h * 4, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
     d->stencil = nullptr;
     if (!d->data)
@@ -927,7 +1084,7 @@ void FrameRenderer::preparePrograms(const render::Frame& frame)
             m_programs[i] = DrawPrograms{ nullptr, nullptr };
             continue;
         }
-        // Consecutive draws mostly share their programs.
+        // Programs looked up where the state differs from the previous draw's.
         if (!previous || s.vertexProgram != previous->vertexProgram || s.layout != previous->layout)
             last.vertex = vertexProgram(s.vertexProgram, s.layout);
         if (!previous || s.vertexProgram != previous->vertexProgram || s.fragmentProgram != previous->fragmentProgram
@@ -985,8 +1142,7 @@ void FrameRenderer::setFixedState(ContextState& c, SceGxmContext* context, const
     const render::DrawState& s = d.state;
     if (first || d.viewport != c.viewport)
     {
-        // Direct3D window coordinates have pixel centres at integers: half a pixel to GXM's.
-        // A back buffer drawn to the display directly: its pixels scaled to the display's.
+        // Direct3D window coordinates moved by half a pixel, scaled by the scene's display scale.
         const render::Viewport& v = frame.viewports[d.viewport];
         const float sx = c.scaleX, sy = c.scaleY;
         sceGxmSetViewport(context, sx * (v.x + 0.5f * v.width + 0.5f), sx * 0.5f * v.width,
@@ -1002,8 +1158,11 @@ void FrameRenderer::setFixedState(ContextState& c, SceGxmContext* context, const
                                                                                : SCE_GXM_DEPTH_WRITE_DISABLED);
     }
     if (first || s.cullMode != c.last.cullMode)
-        sceGxmSetCullMode(context, s.cullMode == 2 ? SCE_GXM_CULL_CW : s.cullMode == 3 ? SCE_GXM_CULL_CCW
-                                                                                        : SCE_GXM_CULL_NONE);
+    {
+        const SceGxmCullMode cw = m_cullSwap ? SCE_GXM_CULL_CCW : SCE_GXM_CULL_CW;
+        const SceGxmCullMode ccw = m_cullSwap ? SCE_GXM_CULL_CW : SCE_GXM_CULL_CCW;
+        sceGxmSetCullMode(context, s.cullMode == 2 ? cw : s.cullMode == 3 ? ccw : SCE_GXM_CULL_NONE);
+    }
 }
 
 void FrameRenderer::draw(Recorder& r, const render::Frame& frame, uint32_t index)
@@ -1016,7 +1175,7 @@ void FrameRenderer::draw(Recorder& r, const render::Frame& frame, uint32_t index
         logError("gxm: draw of %u vertices without indices skipped", d.count);
         return;
     }
-    if (m_precomputed.load(std::memory_order_relaxed))
+    if (r.precomputed)
     {
         drawPrecomputed(r, frame, index);
         return;
@@ -1152,10 +1311,13 @@ void FrameRenderer::drawPrecomputed(Recorder& r, const render::Frame& frame, uin
     }
     if (error)
     {
-        // Not expected; the immediate path takes over from here.
+        // Unbinds the precomputed states and draws this and the following draws immediately.
         logError("gxm: precomputed objects failed (0x%08x): immediate draws from now on", error);
         m_precomputed.store(false, std::memory_order_relaxed);
-        c.valid = false;
+        r.precomputed = false;
+        sceGxmSetPrecomputedVertexState(context, nullptr);
+        sceGxmSetPrecomputedFragmentState(context, nullptr);
+        c.reset(c.scaleX, c.scaleY);
         this->draw(r, frame, index);
         return;
     }
@@ -1266,6 +1428,9 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
     preparePrograms(frame);
     m_main.data.begin(frame.index, &finished, this);
     m_main.words.reset();
+    m_main.precomputed = m_precomputed.load(std::memory_order_relaxed);
+    for (Worker* w : m_workers)
+        w->recorder.precomputed = m_main.precomputed;
     const bool lastWritesDone = !presentScene(frame);
 
     // Where each scene draws, and its draws in order: the colour clears carried to it first.
@@ -1316,6 +1481,8 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         p.orderCount = uint32_t(m_order.size()) - p.firstOrder;
     }
     const bool lists = recordLists(frame);
+    if (frame.uploads)
+        waitFrameUploads(frame);
 
     for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
@@ -1372,9 +1539,29 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
         const bool last = i + 1 == frame.sceneCount;
         sceGxmEndScene(m_context, nullptr, last && lastWritesDone ? &slot.done : nullptr);
     }
-    // The present pass draws with the context's own state again.
+    // Unbinds the precomputed states.
     sceGxmSetPrecomputedVertexState(m_context, nullptr);
     sceGxmSetPrecomputedFragmentState(m_context, nullptr);
+}
+
+void FrameRenderer::waitFrameUploads(const render::Frame& frame)
+{
+    const bool timed = perf::enabled();
+    for (uint32_t i = 0; i < frame.drawCount; ++i)
+    {
+        for (const render::TextureStorage* t : frame.draws[i].state.textures)
+        {
+            if (!t || !t->uploads.load(std::memory_order_acquire))
+                continue;
+            const uint32_t start = timed ? perf::now() : 0;
+            waitWrites(t);
+            if (timed)
+            {
+                perf::upload(perf::UploadRenderWaits, 1);
+                perf::upload(perf::UploadRenderWaitUs, perf::now() - start);
+            }
+        }
+    }
 }
 
 // ---- Command lists -------------------------------------------------------------------------------------------------
@@ -1385,7 +1572,7 @@ namespace
 const uint32_t ListMinimumDraws = 96;   // smaller frames are drawn on the immediate context
 const uint32_t JobMinimumDraws = 32;    // smallest range a list records
 const uint32_t WorkerHostMem = 16 * 1024;
-// Above guest threads, like the job workers: a helper preempted inside a range would hold up the render thread.
+// 80: below the job workers (76), level with guest threads at THREAD_PRIORITY_HIGHEST, above the other guest threads.
 const int ListWorkerPriority = Thread::PriorityHigh + 16;
 
 }
@@ -1585,6 +1772,11 @@ bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& 
     sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_NONE, 0, 0, p.width - 1, p.height - 1);
     sceGxmSetTwoSidedEnable(context, SCE_GXM_TWO_SIDED_DISABLED);
     w.recorder.state.reset(p.scaleX, p.scaleY);
+    if (!w.recorder.precomputed)
+    {
+        sceGxmSetPrecomputedVertexState(context, nullptr);
+        sceGxmSetPrecomputedFragmentState(context, nullptr);
+    }
     for (uint32_t n = job.begin; n < job.end; ++n)
         draw(w.recorder, frame, m_order[n]);
     SceGxmCommandList list;
@@ -1613,7 +1805,7 @@ bool FrameRenderer::recordLists(const render::Frame& frame)
             p.firstJob = uint32_t(m_jobs.size());
             if (p.skipped || !p.orderCount)
                 continue;
-            // About two ranges per thread, so that a late helper leaves less to wait for.
+            // About two ranges per thread.
             const uint32_t size = std::max(JobMinimumDraws, (p.orderCount + 2 * threads - 1) / (2 * threads));
             for (uint32_t begin = 0; begin < p.orderCount; begin += size)
             {

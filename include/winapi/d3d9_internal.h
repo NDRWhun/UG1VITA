@@ -22,6 +22,22 @@ namespace win32 { namespace d3d9
 namespace render = pf::render;
 namespace texture = pf::texture;
 
+// Bitwise equality of count dwords at a and b.
+inline bool sameWords(const void* a, const void* b, uint32_t count)
+{
+    const uint8_t* p = static_cast<const uint8_t*>(a);
+    const uint8_t* q = static_cast<const uint8_t*>(b);
+    for (uint32_t i = 0; i < count; ++i, p += 4, q += 4)
+    {
+        uint32_t x, y;
+        memcpy(&x, p, 4);
+        memcpy(&y, q, 4);
+        if (x != y)
+            return false;
+    }
+    return true;
+}
+
 // ---- Constants and types -------------------------------------------------------------------------------------------
 
 enum : HRESULT
@@ -250,6 +266,33 @@ void buildInterface(WinApplication* app, Kind kind, const char* interfaceName, c
 // The effect interfaces (d3dx9.cpp).
 void initEffectInterfaces(WinApplication* app);
 
+// Guest entries of the methods native code calls directly (d3d9_native.cpp, d3d9_native.h).
+namespace guest
+{
+
+void SetTransform(WinApplication* app, x86::CPU& cpu);
+void SetMaterial(WinApplication* app, x86::CPU& cpu);
+void SetLight(WinApplication* app, x86::CPU& cpu);
+void LightEnable(WinApplication* app, x86::CPU& cpu);
+void SetRenderState(WinApplication* app, x86::CPU& cpu);
+void SetTexture(WinApplication* app, x86::CPU& cpu);
+void SetVertexDeclaration(WinApplication* app, x86::CPU& cpu);
+void EffectSetInt(WinApplication* app, x86::CPU& cpu);
+void EffectSetFloat(WinApplication* app, x86::CPU& cpu);
+void EffectSetVector(WinApplication* app, x86::CPU& cpu);
+void EffectSetVectorArray(WinApplication* app, x86::CPU& cpu);
+void EffectSetMatrix(WinApplication* app, x86::CPU& cpu);
+void EffectSetMatrixArray(WinApplication* app, x86::CPU& cpu);
+void EffectSetTexture(WinApplication* app, x86::CPU& cpu);
+void EffectBegin(WinApplication* app, x86::CPU& cpu);
+void EffectPass(WinApplication* app, x86::CPU& cpu);
+void EffectEnd(WinApplication* app, x86::CPU& cpu);
+
+}
+
+#define D3D_GUEST(fn) { #fn, &win32::d3d9::guest::fn }
+#define D3D_GUEST_NAMED(name, fn) { name, &win32::d3d9::guest::fn }
+
 #define D3D_METHOD(cls, fn) { #fn, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
 #define D3D_NAMED(name, cls, fn) { name, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
 #define D3D_TRAP(fn) { #fn, nullptr }
@@ -259,6 +302,7 @@ void initEffectInterfaces(WinApplication* app);
 
 class Device;
 class Texture;
+struct KeptLevel;
 class Surface;
 class Buffer;
 class VertexDeclaration;
@@ -309,6 +353,8 @@ public:
     void fillDesc(UINT level, D3DSURFACE_DESC* desc) const;
     // The surface of a level (and face), kept while the texture lives; one reference added for the caller.
     Surface* surface(WinApplication* app, uint32_t face, uint32_t level);
+    // Game thread, once per frame: drops kept linear copies over the byte cap whose uploads are finished.
+    static void trimKept();
 
     HRESULT GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* device);
     DWORD SetPriority(WinApplication* app, x86::CPU& cpu, DWORD priority);
@@ -333,16 +379,22 @@ public:
 private:
     HRESULT lock(uint32_t face, uint32_t level, D3DLOCKED_RECT* locked, const RECT* rect, DWORD flags);
     HRESULT unlock(uint32_t face, uint32_t level);
+    // The level's kept linear copy, taken out of the cache; null when there is none.
+    MemMap* takeKept(uint32_t index, uint32_t* ticket);
+    void keep(uint32_t index, MemMap* memory, uint32_t ticket);
+
+    friend struct KeptLevels;
 
     Device*                 m_device;
     render::TextureDesc     m_desc;
     DWORD                   m_format, m_usage, m_pool;
     render::TextureStorage* m_storage;
     std::vector<MemMap*>    m_locks;        // per face * levels + level: the guest buffer of a lock
+    std::vector<uint32_t>   m_tickets;      // the upload reading a locked buffer (0: none)
     std::vector<DWORD>      m_lockFlags;
     std::vector<bool>       m_written;      // the level has been written since creation
     std::vector<uint8_t>    m_lockCounts;   // locks so far, saturating at 2
-    std::vector<MemMap*>    m_shadows;      // linear copy kept for levels locked repeatedly (movie frames)
+    std::vector<KeptLevel*> m_kept;         // the linear copy kept after the last unlock (KeptLevels lock)
     std::vector<Surface*>   m_surfaces;
 };
 
@@ -490,7 +542,7 @@ struct Stream
     void grow(uint32_t words);
 };
 
-// The stream of a frame index; game thread. Waits for nothing: the frame slots keep it free.
+// The stream of a frame index, emptied; game thread.
 Stream& frameStream(uint32_t frameIndex);
 // Render thread: completes the draws of a frame from its stream (Frame::resolve).
 void resolveFrame(render::Frame& frame);
@@ -528,6 +580,7 @@ struct DrawRecord
     uint8_t                         primitive, layout, texComponents, positionT;
     EffectDraw                      effect;
     const render::TextureStorage*   textures[render::MaxSamplers];  // stage 0, or the pass's samplers
+    uint32_t                        deviceSamplers; // effect draws: Device::deviceSamplers() at the draw
 };
 
 // ---- Effects (d3dx9.cpp) -------------------------------------------------------------------------------------------
@@ -556,11 +609,18 @@ public:
 
 // Game thread: value blocks changed while no frame recorded, sent whole.
 void syncEffectValues(Stream& stream);
+// Game thread: every value block sent whole with the next frame.
+void markEffectValuesDirty();
 // Render thread: floats of a value block, and what a pass draws with from mirrored blocks (shared may be null).
+// projected: stage 0 TEXTURETRANSFORMFLAGS has PROJECTED and the draw has four texture coordinates (ps_1_1 divides
+// them by the last one).
 uint32_t effectBlockFloats();
-void effectBinding(const EffectDraw& effect, const float* own, const float* shared, EffectBinding& binding);
+void effectBinding(const EffectDraw& effect, const float* own, const float* shared, bool projected,
+                   EffectBinding& binding);
 void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
+// The sampler stage a pass reads with its sampler slot (ps_1_1: tN reads stage N), or -1 for an unused slot.
+int effectSamplerStage(const EffectDraw& effect, uint32_t slot);
 
 // ---- Fixed-function resolution (d3d9_state.cpp, pure) ----------------------------------------------------------------
 
@@ -626,6 +686,13 @@ enum : DWORD
     MaxSamplerStages = 16
 };
 
+// Bits of a stage in Device::deviceSamplers.
+enum : uint32_t
+{
+    DeviceTexture = 1, DeviceAddressU = 2, DeviceAddressV = 4, DeviceMagFilter = 8, DeviceMinFilter = 16,
+    DeviceMipFilter = 32
+};
+
 class Device : public Object
 {
 public:
@@ -634,6 +701,11 @@ public:
 
     void setEffectPass(const EffectPass* pass)  { m_effectPass = pass; }
     const EffectPass* effectPass() const        { return m_effectPass; }
+    // Stages 0..3, 8 bits each (DeviceTexture, DeviceAddressU ...): the device texture and sampler states written
+    // after the last effect Pass or effect SetTexture of that stage. These win over the pass's own for effect draws.
+    uint32_t deviceSamplers() const             { return m_deviceSamplers; }
+    void effectPassApplied()                    { m_deviceSamplers = 0; }
+    void effectTextureApplied(uint32_t stage)   { m_deviceSamplers &= ~(uint32_t(DeviceTexture) << (stage * 8)); }
     // The stream of the frame being recorded; null between frames.
     Stream* stream() const                      { return m_stream; }
 
@@ -767,6 +839,7 @@ private:
     Surface*                m_backBuffer = nullptr;
     Surface*                m_autoDepth = nullptr;
     const EffectPass*       m_effectPass = nullptr;
+    uint32_t                m_deviceSamplers = 0;
     std::vector<VertexDeclaration*> m_fvfDeclarations;
     DWORD                   m_lights[8][26] = {};
     BOOL                    m_lightEnabled[8] = {};

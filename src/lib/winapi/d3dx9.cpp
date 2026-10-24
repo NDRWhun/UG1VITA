@@ -3,6 +3,7 @@
 
 #include <winapi/d3dx9.h>
 #include <winapi/d3d9_internal.h>
+#include <winapi/d3d9_native.h>
 #include <platform/log.h>
 #include <platform/sha256.h>
 #include <algorithm>
@@ -208,6 +209,17 @@ const int8_t s_samplerParams[EffectCount][render::MaxSamplers] = {
     { PFilterTexture0, PFilterTexture1, PFilterTexture2, PFilterTexture3 },
 };
 
+// Sampler stage of each kind's samplers (ps_1_1: tN reads stage N; car samples the diffuse map with t1).
+const int8_t s_samplerStages[EffectCount][render::MaxSamplers] = {
+    { 0, -1, -1, -1 },
+    { 0, 1, 2, -1 },
+    { 0, 1, -1, -1 },
+    { 0, 1, 2, 3 },
+    { 0, -1, -1, -1 },
+    { 1, 0, -1, -1 },
+    { 0, 1, 2, 3 },
+};
+
 uint32_t samplerCount(EffectKind kind, uint32_t pass)
 {
     switch (kind)
@@ -366,7 +378,7 @@ HRESULT Effect::setFloats(x86::reg32 handle, const float* data, uint32_t count, 
 
 void Effect::store(int p, const void* data, uint32_t n)
 {
-    if (memcmp(floats(p), data, n * 4) == 0)
+    if (sameWords(floats(p), data, n))
         return;
     memcpy(floats(p), data, n * 4);
     Values& v = values(p);
@@ -415,13 +427,27 @@ void syncEffectValues(Stream& stream)
     s_dirty.clear();
 }
 
+void markEffectValuesDirty()
+{
+    for (Values* v : s_blocks)
+        if (v)
+            v->markDirty();
+}
+
+int effectSamplerStage(const EffectDraw& effect, uint32_t slot)
+{
+    const EffectKind kind = effect.kind < EffectCount ? EffectKind(effect.kind) : EffectFilter;
+    return slot < samplerCount(kind, effect.pass) && slot < render::MaxSamplers ? s_samplerStages[kind][slot] : -1;
+}
+
 uint32_t effectBlockFloats()
 {
     initOffsets();
     return s_totalFloats;
 }
 
-void effectBinding(const EffectDraw& effect, const float* own, const float* shared, EffectBinding& b)
+void effectBinding(const EffectDraw& effect, const float* own, const float* shared, bool projected,
+                   EffectBinding& b)
 {
     const View v(effect, own, shared);
     const bool wrapMip = true;
@@ -437,6 +463,13 @@ void effectBinding(const EffectDraw& effect, const float* own, const float* shar
     switch (v.kind)
     {
     case EffectWorld:
+        if (projected)
+        {
+            D3D_LOG_ONCE("d3dx9: world effect draw with projected texture coordinates (stage 0 PROJECTED)");
+            b.vertexProgram = render::VpWorldProjected;
+            b.fragmentProgram = render::FpWorldProjected;
+            break;
+        }
         b.vertexProgram = render::VpWorld;
         b.fragmentProgram = render::FpWorld;
         break;
@@ -471,6 +504,8 @@ void effectBinding(const EffectDraw& effect, const float* own, const float* shar
             b.samplers[i] = samplerOf(render::AddressClamp, false);
         break;
     }
+    if (projected && v.kind != EffectWorld)
+        D3D_LOG_ONCE("d3dx9: projected stage 0 texture coordinates of effect kind %u not emulated", unsigned(v.kind));
 }
 
 void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
@@ -540,19 +575,25 @@ void effectVertexConstants(const EffectDraw& effect, const float* own, const flo
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
 {
     const View v(effect, own, shared);
+    // ps_1_1 constant registers hold [-1, 1].
+    auto copy = [&v](float* to, int p, uint32_t n)
+    {
+        const float* from = v.floats(p);
+        for (uint32_t i = 0; i < n; ++i)
+            to[i] = from[i] < -1.0f ? -1.0f : from[i] > 1.0f ? 1.0f : from[i];
+    };
     switch (v.kind)
     {
     case EffectWorldHeadlight:
     case EffectWorldHeadlightReflect:
-        memcpy(reinterpret_cast<render::WorldHeadlightFragmentConstants*>(out)->headlightColor,
-               v.floats(PHeadlightColor), 16);
+        copy(reinterpret_cast<render::WorldHeadlightFragmentConstants*>(out)->headlightColor, PHeadlightColor, 4);
         break;
     case EffectCar:
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, v.floats(PEnvmapMin), 16);
-        memcpy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, v.floats(PEnvmapRange), 16);
+        copy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapMin, PEnvmapMin, 4);
+        copy(reinterpret_cast<render::CarFragmentConstants*>(out)->envmapRange, PEnvmapRange, 4);
         break;
     case EffectFilter:
-        memcpy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, v.floats(PFilterWeights), 64);
+        copy(reinterpret_cast<render::FilterFragmentConstants*>(out)->weights, PFilterWeights, 16);
         break;
     default:
         break;
@@ -805,6 +846,20 @@ HRESULT Effect::SetTexture(WinApplication* app, x86::CPU& cpu, x86::reg32 handle
     if (slot)
         slot->release();
     slot = texture;
+    // The active pass samples the new value from now on (it was set after any device SetTexture of the stage).
+    if (const EffectPass* active = m_device->effectPass())
+    {
+        const Effect* e = static_cast<const Effect*>(active);
+        if (&e->values(p) == &values(p))
+        {
+            const uint32_t count = samplerCount(e->m_kind, e->m_pass);
+            for (uint32_t i = 0; i < count && i < render::MaxSamplers; ++i)
+            {
+                if (s_samplerParams[e->m_kind][i] == p)
+                    m_device->effectTextureApplied(uint32_t(s_samplerStages[e->m_kind][i]));
+            }
+        }
+    }
     return D3D_OK;
 }
 
@@ -900,6 +955,7 @@ HRESULT Effect::Pass(WinApplication* app, x86::CPU& cpu, UINT pass)
     // Parameters keep applying while the pass is active (9.0b): draws read them as they are then.
     m_pass = pass;
     m_device->setEffectPass(this);
+    m_device->effectPassApplied();
     return D3D_OK;
 }
 
@@ -951,21 +1007,21 @@ const MethodEntry s_effect[] = {
     D3D_METHOD(Effect, GetTechniqueByName), D3D_METHOD(Effect, GetPass), D3D_TRAP(GetPassByName),
     D3D_TRAP(GetFunction), D3D_TRAP(GetFunctionByName), D3D_TRAP(GetAnnotation), D3D_TRAP(GetAnnotationByName),
     D3D_METHOD(Effect, SetValue), D3D_METHOD(Effect, GetValue), D3D_METHOD(Effect, SetBool), D3D_TRAP(GetBool),
-    D3D_TRAP(SetBoolArray), D3D_TRAP(GetBoolArray), D3D_METHOD(Effect, SetInt), D3D_METHOD(Effect, GetInt),
-    D3D_TRAP(SetIntArray), D3D_TRAP(GetIntArray), D3D_METHOD(Effect, SetFloat), D3D_METHOD(Effect, GetFloat),
-    D3D_METHOD(Effect, SetFloatArray), D3D_TRAP(GetFloatArray), D3D_METHOD(Effect, SetVector),
-    D3D_METHOD(Effect, GetVector), D3D_METHOD(Effect, SetVectorArray), D3D_TRAP(GetVectorArray),
-    D3D_METHOD(Effect, SetMatrix), D3D_METHOD(Effect, GetMatrix), D3D_METHOD(Effect, SetMatrixArray),
+    D3D_TRAP(SetBoolArray), D3D_TRAP(GetBoolArray), D3D_GUEST_NAMED("SetInt", EffectSetInt), D3D_METHOD(Effect, GetInt),
+    D3D_TRAP(SetIntArray), D3D_TRAP(GetIntArray), D3D_GUEST_NAMED("SetFloat", EffectSetFloat), D3D_METHOD(Effect, GetFloat),
+    D3D_METHOD(Effect, SetFloatArray), D3D_TRAP(GetFloatArray), D3D_GUEST_NAMED("SetVector", EffectSetVector),
+    D3D_METHOD(Effect, GetVector), D3D_GUEST_NAMED("SetVectorArray", EffectSetVectorArray), D3D_TRAP(GetVectorArray),
+    D3D_GUEST_NAMED("SetMatrix", EffectSetMatrix), D3D_METHOD(Effect, GetMatrix), D3D_GUEST_NAMED("SetMatrixArray", EffectSetMatrixArray),
     D3D_TRAP(GetMatrixArray), D3D_TRAP(SetMatrixPointerArray), D3D_TRAP(GetMatrixPointerArray),
     D3D_METHOD(Effect, SetMatrixTranspose), D3D_TRAP(GetMatrixTranspose), D3D_METHOD(Effect, SetMatrixTransposeArray),
     D3D_TRAP(GetMatrixTransposeArray), D3D_TRAP(SetMatrixTransposePointerArray),
     D3D_TRAP(GetMatrixTransposePointerArray), D3D_TRAP(SetString), D3D_TRAP(GetString),
-    D3D_METHOD(Effect, SetTexture), D3D_METHOD(Effect, GetTexture), D3D_TRAP(SetPixelShader),
+    D3D_GUEST_NAMED("SetTexture", EffectSetTexture), D3D_METHOD(Effect, GetTexture), D3D_TRAP(SetPixelShader),
     D3D_TRAP(GetPixelShader), D3D_TRAP(SetVertexShader), D3D_TRAP(GetVertexShader),
     D3D_METHOD(Effect, GetPool), D3D_METHOD(Effect, SetTechnique), D3D_METHOD(Effect, GetCurrentTechnique),
     D3D_METHOD(Effect, ValidateTechnique), D3D_METHOD(Effect, FindNextValidTechnique),
-    D3D_METHOD(Effect, IsParameterUsed), D3D_METHOD(Effect, Begin), D3D_METHOD(Effect, Pass),
-    D3D_METHOD(Effect, End), D3D_METHOD(Effect, GetDevice), D3D_METHOD(Effect, OnLostDevice),
+    D3D_METHOD(Effect, IsParameterUsed), D3D_GUEST_NAMED("Begin", EffectBegin), D3D_GUEST_NAMED("Pass", EffectPass),
+    D3D_GUEST_NAMED("End", EffectEnd), D3D_METHOD(Effect, GetDevice), D3D_METHOD(Effect, OnLostDevice),
     D3D_METHOD(Effect, OnResetDevice), D3D_TRAP(Slot70), D3D_TRAP(Slot71), D3D_TRAP(Slot72), D3D_TRAP(Slot73),
     D3D_TRAP(Slot74), D3D_TRAP(Slot75),
 };
@@ -983,6 +1039,75 @@ void initEffectInterfaces(WinApplication* app)
     buildInterface(app, KindEffect, "ID3DXEffect", s_effect, sizeof(s_effect) / sizeof(s_effect[0]));
     buildInterface(app, KindEffectPool, "ID3DXEffectPool", s_pool, sizeof(s_pool) / sizeof(s_pool[0]));
 }
+
+// ---- Direct calls (d3d9_native.h) ----------------------------------------------------------------------------------
+
+namespace bridge { namespace effect
+{
+
+namespace
+{
+
+inline Effect* object(reg32 guest)
+{
+    return static_cast<Effect*>(lookup(guest));
+}
+
+}
+
+HRESULT setInt(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, x86::sreg32 value)
+{
+    return object(effect)->SetInt(app, cpu, handle, value);
+}
+
+HRESULT setFloat(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, float value)
+{
+    return object(effect)->SetFloat(app, cpu, handle, value);
+}
+
+HRESULT setVector(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* vector)
+{
+    return object(effect)->SetVector(app, cpu, handle, vector);
+}
+
+HRESULT setVectorArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* vectors,
+                       UINT count)
+{
+    return object(effect)->SetVectorArray(app, cpu, handle, vectors, count);
+}
+
+HRESULT setMatrix(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrix)
+{
+    return object(effect)->SetMatrix(app, cpu, handle, matrix);
+}
+
+HRESULT setMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrices,
+                       UINT count)
+{
+    return object(effect)->SetMatrixArray(app, cpu, handle, matrices, count);
+}
+
+HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, reg32 texture)
+{
+    return object(effect)->SetTexture(app, cpu, handle, lookup(texture));
+}
+
+HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags)
+{
+    return object(effect)->Begin(app, cpu, passes, flags);
+}
+
+HRESULT pass(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass)
+{
+    return object(effect)->Pass(app, cpu, pass);
+}
+
+HRESULT end(WinApplication* app, x86::CPU& cpu, reg32 effect)
+{
+    return object(effect)->End(app, cpu);
+}
+
+}}
 
 // ---- Entry points --------------------------------------------------------------------------------------------------
 
@@ -1067,8 +1192,7 @@ x86::reg32 vecTransform(x86::reg32 out, const float v[4], x86::reg32 m)
 {
     float mm[16], r[4];
     memcpy(mm, hostFloats(m), 64);
-    for (int j = 0; j < 4; ++j)
-        r[j] = v[0] * mm[j] + v[1] * mm[4 + j] + v[2] * mm[8 + j] + v[3] * mm[12 + j];
+    d3dx9::transform(v, mm, r);
     store(out, r, 4);
     return out;
 }
@@ -1141,6 +1265,12 @@ void Vec4Transform(WinApplication* app, x86::CPU& cpu)
 void MatrixTranspose(WinApplication* app, x86::CPU& cpu)
 {
     Wrapper<decltype(&d3d9::matrixTranspose), &d3d9::matrixTranspose>::stdcall(app, cpu);
+}
+
+void transform(const float v[4], const float m[16], float r[4])
+{
+    for (int j = 0; j < 4; ++j)
+        r[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j];
 }
 
 }}

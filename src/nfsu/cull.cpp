@@ -442,15 +442,30 @@ bool treeCull(const Pass& p, Arena& out, X87& x87, reg32 section, reg32 info)
     return true;
 }
 
-// Guest memory as phase A sees it: its stores stay here until the commit.
+// Guest memory as phase A sees it: its stores stay here until the commit. A bit per hashed dword marks the dwords
+// the stores touch; reads of unmarked dwords come from guest memory directly.
 class Overlay
 {
 public:
-    void clear() { m_writes.clear(); }
+    void clear()
+    {
+        m_writes.clear();
+        memset(m_marks, 0, sizeof(m_marks));
+    }
     reg32 ld32(reg32 address) const { return read(address, 4); }
     reg32 ld16(reg32 address) const { return read(address, 2); }
-    void st32(reg32 address, reg32 value) { m_writes.push_back(Write{address, value, 4}); }
-    void st8(reg32 address, reg8 value) { m_writes.push_back(Write{address, value, 1}); }
+    void st32(reg32 address, reg32 value)
+    {
+        mark(address);
+        mark(address + 3);
+        m_writes.push_back(Write{address, value, 4});
+    }
+    void st8(reg32 address, reg8 value)
+    {
+        mark(address);
+        m_writes.push_back(Write{address, value, 1});
+    }
+    size_t writes() const { return m_writes.size(); }
 
     template< typename W >
     void commit(W& writer) const
@@ -472,12 +487,34 @@ private:
         reg32 size;
     };
 
+    static const int MarkBits = 10;
+
+    static reg32 slot(reg32 address) { return ((address >> 2) * 0x9e3779b1u) >> (32 - MarkBits); }
+    void mark(reg32 address)
+    {
+        const reg32 s = slot(address);
+        m_marks[s >> 5] |= 1u << (s & 31);
+    }
+    bool marked(reg32 address) const
+    {
+        const reg32 s = slot(address);
+        return (m_marks[s >> 5] >> (s & 31)) & 1;
+    }
+
     reg32 read(reg32 address, reg32 size) const
     {
+        if (!marked(address) && !marked(address + size - 1))
+        {
+            reg32 value = 0;
+            memcpy(&value, rc::host(address), size);
+            return value;
+        }
         reg8 bytes[4] = {};
         memcpy(bytes, rc::host(address), size);
         for (const Write& w : m_writes)
         {
+            if (w.address - address + w.size - 1 >= size + w.size - 1)
+                continue;
             for (reg32 i = 0; i < w.size; ++i)
             {
                 const reg32 at = w.address + i - address;
@@ -491,6 +528,7 @@ private:
     }
 
     std::vector<Write> m_writes;
+    reg32 m_marks[(1 << MarkBits) / 32] = {};
 };
 
 // Crossing test of the point at pos (x, y floats) against count float2 vertices (guest 0x5679b0). The guest
@@ -792,6 +830,8 @@ void commitCandidate(Writer& w, reg32 info, const Candidate& c, const Arena& are
 
 struct Counts
 {
+    int views = 0;
+    int stores = 0;
     int items = 0;
     int batches = 0;
     bool forked = false;
@@ -884,6 +924,8 @@ bool cullNative(x86::CPU& cpu, Writer& w, Counts& counts)
         }
         vp.itemCount = c.items.size() - vp.firstItem;
     }
+    counts.views = int(std::max(viewCount, 0));
+    counts.stores = int(c.overlay.writes());
 
     // Phase B: the trees, on the workers.
     const int threads = settings().parallel ? pf::jobs::threads() : 1;
@@ -1116,7 +1158,8 @@ void shadowCulling(win32::WinApplication* app, x86::CPU& cpu, Counts& counts)
 struct PerfSums
 {
     uint64_t us = 0;
-    uint32_t maxUs = 0, calls = 0, items = 0, batches = 0, forked = 0, candidates = 0, fallbacks = 0;
+    uint32_t maxUs = 0, calls = 0, views = 0, stores = 0, items = 0, batches = 0, forked = 0, candidates = 0;
+    uint32_t fallbacks = 0;
 };
 
 PerfSums s_perf;
@@ -1126,6 +1169,8 @@ void report(uint32_t us, const Counts& counts)
     PerfSums& p = s_perf;
     p.us += us;
     p.maxUs = std::max(p.maxUs, us);
+    p.views += uint32_t(counts.views);
+    p.stores += uint32_t(counts.stores);
     p.items += uint32_t(counts.items);
     p.batches += uint32_t(counts.batches);
     p.forked += counts.forked ? 1 : 0;
@@ -1134,9 +1179,11 @@ void report(uint32_t us, const Counts& counts)
     if (++p.calls < ReportCalls)
         return;
     const Settings& s = settings();
-    pf::logInfo("cull: %s %.2f ms/frame (max %.2f), %u items/frame in %u batches, forked %u%%, %u models/frame, "
-                "%u guest fallbacks", !s.native ? "guest" : s.shadow ? "shadow" : s.parallel ? "parallel" : "native",
-                double(p.us) / 1000.0 / p.calls, double(p.maxUs) / 1000.0, p.items / p.calls, p.batches / p.calls,
+    pf::logInfo("cull: %s %.2f ms/frame (max %.2f), %u views/frame, %u section query stores/frame, %u items/frame in "
+                "%u batches, forked %u%%, %u models/frame, %u guest fallbacks",
+                !s.native ? "guest" : s.shadow ? "shadow" : s.parallel ? "parallel" : "native",
+                double(p.us) / 1000.0 / p.calls, double(p.maxUs) / 1000.0, p.views / p.calls, p.stores / p.calls,
+                p.items / p.calls, p.batches / p.calls,
                 p.forked * 100 / p.calls, p.candidates / p.calls, p.fallbacks);
     if (s.native && s.shadow)
         pf::logInfo("shadow_cull: %u calls compared, %u differ, %u guest fallbacks; boxes %u compared, %u differ",
@@ -1185,6 +1232,16 @@ void doCulling(win32::WinApplication* app, x86::CPU& cpu)
     }
     if (pf::perf::enabled())
         report(pf::perf::now() - start, counts);
+}
+
+int boxState(const float mn[3], const float mx[3], reg32 view, double& compareA, double& compareB)
+{
+    X87 x87;
+    reg32 ecx, edx;
+    const int state = visible(mn, mx, view, ld(HalfConstant), ld(ZeroConstant), x87, ecx, edx);
+    compareA = x87.a;
+    compareB = x87.b;
+    return state;
 }
 
 void getVisibleState(win32::WinApplication* app, x86::CPU& cpu)

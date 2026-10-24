@@ -4,9 +4,12 @@ Recursive descent from verified entries; no linear sweep produces code.
 
 - Trusted entries: the PE entry point, configured addresses and direct call targets in accepted code.
 - Pointer candidates: immediates in accepted code that point into the code section (`push offset f`,
-  `mov r/m, offset f`), and aligned dwords in the other sections that point into it (vtables, callback and
-  function-pointer tables, EH tables). Without relocations any of these may be a plain number, so each one is
-  validated before it becomes an entry (validate()).
+  `mov r/m, offset f`), aligned dwords in the other sections that point into it (vtables, callback and
+  function-pointer tables, EH tables), and the dwords of objects at misaligned addresses that accepted code takes
+  as an immediate (object_fields(): the CRT x87 dispatch descriptors `mov edx, offset sinh_table`). Without
+  relocations any of these may be a plain number, so each one is validated before it becomes an entry
+  (validate()). An entry of a table of code pointers may start at or join an instruction of accepted code (CRT
+  dispatch targets share tails with their neighbours): it becomes an entry there, like a tail-call target.
 - The gaps between functions hold filler: fragments of nearby code (copies with shifted relative branches) and dead
   call sequences. No entry is ever taken from a gap by scanning; a pointer into a gap must pass validation like any
   other.
@@ -43,6 +46,10 @@ TRUSTED = ('entry point', 'call', 'configured', 'jump')
 NO_RETURN_IMPORTS = ('ExitProcess', 'ExitThread', 'FreeLibraryAndExitThread', 'FatalAppExitA', 'FatalExit')
 # Unbounded jump tables stop after this many entries.
 MAX_TABLE = 1024
+# Fields of a misaligned object that code refers to are read up to this many bytes from its address.
+OBJECT_SIZE = 256
+# A table of code pointers: at least this many consecutive dwords that hold code addresses.
+POINTER_RUN = 3
 
 # Byte classes of the code section map.
 FREE, START, BODY, DATA = 0, 1, 2, 3
@@ -134,6 +141,7 @@ class Discovery:
         self.conflicts = []         # (entry, instructions its code overlaps at other boundaries)
         self.trusted_overlaps = []  # (entry, owners) overlaps not resolved by dropping a pointer entry
         self.displaced = set()      # data pointer entries in the way of an accepted code pointer
+        self.objects = {}           # misaligned non-code addresses held by immediates -> instruction addresses
         s = self.code_section
         self.map = bytearray(max(s.virtual_size, s.raw_size) if s else 0)
 
@@ -407,13 +415,63 @@ class Discovery:
         a tail call)."""
         return sorted(t for t in self.jump_targets - self.flow_targets - self.entries if t in self.code)
 
+    def note_objects(self, function):
+        """Records the misaligned addresses outside the code section that immediates in an accepted function hold
+        (object addresses)."""
+        for ins in function.values():
+            if ins is None:
+                continue
+            for op in ins.operands:
+                if op.type != X.X86_OP_IMM or op.size != 4:
+                    continue
+                value = op.imm & 0xffffffff
+                s = self.image.section_of(value)
+                if value % 4 and s is not None and not s.code:
+                    self.objects.setdefault(value, set()).add(ins.address)
+
+    def object_fields(self):
+        """Code addresses in the dwords of the misaligned objects code refers to, which the aligned scan does not
+        read: the first run of fields that hold code addresses, at 4-byte steps from the object's address within
+        OBJECT_SIZE bytes. Returns code address -> field addresses."""
+        fields = {}
+        for start in self.objects:
+            run = False
+            for a in range(start, start + OBJECT_SIZE, 4):
+                value = self.image.dword(a)
+                if value is not None and self.image.is_code(value):
+                    fields.setdefault(value, set()).add(a)
+                    run = True
+                elif run:
+                    break
+        return fields
+
+    def in_pointer_table(self, entry):
+        """True when a dword holding entry lies in a table of code pointers: at least POINTER_RUN consecutive dwords
+        that each hold an accepted entry or an instruction start of accepted code, two of them other entries."""
+        def code_start(value):
+            return value is not None and (value in self.entries or self.byte_class(value) == START)
+
+        for address in self.data_pointers.get(entry, ()):
+            low = high = address
+            while code_start(self.image.dword(low - 4)):
+                low -= 4
+            while code_start(self.image.dword(high + 4)):
+                high += 4
+            values = [self.image.dword(a) for a in range(low, high + 4, 4)]
+            if len(values) >= POINTER_RUN and len(set(v for v in values if v in self.entries) - {entry}) >= 2:
+                return True
+        return False
+
     def validate(self, entry, why):
         """None when a pointer candidate is a function entry, else the reason it is not. Checks: the address starts no
         instruction of an accepted function and lies in no instruction or table; every path from it decodes into
         plausible instructions that stay off accepted code (except at entries: tail calls) and off tables; no
         path falls through into an entry. A code pointer comes from accepted code and outranks a
-        data pointer entry in its way: that entry is marked displaced (dropped on the next round)."""
+        data pointer entry in its way: that entry is marked displaced (dropped on the next round). An entry of a
+        table of code pointers (in_pointer_table()) may start in accepted code, join it at its instruction starts and
+        fall through into an entry: hand-written CRT dispatch targets share their tails."""
         displaced = set()
+        table = why == 'data pointer' and self.in_pointer_table(entry)
 
         def displaces(address):
             """True when the accepted code at address belongs to a data pointer entry this code pointer outranks."""
@@ -425,7 +483,7 @@ class Discovery:
             return False
 
         cls = self.byte_class(entry)
-        if cls in (START, BODY) and not displaces(entry):
+        if cls in (START, BODY) and not (cls == START and table) and not displaces(entry):
             return 'interior' if cls == START else 'misaligned'
         if cls == DATA or entry in self.data_refs:
             return 'data'
@@ -436,6 +494,8 @@ class Discovery:
         if any(a + function[a].size > b for a, b in zip(ordered, ordered[1:])):
             return 'overlaps'
         for a, ins in function.items():
+            if table and a in self.code:
+                continue
             m = mnemonic_of(ins)
             # A function never starts in int3/nop padding (text like "ESE\0" = 0x00455345 points there).
             if m in IMPLAUSIBLE or (m in ('int3', 'nop') and a == entry):
@@ -454,7 +514,7 @@ class Discovery:
             if m == 'call' and self.calls_no_return(ins):
                 continue
             following = a + ins.size
-            if following in self.entries and not displaces(following):
+            if following in self.entries and not table and not displaces(following):
                 return 'runs into an entry'
         self.displaced |= displaced
         return None
@@ -480,6 +540,7 @@ class Discovery:
                     continue
             function, calls, code_refs = self.walk(entry)
             self.accept(entry, why, function)
+            self.note_objects(function)
             count += 1
             for value, sites in code_refs.items():
                 self.code_refs.setdefault(value, set()).update(sites)
@@ -548,11 +609,14 @@ class Discovery:
             self.closure(list(extra_entries), 'configured')
             self.data_pointers = self.scan_data_pointers()
             while True:
-                # Tail-call targets, then code immediates (they come from accepted code), then data dwords. A
-                # candidate rejected earlier is checked again: new entries may end the path that hit other code.
+                # Tail-call targets, then code immediates (they come from accepted code), then data dwords and the
+                # fields of misaligned objects. A candidate rejected earlier is checked again: new entries may end the
+                # path that hit other code, or complete the table around an interior instruction.
                 self.rejected = {}
                 new = self.closure(self.tail_targets(), 'jump')
                 new += self.closure(sorted(v for v in self.code_refs if v not in self.entries), 'code pointer')
+                for value, sites in self.object_fields().items():
+                    self.data_pointers.setdefault(value, set()).update(sites)
                 new += self.closure(sorted(v for v in self.data_pointers if v not in self.entries), 'data pointer')
                 if not new:
                     break

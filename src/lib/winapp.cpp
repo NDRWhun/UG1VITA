@@ -57,7 +57,8 @@ public:
         pf::LwLockGuard guard(s_threadMemoryLock);
         if (s_threadMemory.empty())
         {
-            m_memory = ThreadMemory{ new MemMap(teb::Size), new MemMap(1024 * 1024) };
+            m_memory = ThreadMemory{ new MemMap(teb::Size, MemMap::Low, pf::perf::AllocThread),
+                                     new MemMap(1024 * 1024, MemMap::Low, pf::perf::AllocThread) };
         }
         else
         {
@@ -454,9 +455,9 @@ void WinApplication::unlockContext(const x86::CPU& cpu)
         if (pf::perf::enabled() && m_contextDepth == 1)
         {
             const uint32_t released = pf::perf::now();
-            const ThreadControl* control = getMemory<ThreadControl*>(cpu.efs + ThreadControlOffset);
+            ThreadControl* control = getMemory<ThreadControl*>(cpu.efs + ThreadControlOffset);
             const pf::perf::Holder holder = scheduler::holder(control);
-            pf::perf::held(holder, released - s_heldSince);
+            pf::perf::held(holder, scheduler::holderSlot(control), released - s_heldSince);
             if (holder == pf::perf::HolderGame)
             {
                 s_gameReleased = true;

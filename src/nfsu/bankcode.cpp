@@ -3,12 +3,15 @@
 // 0x0064DF30 patches the routine's call targets to the library's functions and links the bank into the list at
 // 0x00713C74. That code is not part of Speed.exe, so it has no translation: it is interpreted here. The routines
 // of all 106 banks use only the instructions below (integer moves, adds, compares, pushes and calls); anything else
-// traps with its address. Decoded instructions are kept per routine and reused while their bytes are unchanged.
+// traps with its address. Decoded instructions are kept per routine, linked to the instruction that follows, and
+// reused while their bytes are unchanged.
 
 #include "bankcode.h"
 
 #include <lib/foreigncode.h>
+#include <lib/memmap.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <recomp.h>
 #include <x86.h>
 
@@ -70,16 +73,39 @@ bool findRoutine(x86::reg32 address, Range& range)
 const uint8_t NoRegister = 0xff;
 const unsigned MaxLength = 8;               // the longest supported form: C6 /0 with SIB, disp32 and imm8
 
-// One decoded instruction. A memory operand is base + (index << scale) + displacement, without base or index
-// when their field says none.
+enum Op : uint8_t
+{
+    OpPush,         // push r32
+    OpPop,          // pop r32
+    OpMovStore,     // mov r/m32, r32
+    OpMovLoad,      // mov r32, r/m32
+    OpAdd,          // add r32, r/m32
+    OpCmp,          // cmp r32, r/m32
+    OpAddImm,       // add r/m32, imm8
+    OpCmpImm,       // cmp r/m32, imm8
+    OpStoreByte,    // mov m8, imm8
+    OpImul,         // imul r32, r/m32
+    OpJl,           // jl rel8
+    OpJg,           // jg rel8
+    OpCall,         // call rel32 (a library function patched in by the loader)
+    OpRet,          // ret
+};
+
+// One decoded instruction at a guest address. A memory operand is base + (index << scale) + displacement, without
+// base or index when their field says none. word holds the instruction bytes, zero past the length, and mask
+// selects them.
 struct Instruction
 {
-    uint8_t    bytes[MaxLength];
+    uint32_t   word[2];
+    uint32_t   mask[2];
+    x86::reg32 start;
+    uint32_t   next;        // index + 1 of the instruction at start + length, 0 while not linked
     uint8_t    length;
-    uint8_t    op;          // the opcode byte; 0x0F for imul
+    uint8_t    op;
     uint8_t    reg;         // ModRM reg field, or the register of push / pop
     bool       memory;      // the ModRM operand is in memory
-    uint8_t    rm;          // its register when !memory
+    bool       wide;        // the 8 bytes from start lie in guest memory
+    uint8_t    rm;          // the operand register when !memory
     uint8_t    base;
     uint8_t    index;
     uint8_t    scale;
@@ -87,10 +113,10 @@ struct Instruction
     x86::reg32 immediate;   // imm8 sign-extended, or the jump or call target
 };
 
-// Decoded instructions of one routine, by offset; a slot holds an index into instructions plus 1.
+// Decoded instructions of one routine; a slot per routine byte holds an index into instructions plus 1.
 struct Routine
 {
-    std::vector<uint16_t>    slots;
+    std::vector<uint32_t>    slots;
     std::vector<Instruction> instructions;
     int                      running = 0;   // interpreters inside it (nested or preempted)
 };
@@ -101,6 +127,7 @@ std::unordered_map<uint64_t, std::unique_ptr<Routine>> s_routines;
 const size_t MaxRoutines = 256;
 const size_t MaxRoutineBytes = 0x10000;
 
+// The cached routine of a range; null when the range is too large to cache.
 Routine* routine(const Range& range)
 {
     const x86::reg32 size = range.end - range.begin;
@@ -125,136 +152,306 @@ Routine* routine(const Range& range)
 class Interpreter
 {
 public:
-    Interpreter(win32::WinApplication* app, x86::CPU& cpu, const Range& range, Routine* routine)
+    Interpreter(win32::WinApplication* app, x86::CPU& cpu, const Range& range, Routine& routine)
         :   m_app(app)
         ,   m_cpu(cpu)
         ,   m_range(range)
         ,   m_routine(routine)
-        ,   m_regs{ &cpu.eax, &cpu.ecx, &cpu.edx, &cpu.ebx, &cpu.esp, &cpu.ebp, &cpu.esi, &cpu.edi }
     {
-        if (m_routine)
-            ++m_routine->running;
+        ++m_routine.running;
     }
 
     ~Interpreter()
     {
-        if (m_routine)
-            --m_routine->running;
+        --m_routine.running;
     }
+
+    x86::reg32 executed() const { return m_executed; }
+    x86::reg32 decoded() const { return m_decoded; }
 
     void run(x86::reg32 ip)
     {
-        m_ip = ip;
+        load();
+        uint32_t current = at(ip);
         for (;;)
         {
-            m_start = m_ip;
-            if (m_ip < m_range.begin || m_ip >= m_range.end)
-                unsupported(m_ip, "jump out of the routine");
-            Instruction decoded;
-            const Instruction& in = instruction(decoded);
-            m_ip = m_start + in.length;
-            const x86::reg8 op = in.op;
-            if (op >= 0x50 && op <= 0x57)           // push r32
+            ++m_executed;
+            if (!matches(m_routine.instructions[current]))
+                redecode(current);
+            const Instruction& in = m_routine.instructions[current];
+            switch (in.op)
             {
-                const x86::reg32 value = *m_regs[in.reg];
-                m_cpu.esp -= 4;
-                rc::st32(m_cpu.esp, value);
-                continue;
-            }
-            if (op >= 0x58 && op <= 0x5F)           // pop r32
+            case OpPush:
             {
-                const x86::reg32 value = rc::ld32(m_cpu.esp);
-                m_cpu.esp += 4;
-                *m_regs[in.reg] = value;
-                continue;
-            }
-            switch (op)
-            {
-            case 0x89:                              // mov r/m32, r32
-                write32(in, *m_regs[in.reg]);
-                break;
-            case 0x8B:                              // mov r32, r/m32
-                *m_regs[in.reg] = read32(in);
-                break;
-            case 0x03:                              // add r32, r/m32
-                *m_regs[in.reg] = add(*m_regs[in.reg], read32(in));
-                break;
-            case 0x3B:                              // cmp r32, r/m32
-                compare(*m_regs[in.reg], read32(in));
-                break;
-            case 0x83:                              // add / cmp r/m32, imm8
-            {
-                const x86::reg32 address = effectiveAddress(in);
-                if (in.reg == 0)
-                    write32(in, address, add(read32(in, address), in.immediate));
-                else if (in.reg == 7)
-                    compare(read32(in, address), in.immediate);
-                else
-                    unsupported(m_start, "group 1 operation");
+                const x86::reg32 value = m_r[in.reg];
+                m_r[4] -= 4;
+                rc::st32(m_r[4], value);
                 break;
             }
-            case 0xC6:                              // mov m8, imm8
-                rc::st8(effectiveAddress(in), x86::reg8(in.immediate));
-                break;
-            case 0x0F:                              // imul r32, r/m32
+            case OpPop:
             {
-                const int64_t product = int64_t(x86::sreg32(*m_regs[in.reg])) * x86::sreg32(read32(in));
+                const x86::reg32 value = rc::ld32(m_r[4]);
+                m_r[4] += 4;
+                m_r[in.reg] = value;
+                break;
+            }
+            case OpMovStore:
+                write32(in, address(in), m_r[in.reg]);
+                break;
+            case OpMovLoad:
+                m_r[in.reg] = read32(in, address(in));
+                break;
+            case OpAdd:
+                m_r[in.reg] = add(m_r[in.reg], read32(in, address(in)));
+                break;
+            case OpCmp:
+                compare(m_r[in.reg], read32(in, address(in)));
+                break;
+            case OpAddImm:
+            {
+                const x86::reg32 at = address(in);
+                write32(in, at, add(read32(in, at), in.immediate));
+                break;
+            }
+            case OpCmpImm:
+                compare(read32(in, address(in)), in.immediate);
+                break;
+            case OpStoreByte:
+                rc::st8(address(in), x86::reg8(in.immediate));
+                break;
+            case OpImul:
+            {
+                const int64_t product = int64_t(x86::sreg32(m_r[in.reg])) * x86::sreg32(read32(in, address(in)));
                 const x86::reg32 low = x86::reg32(product);
+                materialize();
                 m_cpu.flags.cf = m_cpu.flags.of = (product != int64_t(x86::sreg32(low)));
-                *m_regs[in.reg] = low;
+                m_r[in.reg] = low;
                 break;
             }
-            case 0x7C:                              // jl rel8
-            case 0x7F:                              // jg rel8
+            case OpJl:
+            case OpJg:
             {
+                materialize();
                 const bool less = m_cpu.flags.sf != m_cpu.flags.of;
-                if (op == 0x7C ? less : (!less && !m_cpu.flags.zf))
-                    m_ip = in.immediate;
+                if (in.op == OpJl ? less : (!less && !m_cpu.flags.zf))
+                {
+                    current = at(in.immediate);
+                    continue;
+                }
                 break;
             }
-            case 0xE8:                              // call rel32 (a library function patched in by the loader)
+            case OpCall:
             {
-                m_cpu.esp -= 4;
-                m_cpu.ip = in.immediate;
-                m_app->dynamic_call(in.immediate, m_cpu);
+                const x86::reg32 target = in.immediate;
+                m_r[4] -= 4;
+                store();
+                m_cpu.ip = target;
+                m_app->dynamic_call(target, m_cpu);
                 if (m_cpu.terminate)
                     return;
+                load();
                 break;
             }
-            case 0xC3:                              // ret
-                m_cpu.esp += 4;
+            case OpRet:
+                m_r[4] += 4;
+                store();
                 return;
-            default:
-                unsupported(m_start, "instruction");
             }
+            current = following(current);
         }
     }
 
 private:
-    // The instruction at m_start: the cached one while the guest bytes match it, else decoded again (into
-    // scratch, then into the cache).
-    const Instruction& instruction(Instruction& scratch)
+    // Kinds of the last flag-setting operation whose flags are not yet in cpu.flags.
+    enum Pending : uint8_t
     {
-        uint16_t* slot = m_routine ? &m_routine->slots[m_start - m_range.begin] : nullptr;
-        if (slot && *slot)
+        PendingNone,
+        PendingAdd,
+        PendingSub,
+    };
+
+    void load()
+    {
+        m_r[0] = m_cpu.eax;
+        m_r[1] = m_cpu.ecx;
+        m_r[2] = m_cpu.edx;
+        m_r[3] = m_cpu.ebx;
+        m_r[4] = m_cpu.esp;
+        m_r[5] = m_cpu.ebp;
+        m_r[6] = m_cpu.esi;
+        m_r[7] = m_cpu.edi;
+    }
+
+    // Registers and flags into cpu.
+    void store()
+    {
+        m_cpu.eax = m_r[0];
+        m_cpu.ecx = m_r[1];
+        m_cpu.edx = m_r[2];
+        m_cpu.ebx = m_r[3];
+        m_cpu.esp = m_r[4];
+        m_cpu.ebp = m_r[5];
+        m_cpu.esi = m_r[6];
+        m_cpu.edi = m_r[7];
+        materialize();
+    }
+
+    void materialize()
+    {
+        if (m_pending == PendingNone)
+            return;
+        const x86::reg32 a = m_flagA, b = m_flagB, r = m_flagResult;
+        if (m_pending == PendingAdd)
         {
-            const Instruction& cached = m_routine->instructions[*slot - 1];
-            if (memcmp(rc::host(m_start), cached.bytes, cached.length) == 0)
-                return cached;
+            m_cpu.flags.cf = r < a;
+            m_cpu.flags.of = ((a ^ r) & (b ^ r)) >> 31;
         }
-        decode(scratch);
+        else
+        {
+            m_cpu.flags.cf = a < b;
+            m_cpu.flags.of = ((a ^ b) & (a ^ r)) >> 31;
+        }
+        m_cpu.flags.zf = r == 0;
+        m_cpu.flags.sf = r >> 31;
+        m_pending = PendingNone;
+    }
+
+    // Index of the instruction at address, decoded when not cached; traps outside the routine.
+    uint32_t at(x86::reg32 address)
+    {
+        if (address < m_range.begin || address >= m_range.end)
+        {
+            store();
+            unsupported(address, "jump out of the routine");
+        }
+        uint32_t& slot = m_routine.slots[address - m_range.begin];
         if (!slot)
-            return scratch;
-        if (*slot)
         {
-            m_routine->instructions[*slot - 1] = scratch;
+            Instruction in;
+            decode(address, in);
+            m_routine.instructions.push_back(in);
+            slot = uint32_t(m_routine.instructions.size());
         }
-        else if (m_routine->instructions.size() < 0xffff)
+        return slot - 1;
+    }
+
+    uint32_t following(uint32_t current)
+    {
+        const uint32_t next = m_routine.instructions[current].next;
+        if (next)
+            return next - 1;
+        const Instruction& in = m_routine.instructions[current];
+        const uint32_t index = at(in.start + in.length);
+        m_routine.instructions[current].next = index + 1;
+        return index;
+    }
+
+    bool matches(const Instruction& in) const
+    {
+        if (in.wide)
         {
-            m_routine->instructions.push_back(scratch);
-            *slot = uint16_t(m_routine->instructions.size());
+            uint32_t word[2];
+            memcpy(word, rc::host(in.start), sizeof(word));
+            return (((word[0] ^ in.word[0]) & in.mask[0]) | ((word[1] ^ in.word[1]) & in.mask[1])) == 0;
         }
-        return scratch;
+        return memcmp(rc::host(in.start), in.word, in.length) == 0;
+    }
+
+    // The guest bytes at a cached instruction changed: decoded again in place.
+    void redecode(uint32_t current)
+    {
+        Instruction in;
+        decode(m_routine.instructions[current].start, in);
+        m_routine.instructions[current] = in;
+    }
+
+    // Decodes the instruction at start; traps on what the interpreter does not run, at the same point and with the
+    // same message as running it would.
+    void decode(x86::reg32 start, Instruction& in)
+    {
+        store();
+        ++m_decoded;
+        m_start = start;
+        m_ip = start;
+        in.start = start;
+        in.next = 0;
+        in.memory = false;
+        in.reg = 0;
+        in.rm = 0;
+        in.base = NoRegister;
+        in.index = NoRegister;
+        in.scale = 0;
+        in.displacement = 0;
+        in.immediate = 0;
+        const x86::reg8 op = fetch8();
+        if (op >= 0x50 && op <= 0x5F)
+        {
+            in.op = op <= 0x57 ? OpPush : OpPop;
+            in.reg = op & 7;
+        }
+        else
+        {
+            switch (op)
+            {
+            case 0x89:
+            case 0x8B:
+            case 0x03:
+            case 0x3B:
+                in.op = op == 0x89 ? OpMovStore : op == 0x8B ? OpMovLoad : op == 0x03 ? OpAdd : OpCmp;
+                modrm(in);
+                break;
+            case 0x83:
+                modrm(in);
+                in.immediate = x86::reg32(x86::sreg32(x86::sreg8(fetch8())));
+                if (in.reg != 0 && in.reg != 7)
+                    unsupported(m_start, "group 1 operation");
+                in.op = in.reg == 0 ? OpAddImm : OpCmpImm;
+                break;
+            case 0xC6:
+                modrm(in);
+                if (in.reg != 0)
+                    unsupported(m_start, "C6 form");
+                in.immediate = fetch8();
+                if (!in.memory)
+                    unsupported(m_start, "byte register");
+                in.op = OpStoreByte;
+                break;
+            case 0x0F:
+                if (fetch8() != 0xAF)
+                    unsupported(m_start, "two-byte opcode");
+                modrm(in);
+                in.op = OpImul;
+                break;
+            case 0x7C:
+            case 0x7F:
+            {
+                const x86::reg32 rel = x86::reg32(x86::sreg32(x86::sreg8(fetch8())));
+                in.immediate = m_ip + rel;
+                in.op = op == 0x7C ? OpJl : OpJg;
+                break;
+            }
+            case 0xE8:
+            {
+                const x86::reg32 rel = fetch32();
+                in.immediate = m_ip + rel;
+                in.op = OpCall;
+                break;
+            }
+            case 0xC3:
+                in.op = OpRet;
+                break;
+            default:
+                unsupported(m_start, "instruction");
+            }
+        }
+        in.length = uint8_t(m_ip - m_start);
+        uint8_t bytes[MaxLength] = {};
+        uint8_t mask[MaxLength] = {};
+        memcpy(bytes, rc::host(m_start), in.length);
+        memset(mask, 0xff, in.length);
+        memcpy(in.word, bytes, sizeof(in.word));
+        memcpy(in.mask, mask, sizeof(in.mask));
+        in.wide = win32::MemMap::isGuestRange(m_start, MaxLength);
     }
 
     x86::reg8 fetch8()
@@ -269,72 +466,6 @@ private:
         return value;
     }
 
-    // Decodes the instruction at m_start; traps on what the interpreter does not run, at the same point and with
-    // the same message as running it would.
-    void decode(Instruction& in)
-    {
-        m_ip = m_start;
-        in.memory = false;
-        in.reg = 0;
-        in.immediate = 0;
-        const x86::reg8 op = fetch8();
-        in.op = op;
-        if (op >= 0x50 && op <= 0x5F)               // push / pop r32
-        {
-            in.reg = op & 7;
-        }
-        else
-        {
-            switch (op)
-            {
-            case 0x89:
-            case 0x8B:
-            case 0x03:
-            case 0x3B:
-                modrm(in);
-                break;
-            case 0x83:
-                modrm(in);
-                in.immediate = x86::reg32(x86::sreg32(x86::sreg8(fetch8())));
-                if (in.reg != 0 && in.reg != 7)
-                    unsupported(m_start, "group 1 operation");
-                break;
-            case 0xC6:
-                modrm(in);
-                if (in.reg != 0)
-                    unsupported(m_start, "C6 form");
-                in.immediate = fetch8();
-                if (!in.memory)
-                    unsupported(m_start, "byte register");
-                break;
-            case 0x0F:
-                if (fetch8() != 0xAF)
-                    unsupported(m_start, "two-byte opcode");
-                modrm(in);
-                break;
-            case 0x7C:
-            case 0x7F:
-            {
-                const x86::reg32 rel = x86::reg32(x86::sreg32(x86::sreg8(fetch8())));
-                in.immediate = m_ip + rel;
-                break;
-            }
-            case 0xE8:
-            {
-                const x86::reg32 rel = fetch32();
-                in.immediate = m_ip + rel;
-                break;
-            }
-            case 0xC3:
-                break;
-            default:
-                unsupported(m_start, "instruction");
-            }
-        }
-        in.length = uint8_t(m_ip - m_start);
-        memcpy(in.bytes, rc::host(m_start), in.length);
-    }
-
     // ModRM (and SIB, displacement) at m_ip.
     void modrm(Instruction& in)
     {
@@ -342,10 +473,6 @@ private:
         const int mod = byte >> 6;
         const int rm = byte & 7;
         in.reg = (byte >> 3) & 7;
-        in.base = NoRegister;
-        in.index = NoRegister;
-        in.scale = 0;
-        in.displacement = 0;
         if (mod == 3)
         {
             in.memory = false;
@@ -382,30 +509,17 @@ private:
             in.displacement += fetch32();
     }
 
-    x86::reg32 effectiveAddress(const Instruction& in) const
+    x86::reg32 address(const Instruction& in) const
     {
-        x86::reg32 address = in.base != NoRegister ? *m_regs[in.base] : 0;
+        x86::reg32 address = in.base != NoRegister ? m_r[in.base] : 0;
         if (in.index != NoRegister)
-            address += *m_regs[in.index] << in.scale;
+            address += m_r[in.index] << in.scale;
         return address + in.displacement;
-    }
-
-    x86::reg32 read32(const Instruction& in) const
-    {
-        return in.memory ? rc::ld32(effectiveAddress(in)) : *m_regs[in.rm];
     }
 
     x86::reg32 read32(const Instruction& in, x86::reg32 address) const
     {
-        return in.memory ? rc::ld32(address) : *m_regs[in.rm];
-    }
-
-    void write32(const Instruction& in, x86::reg32 value)
-    {
-        if (in.memory)
-            rc::st32(effectiveAddress(in), value);
-        else
-            *m_regs[in.rm] = value;
+        return in.memory ? rc::ld32(address) : m_r[in.rm];
     }
 
     void write32(const Instruction& in, x86::reg32 address, x86::reg32 value)
@@ -413,54 +527,92 @@ private:
         if (in.memory)
             rc::st32(address, value);
         else
-            *m_regs[in.rm] = value;
-    }
-
-    void setResultFlags(x86::reg32 result)
-    {
-        m_cpu.flags.zf = result == 0;
-        m_cpu.flags.sf = result >> 31;
+            m_r[in.rm] = value;
     }
 
     x86::reg32 add(x86::reg32 a, x86::reg32 b)
     {
         const x86::reg32 r = a + b;
-        m_cpu.flags.cf = r < a;
-        m_cpu.flags.of = ((a ^ r) & (b ^ r)) >> 31;
-        setResultFlags(r);
+        m_pending = PendingAdd;
+        m_flagA = a;
+        m_flagB = b;
+        m_flagResult = r;
         return r;
     }
 
     void compare(x86::reg32 a, x86::reg32 b)
     {
-        const x86::reg32 r = a - b;
-        m_cpu.flags.cf = a < b;
-        m_cpu.flags.of = ((a ^ b) & (a ^ r)) >> 31;
-        setResultFlags(r);
+        m_pending = PendingSub;
+        m_flagA = a;
+        m_flagB = b;
+        m_flagResult = a - b;
     }
 
     win32::WinApplication* m_app;
     x86::CPU&              m_cpu;
     Range                  m_range;
-    Routine*               m_routine;
-    x86::reg32*            m_regs[8];
-    x86::reg32             m_ip = 0;
-    x86::reg32             m_start = 0;
+    Routine&               m_routine;
+    x86::reg32             m_r[8];          // eax ecx edx ebx esp ebp esi edi, in cpu at calls and on return
+    Pending                m_pending = PendingNone;
+    x86::reg32             m_flagA = 0;
+    x86::reg32             m_flagB = 0;
+    x86::reg32             m_flagResult = 0;
+    x86::reg32             m_ip = 0;        // decode position
+    x86::reg32             m_start = 0;     // the instruction being decoded
+    x86::reg32             m_executed = 0;
+    x86::reg32             m_decoded = 0;
 };
+
+// Bank routines running on the thread holding the execution lock (perf_log times the outermost one).
+int s_depth = 0;
+
+// The range resolve found for the address dynamic_call is about to run.
+x86::reg32 s_resolvedAddress = 0;
+Range      s_resolvedRange = { 0, 0 };
 
 // Entered like a translated function: cpu.ip is the routine, cpu.esp points at the return address slot.
 void runRoutine(win32::WinApplication* app, x86::CPU& cpu)
 {
     Range range;
-    if (!findRoutine(cpu.ip, range))
+    const bool resolved = s_resolvedAddress == cpu.ip && cpu.ip;
+    s_resolvedAddress = 0;
+    if (resolved)
+        range = s_resolvedRange;
+    else if (!findRoutine(cpu.ip, range))
         unsupported(cpu.ip, "no loaded bank routine");
-    Interpreter(app, cpu, range, routine(range)).run(cpu.ip);
+    const bool timed = pf::perf::enabled() && s_depth == 0;
+    const uint32_t start = timed ? pf::perf::now() : 0;
+    ++s_depth;
+    Routine* cached = routine(range);
+    std::unique_ptr<Routine> uncached;
+    if (!cached)
+    {
+        uncached.reset(new Routine);
+        uncached->slots.assign(range.end - range.begin, 0);
+    }
+    Interpreter interpreter(app, cpu, range, cached ? *cached : *uncached);
+    interpreter.run(cpu.ip);
+    --s_depth;
+    if (timed)
+    {
+        pf::perf::audio(pf::perf::AudioBankRuns, 1);
+        pf::perf::audio(pf::perf::AudioBankUs, pf::perf::now() - start);
+    }
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioBankInstructions, interpreter.executed());
+        pf::perf::audio(pf::perf::AudioBankDecodes, interpreter.decoded());
+    }
 }
 
 win32::MethodPtr resolve(x86::reg32 address)
 {
     Range range;
-    return findRoutine(address, range) ? &runRoutine : nullptr;
+    if (!findRoutine(address, range))
+        return nullptr;
+    s_resolvedAddress = address;
+    s_resolvedRange = range;
+    return &runRoutine;
 }
 
 }

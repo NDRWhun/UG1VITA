@@ -1,16 +1,29 @@
-// world effect: diffuse texture with a texture offset, vertex colour.
+// world effect: diffuse texture with a texture offset, vertex colour. PROJ passes four texture coordinates (stage 0
+// PROJECTED: the fragment program divides by w).
 
 void main(
     float3 aPosition,
     float4 aColor,
+#ifdef PROJ
+    float4 aTex0,
+#else
     float2 aTex0,
+#endif
     uniform float4 uWvp[4],
     uniform float4 uTextureOffset,
     float4 out vPosition : POSITION,
     float4 out vColor : COLOR0,
+#ifdef PROJ
+    float4 out vTex0 : TEXCOORD0)
+#else
     float2 out vTex0 : TEXCOORD0)
+#endif
 {
     vPosition = aPosition.x * uWvp[0] + aPosition.y * uWvp[1] + aPosition.z * uWvp[2] + uWvp[3];
     vColor = aColor.zyxw;
+#ifdef PROJ
+    vTex0 = aTex0 + uTextureOffset;
+#else
     vTex0 = aTex0 + uTextureOffset.xy;
+#endif
 }

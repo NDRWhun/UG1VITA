@@ -4,6 +4,8 @@
 #include <x86.h>
 #include <vector>
 
+namespace pf { namespace perf { enum Alloc : int; } }
+
 namespace win32
 {
 
@@ -24,7 +26,18 @@ struct Section
 class MemMap
 {
 public:
-    MemMap(x86::reg32 size);
+    // Low: the lowest free range (first fit). High: the highest free range, for buffers of the runtime itself.
+    enum Placement
+    {
+        Low,
+        High
+    };
+    // Called without the allocator lock when no range fits; returns true when it freed guest memory, and the
+    // allocation is tried again.
+    typedef bool (*Reclaim)();
+
+    // The kind names the caller in the perf_log block counts.
+    MemMap(x86::reg32 size, Placement placement = Low, pf::perf::Alloc kind = pf::perf::Alloc(0));
     ~MemMap();
 
     x86::reg32 getBlockStart() const  { return s_addressOffset + m_block * 4096; }
@@ -35,10 +48,15 @@ public:
     static MemMap* findBlock(x86::reg32 memIndex);
     // True when [address, address + size) lies inside the guest address space.
     static bool isGuestRange(x86::reg32 address, x86::reg32 size);
+    static void setReclaim(Reclaim reclaim);
 
     static void fillDebugGraph(x86::reg16* graph);
     static void fillDebugGraph(x86::reg32* graph);
 private:
+    // First block of a free range of count blocks, or -1; s_lock held.
+    static x86::reg32 findLow(x86::reg32 count);
+    static x86::reg32 findHigh(x86::reg32 count);
+
     x86::reg32 m_block;
     x86::reg32 m_blockCount;
 
@@ -48,6 +66,9 @@ private:
     static x86::reg32           s_blockSize;
     static x86::reg32           s_sectionSize;
     static x86::reg32           s_addressOffset;
+    static x86::reg32           s_lowFree;      // every block below is used
+    static x86::reg32           s_highFree;     // every block from here on is used
+    static Reclaim              s_reclaim;
     static Mutex*               s_lock;
     static std::vector<MemMap*> s_memMaps;
 };

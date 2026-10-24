@@ -11,6 +11,8 @@
 namespace win32 { namespace d3d9
 {
 
+static_assert(sizeof(D3DVIEWPORT9) % 4 == 0 && sizeof(render::Viewport) % 4 == 0, "viewports are whole words");
+
 namespace
 {
 
@@ -120,6 +122,9 @@ Device::Device(WinApplication* app, Direct3D* d3d, const D3DPRESENT_PARAMETERS& 
 
 Device::~Device()
 {
+    // Values recorded into a frame that is never submitted.
+    if (m_frame)
+        markEffectValuesDirty();
     hold(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
     hold(m_state.stream, static_cast<Buffer*>(nullptr));
     hold(m_state.indices, static_cast<Buffer*>(nullptr));
@@ -246,6 +251,7 @@ void Device::submit()
     gpu().submitFrame(m_frame, m_vblanks);
     m_frame = nullptr;
     m_stream = nullptr;
+    Texture::trimKept();
 }
 
 void Device::record(uint32_t header, DWORD value)
@@ -290,7 +296,8 @@ render::Scene* Device::scene()
     if (m_sceneOpen && f.sceneCount)
     {
         render::Scene& last = f.scenes[f.sceneCount - 1];
-        if (memcmp(&last.target, &target, sizeof(target)) == 0)
+        if (last.target.color == target.color && last.target.face == target.face
+            && last.target.depth == target.depth)
             return &last;
     }
     if (f.sceneCount == f.sceneCapacity)
@@ -316,7 +323,7 @@ render::Scene* Device::scene()
 
 uint16_t Device::viewportIndex(render::Frame& f, const render::Viewport& viewport)
 {
-    if (f.viewportCount && memcmp(&f.viewports[f.viewportCount - 1], &viewport, sizeof(viewport)) == 0)
+    if (f.viewportCount && sameWords(&f.viewports[f.viewportCount - 1], &viewport, sizeof(viewport) / 4))
         return uint16_t(f.viewportCount - 1);
     if (f.viewportCount == f.viewportCapacity)
         return uint16_t(f.viewportCount - 1);
@@ -324,8 +331,8 @@ uint16_t Device::viewportIndex(render::Frame& f, const render::Viewport& viewpor
     return uint16_t(f.viewportCount++);
 }
 
-// The state resolution of a draw happens on the render thread (d3d9_record.cpp); the game thread records the
-// geometry, the textures as they are now (marking them read by this frame) and the active effect pass.
+// Records the geometry, the textures (marked read by this frame) and the active effect pass; the render thread
+// resolves the state (d3d9_record.cpp).
 HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primitives, const void* vertices,
                      const uint16_t* indices, uint32_t count, uint8_t layout, uint32_t texComponents, bool positionT,
                      render::BufferStorage* vertexStorage, render::BufferStorage* indexStorage)
@@ -376,17 +383,32 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     if (m_effectPass)
     {
         m_effectPass->record(r.effect, r.textures);
+        r.deviceSamplers = m_deviceSamplers;
+        if (m_deviceSamplers & 0x01010101u)
+        {
+            // Device textures set after the pass replace the pass's texture of that stage.
+            for (uint32_t i = 0; i < render::MaxSamplers; ++i)
+            {
+                const int stage = effectSamplerStage(r.effect, i);
+                if (stage >= 0 && (m_deviceSamplers >> (stage * 8)) & DeviceTexture)
+                    r.textures[i] = storageOf(m_state.textures[stage]);
+            }
+        }
     }
     else
     {
         r.effect = EffectDraw{ NoBlock, NoBlock, NoEffect, 0, { 0, 0 } };
         r.textures[0] = storageOf(m_state.textures[0]);
         r.textures[1] = r.textures[2] = r.textures[3] = nullptr;
+        r.deviceSamplers = 0;
     }
     for (const render::TextureStorage* t : r.textures)
     {
-        if (t)
-            const_cast<render::TextureStorage*>(t)->lastUse = f->index;
+        if (!t)
+            continue;
+        const_cast<render::TextureStorage*>(t)->lastUse = f->index;
+        if (t->uploads.load(std::memory_order_relaxed))
+            f->uploads = true;
     }
     if (vertexStorage)
         vertexStorage->lastUse = f->index;
@@ -947,7 +969,7 @@ HRESULT Device::SetTransform(WinApplication* app, x86::CPU& cpu, DWORD state, co
     case D3DTS_TEXTURE0:    t = TransformTexture0; break;
     default:                D3D_LOG_ONCE("d3d9: transform %u ignored", state); return D3D_OK;
     }
-    if (memcmp(&m_state.transforms[t], matrix, sizeof(D3DMATRIX)) == 0)
+    if (sameWords(&m_state.transforms[t], matrix, sizeof(D3DMATRIX) / 4))
         return D3D_OK;
     m_state.transforms[t] = *matrix;
     recordWords(CmdTransform | t << 8, matrix, 16);
@@ -988,7 +1010,7 @@ HRESULT Device::SetViewport(WinApplication* app, x86::CPU& cpu, const D3DVIEWPOR
     RC_USE(cpu);
     if (!viewport)
         return D3DERR_INVALIDCALL;
-    if (memcmp(&m_state.viewport, viewport, sizeof(D3DVIEWPORT9)) == 0)
+    if (sameWords(&m_state.viewport, viewport, sizeof(D3DVIEWPORT9) / 4))
         return D3D_OK;
     m_state.viewport = *viewport;
     recordWords(CmdViewport, viewport, sizeof(D3DVIEWPORT9) / 4);
@@ -1122,6 +1144,8 @@ HRESULT Device::SetTexture(WinApplication* app, x86::CPU& cpu, DWORD stage, Obje
     }
     if (texture && texture->kind() != KindTexture && texture->kind() != KindCubeTexture)
         return D3DERR_INVALIDCALL;
+    if (stage < render::MaxSamplers)
+        m_deviceSamplers |= uint32_t(DeviceTexture) << (stage * 8);
     hold(m_state.textures[stage], texture);
     return D3D_OK;
 }
@@ -1165,6 +1189,13 @@ HRESULT Device::SetSamplerState(WinApplication* app, x86::CPU& cpu, DWORD sample
     RC_USE(cpu);
     if (sampler >= MaxSamplerStages || type >= MaxSamplerStates)
         return D3D_OK;
+    if (sampler < render::MaxSamplers)
+    {
+        const uint32_t bit = type == D3DSAMP_ADDRESSU ? DeviceAddressU : type == D3DSAMP_ADDRESSV ? DeviceAddressV
+                           : type == D3DSAMP_MAGFILTER ? DeviceMagFilter : type == D3DSAMP_MINFILTER ? DeviceMinFilter
+                           : type == D3DSAMP_MIPFILTER ? DeviceMipFilter : 0u;
+        m_deviceSamplers |= bit << (sampler * 8);
+    }
     if (m_state.samplerStates[sampler][type] == value)
         return D3D_OK;
     m_state.samplerStates[sampler][type] = value;

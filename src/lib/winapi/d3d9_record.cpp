@@ -28,8 +28,7 @@ enum : DWORD
 
 const float s_identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
-// Frame slots keep at most 3 frames in flight: beginFrame(n) returns once frame n - 3 is finished, so it has
-// been resolved and the stream of n - 4 is free.
+// The recording of frame n is s_streams[n % StreamCount]; s_resolved: the last frame resolved.
 const uint32_t StreamCount = 4;
 Stream s_streams[StreamCount];
 std::atomic<uint32_t> s_resolved{0};
@@ -57,6 +56,22 @@ render::Sampler sampler(const DWORD* states)
     return s;
 }
 
+// The device sampler states written after the pass (bits: Device::deviceSamplers of the stage) replace the pass's.
+void deviceSampler(const DWORD* states, uint32_t bits, render::Sampler& s)
+{
+    const render::Sampler d = sampler(states);
+    if (bits & DeviceAddressU)
+        s.addressU = d.addressU;
+    if (bits & DeviceAddressV)
+        s.addressV = d.addressV;
+    if (bits & DeviceMinFilter)
+        s.filter = uint8_t((s.filter & ~1) | (d.filter & 1));
+    if (bits & DeviceMagFilter)
+        s.filter = uint8_t((s.filter & ~2) | (d.filter & 2));
+    if (bits & DeviceMipFilter)
+        s.mip = d.mip;
+}
+
 void color(DWORD argb, float out[4])
 {
     out[0] = float((argb >> 16) & 255) / 255.0f;
@@ -74,6 +89,8 @@ struct ConstantsKey
     float       blendFactor[4];
     uint8_t     vertexProgram, fragmentProgram, texComponents, alphaTest;
 };
+
+static_assert(sizeof(ConstantsKey) % 4 == 0, "ConstantsKey is whole words");
 
 // Render thread only.
 class Resolver
@@ -132,20 +149,24 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
         shared = block(effect.shared);
         if (!own)
         {
-            // Cannot happen: a block is sent whole before its first draw.
             D3D_LOG_ONCE("d3d9: effect draw without parameter values dropped");
             draw.count = 0;
             return true;
         }
         EffectBinding b;
         memset(&b, 0, sizeof(b));
-        effectBinding(effect, own, shared, b);
+        const bool projected = (m_state.stageStates[0][D3DTSS_TEXTURETRANSFORMFLAGS] & D3DTTFF_PROJECTED) != 0 &&
+                               record.texComponents == 4;
+        effectBinding(effect, own, shared, projected, b);
         state.vertexProgram = b.vertexProgram;
         state.fragmentProgram = b.fragmentProgram;
         for (uint32_t i = 0; i < b.samplerCount && i < render::MaxSamplers; ++i)
         {
             state.textures[i] = record.textures[i];
             state.samplers[i] = b.samplers[i];
+            const int stage = record.deviceSamplers ? effectSamplerStage(effect, i) : -1;
+            if (stage >= 0)
+                deviceSampler(m_state.samplerStates[stage], record.deviceSamplers >> (stage * 8), state.samplers[i]);
         }
         if (b.cullNone)
             state.cullMode = 1;
@@ -222,7 +243,7 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
     key.fragmentProgram = state.fragmentProgram;
     key.texComponents = uint8_t(record.texComponents | (positionT ? 0x80 : 0));
     key.alphaTest = state.alphaTest;
-    if (m_keyValid && memcmp(&key, &m_key, sizeof(key)) == 0)
+    if (m_keyValid && sameWords(&key, &m_key, sizeof(key) / 4))
     {
         draw.vertexConstants = m_vertexConstants;
         draw.fragmentConstants = m_fragmentConstants;

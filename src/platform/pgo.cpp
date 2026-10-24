@@ -1,7 +1,6 @@
 #include <platform/pgo.h>
 #include <platform/log.h>
 #include <platform/sync.h>
-#include <platform/time.h>
 #include <cstdio>
 #include <string>
 
@@ -22,14 +21,12 @@ const uint32_t IntervalMs = 30 * 1000;
 std::string s_path;
 LwMutex s_lock("pgo");
 Thread* s_thread = nullptr;
+Semaphore* s_stop = nullptr;
 
 int writerEntry(void*)
 {
-    for (;;)
-    {
-        sleepMs(IntervalMs);
+    while (!s_stop->waitFor(IntervalMs))
         write();
-    }
     return 0;
 }
 
@@ -38,11 +35,24 @@ int writerEntry(void*)
 void start(const char* path)
 {
     s_path = path;
+    s_stop = new Semaphore("pgo_stop", 0);
     s_thread = new Thread("pgo_writer", &writerEntry, nullptr, Thread::PriorityLow, 64 * 1024);
     s_thread->start();
 }
 
-// Writes path.part, then renames it to path.
+void stop()
+{
+    if (!s_thread)
+        return;
+    s_stop->post();
+    s_thread->join();
+    delete s_thread;
+    delete s_stop;
+    s_thread = nullptr;
+    s_stop = nullptr;
+}
+
+// Writes path.part, renames path to path.bak and path.part to path.
 void write()
 {
     LwLockGuard guard(s_lock);
@@ -62,7 +72,17 @@ void write()
         logError("pgo: writing %s failed", part.c_str());
         return;
     }
-    remove(s_path.c_str());
+    const std::string backup = s_path + ".bak";
+    FILE* previous = fopen(s_path.c_str(), "rb");
+    if (previous)
+    {
+        fclose(previous);
+        if (rename(s_path.c_str(), backup.c_str()) != 0)
+        {
+            logError("pgo: renaming %s failed", s_path.c_str());
+            return;
+        }
+    }
     if (rename(part.c_str(), s_path.c_str()) != 0)
     {
         logError("pgo: renaming %s failed", part.c_str());

@@ -1,10 +1,14 @@
 // Direct3D resources: textures (2D, cube, render targets), surfaces, vertex and index buffers, vertex
 // declarations. Guest locks go to guest memory; unlocks write the GPU copy (a new one when frames in flight
-// still read the current one).
+// still read the current one), swizzled on a job worker. The lock buffer of a level is kept after its unlock, so
+// the next lock of the level returns it instead of reading the GPU copy back.
 
 #include <winapi/d3d9_internal.h>
+#include <platform/config.h>
 #include <platform/gxm.h>
 #include <platform/log.h>
+#include <platform/perf.h>
+#include <platform/sync.h>
 #include <algorithm>
 
 namespace win32 { namespace d3d9
@@ -28,6 +32,181 @@ x86::reg32 guestOf(Object* object)
     return object ? object->guest() : 0;
 }
 
+// Setting texture_async=0: unlocks swizzle on the game thread.
+bool asyncUploads()
+{
+    static const bool async = pf::Config::getBool("texture_async", true);
+    return async;
+}
+
+// Game thread: waits until the upload is done.
+void waitTicket(uint32_t ticket)
+{
+    if (gpu().uploadDone(ticket))
+        return;
+    const bool timed = pf::perf::enabled();
+    const uint32_t start = timed ? pf::perf::now() : 0;
+    gpu().waitUpload(ticket);
+    if (timed)
+    {
+        pf::perf::upload(pf::perf::UploadGameWaits, 1);
+        pf::perf::upload(pf::perf::UploadGameWaitUs, pf::perf::now() - start);
+    }
+}
+
+}
+
+// ---- Kept linear copies --------------------------------------------------------------------------------------------
+
+// A level's lock buffer after its unlock, with the upload that reads it.
+struct KeptLevel
+{
+    Texture*    owner;
+    uint32_t    index;
+    MemMap*     memory;
+    uint32_t    bytes;
+    uint32_t    ticket;
+    KeptLevel*  newer;
+    KeptLevel*  older;
+};
+
+// Every kept level, most recently unlocked first, within a byte cap (setting texture_cache_mb, default 12).
+// The buffers lie high in guest memory (MemMap::High); on guest memory exhaustion all of them are dropped. The
+// reclaim may run on any thread, so the list and Texture::m_kept are guarded by the mutex.
+struct KeptLevels
+{
+    pf::LwMutex     mutex{"d3d9_kept"};
+    KeptLevel*      newest = nullptr;
+    KeptLevel*      oldest = nullptr;
+    uint32_t        bytes = 0;
+    uint32_t        count = 0;
+    uint32_t        cap;
+
+    KeptLevels()
+        :   cap(uint32_t(std::max(0, pf::Config::getInt("texture_cache_mb", 12))) * 1024 * 1024)
+    {
+        MemMap::setReclaim(&reclaim);
+    }
+
+    static KeptLevels& get()
+    {
+        static KeptLevels s_levels;
+        return s_levels;
+    }
+
+    // mutex held.
+    void link(KeptLevel* level)
+    {
+        level->older = newest;
+        level->newer = nullptr;
+        if (newest)
+            newest->newer = level;
+        else
+            oldest = level;
+        newest = level;
+        bytes += level->bytes;
+        ++count;
+        level->owner->m_kept[level->index] = level;
+    }
+
+    void unlink(KeptLevel* level)
+    {
+        if (level->newer)
+            level->newer->older = level->older;
+        else
+            newest = level->older;
+        if (level->older)
+            level->older->newer = level->newer;
+        else
+            oldest = level->newer;
+        bytes -= level->bytes;
+        --count;
+        level->owner->m_kept[level->index] = nullptr;
+    }
+
+    // Frees the buffer once its upload is done; mutex held.
+    void drop(KeptLevel* level, bool evicted)
+    {
+        unlink(level);
+        waitTicket(level->ticket);
+        delete level->memory;
+        delete level;
+        if (evicted && pf::perf::enabled())
+            pf::perf::upload(pf::perf::UploadEvictions, 1);
+    }
+
+    // Oldest first, only levels whose upload is done: levels locked once before levels locked again. Game
+    // thread, mutex held.
+    void trim()
+    {
+        for (int pass = 0; pass < 2 && bytes > cap; ++pass)
+        {
+            for (KeptLevel* level = oldest; level && bytes > cap; )
+            {
+                KeptLevel* newer = level->newer;
+                if ((pass == 1 || level->owner->m_lockCounts[level->index] < 2) && gpu().uploadDone(level->ticket))
+                    drop(level, true);
+                level = newer;
+            }
+        }
+        report();
+    }
+
+    void report()
+    {
+        if (pf::perf::enabled())
+            pf::perf::uploadCache(bytes, count);
+    }
+
+    static bool reclaim()
+    {
+        KeptLevels& k = get();
+        pf::LwLockGuard guard(k.mutex);
+        if (!k.oldest)
+            return false;
+        pf::logInfo("d3d9: guest memory exhausted, %u kept texture levels (%u bytes) dropped", k.count, k.bytes);
+        while (k.oldest)
+            k.drop(k.oldest, true);
+        k.report();
+        return true;
+    }
+};
+
+void Texture::trimKept()
+{
+    KeptLevels& k = KeptLevels::get();
+    pf::LwLockGuard guard(k.mutex);
+    if (k.bytes > k.cap)
+        k.trim();
+}
+
+MemMap* Texture::takeKept(uint32_t index, uint32_t* ticket)
+{
+    KeptLevels& k = KeptLevels::get();
+    KeptLevel* level;
+    {
+        pf::LwLockGuard guard(k.mutex);
+        level = m_kept[index];
+        if (!level)
+            return nullptr;
+        k.unlink(level);
+        k.report();
+    }
+    MemMap* memory = level->memory;
+    *ticket = level->ticket;
+    delete level;
+    if (pf::perf::enabled())
+        pf::perf::upload(pf::perf::UploadCacheHits, 1);
+    return memory;
+}
+
+void Texture::keep(uint32_t index, MemMap* memory, uint32_t ticket)
+{
+    KeptLevels& k = KeptLevels::get();
+    KeptLevel* level = new KeptLevel{ this, index, memory, memory->getBlockSize(), ticket, nullptr, nullptr };
+    pf::LwLockGuard guard(k.mutex);
+    k.link(level);
+    k.trim();
 }
 
 // ---- Texture -------------------------------------------------------------------------------------------------------
@@ -42,22 +221,35 @@ Texture::Texture(Device* device, const render::TextureDesc& desc, DWORD format, 
     ,   m_storage(gpu().createTexture(desc))
 {
     device->addRef();
+    KeptLevels::get();
     const uint32_t count = (desc.cube ? 6 : 1) * desc.levels;
     m_locks.assign(count, nullptr);
+    m_tickets.assign(count, 0);
     m_lockFlags.assign(count, 0);
     m_written.assign(count, false);
     m_lockCounts.assign(count, 0);
-    m_shadows.assign(count, nullptr);
+    m_kept.assign(count, nullptr);
     m_surfaces.assign(count, nullptr);
 }
 
 Texture::~Texture()
 {
+    {
+        KeptLevels& k = KeptLevels::get();
+        pf::LwLockGuard guard(k.mutex);
+        for (KeptLevel* level : m_kept)
+        {
+            if (level)
+                k.drop(level, false);
+        }
+        k.report();
+    }
     for (size_t i = 0; i < m_locks.size(); ++i)
     {
-        if (m_locks[i] != m_shadows[i])
-            delete m_locks[i];
-        delete m_shadows[i];
+        if (!m_locks[i])
+            continue;
+        waitTicket(m_tickets[i]);
+        delete m_locks[i];
     }
     for (Surface* surface : m_surfaces)
         delete surface;
@@ -190,15 +382,35 @@ HRESULT Texture::lock(uint32_t face, uint32_t level, D3DLOCKED_RECT* locked, con
     const texture::Format format = m_desc.format;
     const uint32_t bytes = texture::levelBytes(format, m_desc.width, m_desc.height, level);
     const uint32_t pitch = texture::levelPitch(format, m_desc.width, level);
-    // A level locked again keeps its linear copy: only locks write textures, so it equals the GPU copy and the
-    // lock needs no read back (no unswizzle).
-    MemMap* memory = m_shadows[index];
-    if (!memory)
+    // The kept linear copy equals the GPU copy (only unlocks write textures), so the lock needs no read back. The
+    // guest may write it once the upload reading it is done.
+    uint32_t ticket = 0;
+    MemMap* memory = takeKept(index, &ticket);
+    if (memory)
     {
-        memory = new MemMap(bytes);
-        if (m_written[index] && !(flags & D3DLOCK_DISCARD))
-            gpu().readTexture(m_storage, face, level, host(memory->getBlockStart()), pitch);
+        if (!(flags & D3DLOCK_READONLY))
+        {
+            waitTicket(ticket);
+            ticket = 0;
+        }
     }
+    else
+    {
+        memory = new MemMap(bytes, MemMap::High, pf::perf::AllocTextureLock);
+        if (m_written[index] && !(flags & D3DLOCK_DISCARD))
+        {
+            const bool timed = pf::perf::enabled();
+            const uint32_t start = timed ? pf::perf::now() : 0;
+            gpu().readTexture(m_storage, face, level, host(memory->getBlockStart()), pitch);
+            if (timed)
+            {
+                pf::perf::upload(pf::perf::UploadReadBacks, 1);
+                pf::perf::upload(pf::perf::UploadReadBackBytes, bytes);
+                pf::perf::upload(pf::perf::UploadReadBackUs, pf::perf::now() - start);
+            }
+        }
+    }
+    m_tickets[index] = ticket;
     if (m_lockCounts[index] < 2)
         ++m_lockCounts[index];
     m_locks[index] = memory;
@@ -238,28 +450,41 @@ HRESULT Texture::unlock(uint32_t face, uint32_t level)
                 m_desc = desc;
             }
         }
-        else if (gpu().busy(*m_storage))
+        // Frames in flight still read this copy: continue in a new one. A single level is rewritten whole
+        // just below, so only textures with more levels or faces copy the old contents. Without a new copy the
+        // level is written in place at once.
+        bool async = asyncUploads();
+        if (gpu().busy(*m_storage))
         {
-            // Frames in flight still read this copy: continue in a new one. A single level is rewritten whole
-            // just below, so only textures with more levels or faces copy the old contents.
             render::TextureStorage* fresh = gpu().createTexture(m_desc);
             if (fresh)
             {
                 if (m_locks.size() > 1)
-                    gpu().copyTexture(fresh, m_storage);
+                {
+                    if (async)
+                        gpu().copyTextureAsync(fresh, m_storage);
+                    else
+                        gpu().copyTexture(fresh, m_storage);
+                }
                 gpu().release(m_storage);
                 m_storage = fresh;
             }
+            else
+            {
+                async = false;
+            }
         }
-        gpu().writeTexture(m_storage, face, level, host(memory->getBlockStart()),
-                           texture::levelPitch(m_desc.format, m_desc.width, level));
+        const void* data = host(memory->getBlockStart());
+        const uint32_t pitch = texture::levelPitch(m_desc.format, m_desc.width, level);
+        if (async)
+            m_tickets[index] = gpu().writeTextureAsync(m_storage, face, level, data, pitch);
+        else
+            gpu().writeTexture(m_storage, face, level, data, pitch);
         m_written[index] = true;
     }
-    if (m_lockCounts[index] >= 2)
-        m_shadows[index] = memory;
-    else
-        delete memory;
     m_locks[index] = nullptr;
+    keep(index, memory, m_tickets[index]);
+    m_tickets[index] = 0;
     return D3D_OK;
 }
 
@@ -448,7 +673,7 @@ Buffer::Buffer(Device* device, Kind kind, UINT size, DWORD usage, DWORD pool, DW
     ,   m_usage(usage)
     ,   m_pool(pool)
     ,   m_format(format)
-    ,   m_shadow(new MemMap(size ? size : 1))
+    ,   m_shadow(new MemMap(size ? size : 1, MemMap::Low, pf::perf::AllocBuffer))
     ,   m_storage(gpu().createBuffer(size))
 {
     device->addRef();

@@ -9,6 +9,7 @@ set(NFSU_RENDER_SOURCES
 set(NFSU_D3D9_SOURCES
   src/lib/winapi/d3d9.cpp
   src/lib/winapi/d3d9_device.cpp
+  src/lib/winapi/d3d9_native.cpp
   src/lib/winapi/d3d9_record.cpp
   src/lib/winapi/d3d9_resources.cpp
   src/lib/winapi/d3d9_state.cpp
@@ -93,9 +94,15 @@ set(NFSU_WINAPI_SOURCES
 set(NFSU_GAME_PORT_SOURCES
   src/nfsu/audio_mixer.cpp
   src/nfsu/bankcode.cpp
+  src/nfsu/bench.cpp
   src/nfsu/coll.cpp
   src/nfsu/cull.cpp
+  src/nfsu/flares.cpp
+  src/nfsu/draw.cpp
+  src/nfsu/mathfn.cpp
+  src/nfsu/load.cpp
   src/nfsu/movie_yuv.cpp
+  src/nfsu/prep.cpp
   src/nfsu/native.cpp
 )
 

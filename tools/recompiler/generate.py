@@ -75,6 +75,49 @@ NATIVE_OVERRIDES = [
     0x440a40,   # ground height under a point from a topology coordinate's polygon cache
     0x4400e0,   # distance of a point outside a track polygon
     0x4407b0,   # interest box and polygon cache of a topology coordinate
+    # Math helpers (src/nfsu/mathfn.cpp): trigonometry by 16-bit angle, lookups, vectors and boxes.
+    0x564b10,   # sine of a 16-bit angle
+    0x564bb0,   # sine of a float in radians
+    0x564bd0,   # sine and cosine of a 16-bit angle
+    0x564cd0,   # arcsine as a 16-bit angle
+    0x564db0,   # angle of a 2D vector
+    0x4387e0,   # float truncated to an integer, as a float
+    0x583ea0,   # table value, linear between entries
+    0x583f20,   # graph value, linear between points
+    0x567370,   # normalise a vector
+    0x567450,   # normalise a vector with the w term
+    0x567310,   # normalise a 2D vector to a length
+    0x540830,   # length with the w term
+    0x5677d0,   # grow a box by a point and radius
+    0x567740,   # grow a box by a point
+    0x567710,   # box of one point
+    # Render preparation (src/nfsu/prep.cpp): per-instance light-context fills on the workers.
+    0x446730,   # StuffScenery: fill light contexts and submit the view's instances
+    0x40a580,   # frame render and present
+    # Resource loading (src/nfsu/load.cpp): the JDLZ decompressor, the 8-bit palette texture expansion and the car
+    # skin compositor with its pixel blend.
+    0x58d190,   # JDLZ decompressor
+    0x407db0,   # texture creation: palette textures expanded to A8R8G8B8, levels copied into the D3D texture
+    0x5a8a50,   # CompositeSkin32: car skin layers blended into a 32-bit texture
+    0x5a8640,   # weighted sum of up to n pixels
+    # Light flares (src/nfsu/flares.cpp): the world pass with per-flare visibility on the workers, one flare, and
+    # one flare quad.
+    0x544f30,   # world light flares of a view
+    0x5447c0,   # one light flare: intensity, visibility and its quads
+    0x5443f0,   # one flare quad and its submission
+    # Draw queue flush setup functions (src/nfsu/draw.cpp): transforms, states, effect constants and slot-pool
+    # releases of each packet and node, with direct device and effect calls (include/winapi/d3d9_native.h).
+    0x410400,   # world, view and projection transforms of a packet
+    0x410550,   # blend enable, source and destination
+    0x410650,   # alpha test enable and reference
+    0x410700,   # packets of a node back to the packet pool
+    0x40ed10,   # a node's packets back to the pool
+    0x40e6d0,   # effect group switch
+    0x4102f0,   # bone palette of a skinned mesh
+    0x40f3d0,   # model texture, alpha, blend, cull and z-write states, texture offset
+    0x40f7c0,   # light context: fixed-function lights or the harmonic coefficients
+    0x4100a0,   # reflection matrices
+    0x40fae0,   # material: fixed-function material or the diffuse, specular and envmap terms
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
