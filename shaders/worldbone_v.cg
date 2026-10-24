@@ -22,8 +22,9 @@ void main(
     float2 out vTex0 : TEXCOORD0)
 {
     float4 position = float4(aPosition, 1.0);
-    // Indices clamped to the 16 matrices; a bone of weight 0 adds nothing, whatever its matrix holds.
-    float3 index = clamp(aIndex + 0.5, 0.0, 15.0);
+    // Indices rounded to whole numbers, which the int conversion keeps whether it truncates or rounds, and clamped
+    // to the 16 matrices; a bone of weight 0 adds nothing, whatever its matrix holds.
+    float3 index = clamp(floor(aIndex + 0.5), 0.0, 15.0);
     int i0 = int(index.x) * 4;
     int i1 = int(index.y) * 4;
     int i2 = int(index.z) * 4;
