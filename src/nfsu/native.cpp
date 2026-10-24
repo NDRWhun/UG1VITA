@@ -3,6 +3,7 @@
 
 #include "cull.h"
 #include "movie_yuv.h"
+#include "phases.h"
 
 #include <lib/winapp.h>
 #include <platform/config.h>
@@ -315,6 +316,7 @@ void sub_4086b0(win32::WinApplication* app, x86::CPU& cpu)
 // at their place (sub_514b90).
 void sub_4f5730(win32::WinApplication* app, x86::CPU& cpu)
 {
+    phases::Scope scope(phases::FrontEnd);
     s_anchorFlush = anchoring() && isHudPackage(argument(cpu, 0));
     if (s_anchorFlush)
         placeElements(rc::ld32(cpu.ecx + 0xc));

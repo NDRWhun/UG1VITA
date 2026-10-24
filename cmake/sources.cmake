@@ -103,6 +103,7 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/load.cpp
   src/nfsu/movie_yuv.cpp
   src/nfsu/prep.cpp
+  src/nfsu/phases.cpp
   src/nfsu/native.cpp
 )
 

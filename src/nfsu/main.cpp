@@ -1,5 +1,6 @@
 #include "bankcode.h"
 #include "bench.h"
+#include "phases.h"
 
 #include <lib/file.h>
 #include <lib/gamepad.h>
@@ -241,6 +242,7 @@ int main(int, char**)
         std::vector<uint8_t>().swap(image);
         setPadBindings();
         nfsu::bench::configure(app);
+        nfsu::phases::configure();
         win32::Gamepad::setPollHook(padPollHook);
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))
             pf::fatal("%s (the game folder) is missing", s_guestGameFolder);

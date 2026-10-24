@@ -1,4 +1,5 @@
 #include <platform/time.h>
+#include <platform/perf.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
@@ -7,11 +8,13 @@ namespace pf
 
 uint64_t ticksUs()
 {
+    perf::count(perf::CountClock);
     return sceKernelGetProcessTimeWide();
 }
 
 uint32_t ticksMs()
 {
+    perf::count(perf::CountClock);
     return uint32_t(sceKernelGetProcessTimeWide() / 1000);
 }
 

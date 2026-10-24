@@ -98,8 +98,32 @@ enum Audio
     AudioCount
 };
 
+// Event counts of all threads, taken by the phase log (perf_phases).
+enum Count
+{
+    CountClock,         // process clock reads (now, ticksUs, ticksMs)
+    CountCritSec,       // EnterCriticalSection
+    CountCritSecWait,   // of them blocking
+    CountRelease,       // execution lock releases (outermost)
+    CountYield,         // preemption points that gave the lock to a waiting thread
+    CountCount
+};
+
 extern bool g_enabled;
+extern bool g_counting;
 extern int g_nextBlock;
+
+void countSlow(Count counter);
+// Any thread: counts an event while counting is on.
+inline void count(Count counter)
+{
+    if (__builtin_expect(g_counting, 0))
+        countSlow(counter);
+}
+// Turns the counts on (before other threads start).
+void startCounting();
+// The count since the last take.
+uint32_t takeCount(Count counter);
 
 // Main thread, before any other thread starts: sets the switch and logs start-up facts.
 void init(bool enabled);
@@ -109,6 +133,8 @@ inline void blocking(Block block) { g_nextBlock = block; }
 // Game thread: the execution lock was given up for a reason from release to re-acquisition, relockUs of it waiting
 // for the lock.
 void gameBlocked(Block block, uint32_t microseconds, uint32_t relockUs);
+// Sum of the game thread's lock releases since start-up in microseconds, wrapping (counted with the timing log on).
+uint32_t gameBlockedTotal();
 // The calling thread's CPU time is logged under this name (a string literal); a few threads at most.
 void trackThread(const char* name);
 // Slot of a named execution lock holder (a string literal), -1 when the table is full.
