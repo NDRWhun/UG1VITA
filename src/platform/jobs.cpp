@@ -47,8 +47,10 @@ std::atomic<int> s_busy{0};
 std::atomic<int> s_waiter{0};
 Semaphore* s_wake = nullptr;
 Semaphore* s_done = nullptr;
+// The core 3 worker with core3_layout=0: posted tasks only, woken by s_taskWake.
+Semaphore* s_taskWake = nullptr;
 Thread* s_threads[MaxWorkers] = {};
-int s_workers = 0;
+int s_workers = 0;      // workers that run phases
 bool s_started = false;
 LwMutex* s_taskLock = nullptr;
 std::deque<std::pair<Task, void*>> s_tasks;    // guarded by s_taskLock
@@ -103,6 +105,16 @@ void runTasks()
         Thread::setCurrentPriority(WorkerPriority);
 }
 
+int taskWorkerEntry(void*)
+{
+    for (;;)
+    {
+        s_taskWake->wait();
+        runTasks();
+    }
+    return 0;
+}
+
 int workerEntry(void* argument)
 {
     const int thread = int(reinterpret_cast<intptr_t>(argument));
@@ -128,7 +140,7 @@ void start()
 {
     s_started = true;
     const int cores[MaxWorkers] = { 2, 3 };
-    const int count = cores::hasCore3() ? 2 : 1;
+    const int count = cores::core3Waited() ? 2 : 1;
     s_wake = new Semaphore("jobs_wake", 0);
     s_taskLock = new LwMutex("jobs_tasks");
     s_done = new Semaphore("jobs_done", 0);
@@ -140,6 +152,15 @@ void start()
         s_threads[i]->start();
     }
     s_workers = count;
+    if (cores::hasCore3() && !cores::core3Waited())
+    {
+        s_taskWake = new Semaphore("jobs_task_wake", 0);
+        s_threads[count] = new Thread("jobs_tasks_core3", &taskWorkerEntry, nullptr, WorkerPriority, WorkerStack,
+                                      Thread::Cpu3);
+        s_threads[count]->start();
+        logInfo("jobs: phase worker on core 2, posted tasks on cores 3 and 2");
+        return;
+    }
     logInfo("jobs: %d worker(s) on core%s", count, count == 2 ? "s 2 and 3" : " 2");
 }
 
@@ -209,7 +230,10 @@ void post(Task task, void* context)
         LwLockGuard guard(*s_taskLock);
         s_tasks.push_back(std::make_pair(task, context));
     }
-    s_wake->post();
+    if (s_taskWake)
+        s_taskWake->post();
+    else
+        s_wake->post();
 }
 
 }}
