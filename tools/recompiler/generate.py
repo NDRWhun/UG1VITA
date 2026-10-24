@@ -51,6 +51,7 @@ NATIVE_OVERRIDES = [
     0x674898,   # _ftol2: the same result without a control word change
     0x6734a0,   # _chkstk / _alloca_probe: page-probing stack allocation
     0x647cb0,   # movie YUV420 -> ARGB converter: the guest has only an MMX path
+    0x4086b0,   # back buffer size: the display's with widescreen=1, and the 2D mapping the patches below read
     # D3DX (include/winapi/d3dx9.h): effects without the guest HLSL compiler; the math entries are jumps through
     # the PSGP dispatch table.
     0x5af9e5,   # D3DXCreateEffectPool
@@ -120,6 +121,39 @@ NATIVE_OVERRIDES = [
     0x40fae0,   # material: fixed-function material or the diffuse, specular and envmap terms
 ]
 
+# Byte patches applied to the code before discovery: (address, original bytes, new bytes) in hex. Generation stops
+# when the executable's bytes differ from the original ones.
+PATCHES = [
+    # Projection builder 0x40DD00: views 1, 2, 4, 5 (players and their reflections) keep the vertical angle of a 4:3
+    # screen (aspect 0.75 [0x6CCA08]) and scale the horizontal term _11 by k = (back buffer height / width) / 0.75;
+    # k stays on the x87 stack below the far distance until _11 is stored. Other views keep their target's aspect
+    # (types 8 and 9 the fixed 0.6002) with k = 1.
+    (0x40ddcf, '8b4558 db4018 c74424200000803f da7014 8b4504 83f801 740f 83f804 740a 83f802 7405 83f805 7518'
+               ' d905747c6b00 8b0d707c6b00 d8356c7c6b00 894c2420 dec9 83f808 7405 83f809 7508 ddd8 d905f0cc6c00',
+               '8b4504 b936000000 0fa3c1 721f d9e8 d9542420 2c08 3c01 760b 8b4d58 db4118 da7114 eb2e'
+               ' d905f0cc6c00 eb26 db0538107000 da3534107000 d90508ca6c00 dcf9 d905747c6b00 d9542420'
+               ' d8356c7c6b00 dec9'),
+    (0x40de59, 'd8e9', 'd8ea'),                                 # far - near: far is st2
+    (0x40de65, 'd8f9', 'd8fa'),                                 # far / (far - near)
+    (0x40de9b, 'ddd8', 'ddd9'),                                 # drops far, keeps k
+    (0x40debb, 'd83dbcc76c00 d91f', 'd8f9 d91f ddd8 9090'),     # _11 = k / tan, then k is popped
+    # 0x40DCB0, the view's pixel scale (scenery LOD, flares): (height / 2) / (0.75 tan) instead of (width / 2) / tan.
+    (0x40dcdb, 'a134107000 d1f8 89442400 da7c2400', 'd80d0ccc6c00 da3d38107000 909090'),
+    # 0x42F020, camera framing: the vertical extent is 0.75 of the horizontal one instead of height / width.
+    (0x42f09e, 'db0538107000 d8ca da3534107000', 'd90508ca6c00 d8ca 909090909090'),
+    # 2D polygons 0x40BEF0: x of the 640x480 space times [0x6D3440] minus [0x6D3444] (sub_4086b0 in native.cpp).
+    (0x40bf07, 'd80d14c96c00', 'd80d40346d00'),
+    (0x40bf15, 'd825bcc76c00', 'd82544346d00'),
+    (0x40bf98, 'd80d14c96c00', 'd80d40346d00'),
+    (0x40bf9e, 'd825bcc76c00', 'd82544346d00'),
+    (0x40bffd, 'd80d14c96c00', 'd80d40346d00'),
+    (0x40c009, 'd825bcc76c00', 'd82544346d00'),
+    (0x40c051, 'd80d14c96c00', 'd80d40346d00'),
+    (0x40c062, 'd825bcc76c00', 'd82544346d00'),
+    # Full-screen quad of the rear-view mirror frame and mask 0x409180: world _11 = [0x6D3444], as the 2D polygons.
+    (0x409274, 'c74424200000803f c744242400000000', '8b0d44346d00 894c2420 8364242400 90'),
+]
+
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
 THREAD_SEGMENTS = []
 
@@ -164,6 +198,19 @@ def check_binary(directory):
     if sha256 != EXE_SHA256:
         sys.exit('%s: SHA-256 %s, expected %s' % (path, sha256, EXE_SHA256))
     return pe_image.Image(path)
+
+
+def apply_patches(image):
+    for address, original, patched in PATCHES:
+        original, patched = bytes.fromhex(original), bytes.fromhex(patched)
+        s = image.section_of(address)
+        if s is None or len(original) != len(patched):
+            sys.exit('patch 0x%x: no section or lengths differ' % address)
+        offset = address - s.address
+        if s.data[offset:offset + len(original)] != original:
+            sys.exit('patch 0x%x: bytes %s, expected %s'
+                     % (address, s.data[offset:offset + len(original)].hex(), original.hex()))
+        s.data = s.data[:offset] + patched + s.data[offset + len(patched):]
 
 
 def simd_range(address):
@@ -295,8 +342,9 @@ def main():
     args = parser.parse_args()
     started = time.time()
     image = check_binary(args.binaries)
-    print('%s: SHA-256 ok, %d sections, %d relocations, %d imports'
-          % (EXE_NAME, len(image.sections), len(image.relocations), len(image.imports)))
+    apply_patches(image)
+    print('%s: SHA-256 ok, %d sections, %d relocations, %d imports, %d patches'
+          % (EXE_NAME, len(image.sections), len(image.relocations), len(image.imports), len(PATCHES)))
     os.makedirs(args.out, exist_ok=True)
 
     cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)

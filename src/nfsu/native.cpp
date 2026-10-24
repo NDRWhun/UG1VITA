@@ -5,7 +5,11 @@
 #include "movie_yuv.h"
 
 #include <lib/winapp.h>
+#include <platform/config.h>
+#include <platform/gxm.h>
+#include <platform/log.h>
 
+#include <algorithm>
 #include <cmath>
 #include <fpu.h>
 #include <native.h>
@@ -15,8 +19,9 @@
 namespace nfsu
 {
 
-// The translated guest body of an overridden function (generated).
+// The translated guest bodies of the overridden functions (generated).
 void sub_647cb0_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_4086b0_guest(win32::WinApplication* app, x86::CPU& cpu);
 
 namespace native
 {
@@ -78,6 +83,34 @@ void sub_647cb0(win32::WinApplication* app, x86::CPU& cpu)
                                   x86::sreg32(argument(cpu, 3)), x86::sreg32(argument(cpu, 4)),
                                   x86::sreg32(argument(cpu, 5)), argument(cpu, 6), x86::sreg32(argument(cpu, 7)));
     cpu.esp += 4;
+}
+
+// Back buffer size (0x4086B0): width in the argument, height in esi; the guest stores them in the present parameters
+// and in [0x701034] / [0x701038]. Every device creation and Reset size passes here (0x408A38, 0x4087A0..0x408804,
+// 0x4494CE). widescreen=1 (default) replaces the size with the display's, 0 keeps the game's. Afterwards the 2D
+// mapping the patched code reads (generate.py PATCHES) is written: the 640x480 space spans k of the back buffer
+// width, centred, with k = (height / width) / 0.75 and at most 1.
+void sub_4086b0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const x86::reg32 ScreenWidth = 0x701034, ScreenHeight = 0x701038;
+    const x86::reg32 HudScale = 0x6d3440, HudOffset = 0x6d3444;     // past the data of .rdata, inside its raw size
+    static const bool widescreen = pf::Config::getBool("widescreen", true);
+    const x86::reg32 esi = cpu.esi;
+    if (widescreen)
+    {
+        rc::st32(cpu.esp + 4, pf::gxm::DisplayWidth);
+        cpu.esi = pf::gxm::DisplayHeight;
+    }
+    sub_4086b0_guest(app, cpu);
+    if (cpu.terminate)
+        return;
+    cpu.esi = esi;
+    const x86::reg32 width = rc::ld32(ScreenWidth), height = rc::ld32(ScreenHeight);
+    const double k = width ? std::min(1.0, double(height) / double(width) / 0.75) : 1.0;
+    rc::stf32(HudScale, float(k / 320.0));
+    rc::stf32(HudOffset, float(k));
+    pf::logInfo("screen: back buffer %ux%u%s, 2D width %.4f", unsigned(width), unsigned(height),
+                widescreen ? " (widescreen)" : "", k);
 }
 
 // D3DX: the port's effect layer and matrix helpers (src/lib/winapi/d3dx9), stdcall like the guest's.
