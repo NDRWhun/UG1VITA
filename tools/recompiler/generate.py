@@ -105,6 +105,19 @@ NATIVE_OVERRIDES = [
     0x544f30,   # world light flares of a view
     0x5447c0,   # one light flare: intensity, visibility and its quads
     0x5443f0,   # one flare quad and its submission
+    # Draw queue flush setup functions (src/nfsu/draw.cpp): transforms, states, effect constants and slot-pool
+    # releases of each packet and node, with direct device and effect calls (include/winapi/d3d9_native.h).
+    0x410400,   # world, view and projection transforms of a packet
+    0x410550,   # blend enable, source and destination
+    0x410650,   # alpha test enable and reference
+    0x410700,   # packets of a node back to the packet pool
+    0x40ed10,   # a node's packets back to the pool
+    0x40e6d0,   # effect group switch
+    0x4102f0,   # bone palette of a skinned mesh
+    0x40f3d0,   # model texture, alpha, blend, cull and z-write states, texture offset
+    0x40f7c0,   # light context: fixed-function lights or the harmonic coefficients
+    0x4100a0,   # reflection matrices
+    0x40fae0,   # material: fixed-function material or the diffuse, specular and envmap terms
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
