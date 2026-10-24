@@ -380,12 +380,24 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     if (m_effectPass)
     {
         m_effectPass->record(r.effect, r.textures);
+        r.deviceSamplers = m_deviceSamplers;
+        if (m_deviceSamplers & 0x01010101u)
+        {
+            // Device textures set after the pass replace the pass's texture of that stage.
+            for (uint32_t i = 0; i < render::MaxSamplers; ++i)
+            {
+                const int stage = effectSamplerStage(r.effect, i);
+                if (stage >= 0 && (m_deviceSamplers >> (stage * 8)) & DeviceTexture)
+                    r.textures[i] = storageOf(m_state.textures[stage]);
+            }
+        }
     }
     else
     {
         r.effect = EffectDraw{ NoBlock, NoBlock, NoEffect, 0, { 0, 0 } };
         r.textures[0] = storageOf(m_state.textures[0]);
         r.textures[1] = r.textures[2] = r.textures[3] = nullptr;
+        r.deviceSamplers = 0;
     }
     for (const render::TextureStorage* t : r.textures)
     {
@@ -1129,6 +1141,8 @@ HRESULT Device::SetTexture(WinApplication* app, x86::CPU& cpu, DWORD stage, Obje
     }
     if (texture && texture->kind() != KindTexture && texture->kind() != KindCubeTexture)
         return D3DERR_INVALIDCALL;
+    if (stage < render::MaxSamplers)
+        m_deviceSamplers |= uint32_t(DeviceTexture) << (stage * 8);
     hold(m_state.textures[stage], texture);
     return D3D_OK;
 }
@@ -1172,6 +1186,13 @@ HRESULT Device::SetSamplerState(WinApplication* app, x86::CPU& cpu, DWORD sample
     RC_USE(cpu);
     if (sampler >= MaxSamplerStages || type >= MaxSamplerStates)
         return D3D_OK;
+    if (sampler < render::MaxSamplers)
+    {
+        const uint32_t bit = type == D3DSAMP_ADDRESSU ? DeviceAddressU : type == D3DSAMP_ADDRESSV ? DeviceAddressV
+                           : type == D3DSAMP_MAGFILTER ? DeviceMagFilter : type == D3DSAMP_MINFILTER ? DeviceMinFilter
+                           : type == D3DSAMP_MIPFILTER ? DeviceMipFilter : 0;
+        m_deviceSamplers |= bit << (sampler * 8);
+    }
     if (m_state.samplerStates[sampler][type] == value)
         return D3D_OK;
     m_state.samplerStates[sampler][type] = value;

@@ -564,6 +564,7 @@ struct DrawRecord
     uint8_t                         primitive, layout, texComponents, positionT;
     EffectDraw                      effect;
     const render::TextureStorage*   textures[render::MaxSamplers];  // stage 0, or the pass's samplers
+    uint32_t                        deviceSamplers; // effect draws: Device::deviceSamplers() at the draw
 };
 
 // ---- Effects (d3dx9.cpp) -------------------------------------------------------------------------------------------
@@ -602,6 +603,8 @@ void effectBinding(const EffectDraw& effect, const float* own, const float* shar
                    EffectBinding& binding);
 void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
+// The sampler stage a pass reads with its sampler slot (ps_1_1: tN reads stage N), or -1 for an unused slot.
+int effectSamplerStage(const EffectDraw& effect, uint32_t slot);
 
 // ---- Fixed-function resolution (d3d9_state.cpp, pure) ----------------------------------------------------------------
 
@@ -667,6 +670,13 @@ enum : DWORD
     MaxSamplerStages = 16
 };
 
+// Bits of a stage in Device::deviceSamplers.
+enum : uint32_t
+{
+    DeviceTexture = 1, DeviceAddressU = 2, DeviceAddressV = 4, DeviceMagFilter = 8, DeviceMinFilter = 16,
+    DeviceMipFilter = 32
+};
+
 class Device : public Object
 {
 public:
@@ -675,6 +685,11 @@ public:
 
     void setEffectPass(const EffectPass* pass)  { m_effectPass = pass; }
     const EffectPass* effectPass() const        { return m_effectPass; }
+    // Stages 0..3, 8 bits each (DeviceTexture, DeviceAddressU ...): the device texture and sampler states written
+    // after the last effect Pass or effect SetTexture of that stage. These win over the pass's own for effect draws.
+    uint32_t deviceSamplers() const             { return m_deviceSamplers; }
+    void effectPassApplied()                    { m_deviceSamplers = 0; }
+    void effectTextureApplied(uint32_t stage)   { m_deviceSamplers &= ~(uint32_t(DeviceTexture) << (stage * 8)); }
     // The stream of the frame being recorded; null between frames.
     Stream* stream() const                      { return m_stream; }
 
@@ -808,6 +823,7 @@ private:
     Surface*                m_backBuffer = nullptr;
     Surface*                m_autoDepth = nullptr;
     const EffectPass*       m_effectPass = nullptr;
+    uint32_t                m_deviceSamplers = 0;
     std::vector<VertexDeclaration*> m_fvfDeclarations;
     DWORD                   m_lights[8][26] = {};
     BOOL                    m_lightEnabled[8] = {};

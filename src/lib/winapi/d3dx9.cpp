@@ -209,6 +209,17 @@ const int8_t s_samplerParams[EffectCount][render::MaxSamplers] = {
     { PFilterTexture0, PFilterTexture1, PFilterTexture2, PFilterTexture3 },
 };
 
+// Sampler stage of each kind's samplers (ps_1_1: tN reads stage N; car samples the diffuse map with t1).
+const int8_t s_samplerStages[EffectCount][render::MaxSamplers] = {
+    { 0, -1, -1, -1 },
+    { 0, 1, 2, -1 },
+    { 0, 1, -1, -1 },
+    { 0, 1, 2, 3 },
+    { 0, -1, -1, -1 },
+    { 1, 0, -1, -1 },
+    { 0, 1, 2, 3 },
+};
+
 uint32_t samplerCount(EffectKind kind, uint32_t pass)
 {
     switch (kind)
@@ -421,6 +432,12 @@ void markEffectValuesDirty()
     for (Values* v : s_blocks)
         if (v)
             v->markDirty();
+}
+
+int effectSamplerStage(const EffectDraw& effect, uint32_t slot)
+{
+    const EffectKind kind = effect.kind < EffectCount ? EffectKind(effect.kind) : EffectFilter;
+    return slot < samplerCount(kind, effect.pass) && slot < render::MaxSamplers ? s_samplerStages[kind][slot] : -1;
 }
 
 uint32_t effectBlockFloats()
@@ -823,6 +840,20 @@ HRESULT Effect::SetTexture(WinApplication* app, x86::CPU& cpu, x86::reg32 handle
     if (slot)
         slot->release();
     slot = texture;
+    // The active pass samples the new value from now on (it was set after any device SetTexture of the stage).
+    if (const EffectPass* active = m_device->effectPass())
+    {
+        const Effect* e = static_cast<const Effect*>(active);
+        if (&e->values(p) == &values(p))
+        {
+            const uint32_t count = samplerCount(e->m_kind, e->m_pass);
+            for (uint32_t i = 0; i < count && i < render::MaxSamplers; ++i)
+            {
+                if (s_samplerParams[e->m_kind][i] == p)
+                    m_device->effectTextureApplied(uint32_t(s_samplerStages[e->m_kind][i]));
+            }
+        }
+    }
     return D3D_OK;
 }
 
@@ -918,6 +949,7 @@ HRESULT Effect::Pass(WinApplication* app, x86::CPU& cpu, UINT pass)
     // Parameters keep applying while the pass is active (9.0b): draws read them as they are then.
     m_pass = pass;
     m_device->setEffectPass(this);
+    m_device->effectPassApplied();
     return D3D_OK;
 }
 

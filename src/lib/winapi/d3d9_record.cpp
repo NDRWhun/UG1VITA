@@ -56,6 +56,22 @@ render::Sampler sampler(const DWORD* states)
     return s;
 }
 
+// The device sampler states written after the pass (bits: Device::deviceSamplers of the stage) replace the pass's.
+void deviceSampler(const DWORD* states, uint32_t bits, render::Sampler& s)
+{
+    const render::Sampler d = sampler(states);
+    if (bits & DeviceAddressU)
+        s.addressU = d.addressU;
+    if (bits & DeviceAddressV)
+        s.addressV = d.addressV;
+    if (bits & DeviceMinFilter)
+        s.filter = uint8_t((s.filter & ~1) | (d.filter & 1));
+    if (bits & DeviceMagFilter)
+        s.filter = uint8_t((s.filter & ~2) | (d.filter & 2));
+    if (bits & DeviceMipFilter)
+        s.mip = d.mip;
+}
+
 void color(DWORD argb, float out[4])
 {
     out[0] = float((argb >> 16) & 255) / 255.0f;
@@ -146,6 +162,9 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
         {
             state.textures[i] = record.textures[i];
             state.samplers[i] = b.samplers[i];
+            const int stage = record.deviceSamplers ? effectSamplerStage(effect, i) : -1;
+            if (stage >= 0)
+                deviceSampler(m_state.samplerStates[stage], record.deviceSamplers >> (stage * 8), state.samplers[i]);
         }
         if (b.cullNone)
             state.cullMode = 1;
