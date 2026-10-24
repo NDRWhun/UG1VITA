@@ -1384,10 +1384,9 @@ void shadowRun(Entry entry, win32::WinApplication* app, x86::CPU& cpu, Native na
     }
     std::vector<Writer::Undo>().swap(w.undo);
     for (Region& r : regions)
-    {
         r.native.assign(rc::host(r.address), rc::host(r.address) + r.size);
+    for (const Region& r : regions)
         memcpy(rc::host(r.address), r.before.data(), r.size);
-    }
     const x86::CPU after = cpu;
 
     // The locked level gets back the contents the native code found in it.
