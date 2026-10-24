@@ -65,6 +65,41 @@ HRESULT setRenderTarget(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD 
 HRESULT setDepthStencilSurface(WinApplication* app, x86::CPU& cpu, reg32 device, reg32 surface);
 HRESULT drawFrameVertices(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD type, UINT minIndex, UINT vertices,
                           UINT startIndex, UINT count, const void* data, uint32_t bytes);
+HRESULT present(WinApplication* app, x86::CPU& cpu, reg32 device, const void* source, const void* dest, reg32 window,
+                reg32 dirtyRegion);
+// Effect Pass, then DrawIndexedPrimitive; the draw's result. Inside a window one queued record.
+HRESULT passDrawIndexed(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass, reg32 device, DWORD type,
+                        LONG baseVertex, UINT minIndex, UINT vertices, UINT startIndex, UINT count);
+
+// Effect setter calls on one effect in order: inside a window one queued record, else the calls one by one. run()
+// returns the last call's result.
+class EffectCalls
+{
+public:
+    EffectCalls(WinApplication* app, x86::CPU& cpu, reg32 effect);
+
+    void setVector(reg32 handle, const float* vector);
+    void setFloat(reg32 handle, float value);
+    void setVectorArray(reg32 handle, const float* vectors, UINT count);
+    HRESULT run();
+
+    enum Kind : uint32_t { KindVector, KindFloat, KindVectorArray };
+    enum { MaxWords = 512 };
+
+private:
+    // Entries: kind | count << 8, handle, the floats (count vectors, or one float); null when the call is made at
+    // once (the entries before it are queued first).
+    uint32_t* entry(Kind kind, reg32 handle, uint32_t count, uint32_t floats);
+    void queueEntries();
+
+    WinApplication* m_app;
+    x86::CPU& m_cpu;
+    reg32 m_effect;
+    bool m_queued;
+    HRESULT m_last = 0;
+    uint32_t m_size = 0;
+    uint32_t m_words[MaxWords];
+};
 
 // ---- ID3DXEffect ----
 

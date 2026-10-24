@@ -264,6 +264,9 @@ enum : uint8_t
     OpSetRenderTarget,
     OpSetDepthStencilSurface,
     OpDrawFrameVertices,    // device, type, minimum index, vertices, start index, count, bytes, data
+    OpPresent,              // device, source and destination rectangle flags
+    OpPassDraw,             // effect, pass, then the DrawIndexedPrimitive words
+    OpEffectCalls,          // effect, then EffectCalls entries
     OpFpscr,                // the FPSCR the following calls run with
     OpWrap,                 // the next record is at the start of the ring
     OpCount
@@ -301,6 +304,9 @@ const char* opName(uint32_t op)
     case OpSetRenderTarget:      return "SetRenderTarget";
     case OpSetDepthStencilSurface: return "SetDepthStencilSurface";
     case OpDrawFrameVertices:    return "DrawIndexedPrimitive (frame vertices)";
+    case OpPresent:              return "Present";
+    case OpPassDraw:             return "Effect::Pass + DrawIndexedPrimitive";
+    case OpEffectCalls:          return "effect setters";
     default:                     return methodName(uint8_t(op));
     }
 }
@@ -319,7 +325,8 @@ struct Deferral
     bool inWindow = false;
     reg32 deviceGuest = 0;
     Device* device = nullptr;
-    // The device's stream, indices and declaration as the queued calls leave them, for the results of draws.
+    // The device's frame, stream, indices and declaration as the queued calls leave them, for the results of draws.
+    bool frameOpen = false;
     bool streamBound = false, indicesBound = false, declarationBound = false;
     UINT streamStride = 0;
     DWORD fvf = 0;
@@ -381,7 +388,7 @@ inline bool deferringDevice(const x86::CPU& cpu, reg32 guest)
 
 inline bool deferringDraw(const x86::CPU& cpu, reg32 guest)
 {
-    return deferringDevice(cpu, guest) && s_defer.device->stream() != nullptr;
+    return deferringDevice(cpu, guest) && s_defer.frameOpen;
 }
 
 // Calls that change a binding: not deferred while an object is held only by bindings.
@@ -444,8 +451,10 @@ inline bool drawBindings()
 void refreshBindings()
 {
     Deferral& d = s_defer;
-    if (d.device)
-        d.device->bindings(d.streamBound, d.streamStride, d.indicesBound, d.declarationBound, d.fvf);
+    if (!d.device)
+        return;
+    d.device->bindings(d.streamBound, d.streamStride, d.indicesBound, d.declarationBound, d.fvf);
+    d.frameOpen = d.device->stream() != nullptr;
 }
 
 // The result of a queued call for its payload w, as the method's checks of arguments, handles, object kinds and
@@ -627,7 +636,8 @@ uint32_t runRecord(const uint32_t* p)
     const uint32_t length = p[0] >> 8;
     const uint32_t* w = p + 1;
     const float* f = reinterpret_cast<const float*>(w);
-    const auto dev = [&] { return w[0] == d.deviceGuest ? d.device : device(w[0]); };
+    const auto dev2 = [&](reg32 guest) { return guest == d.deviceGuest ? d.device : device(guest); };
+    const auto dev = [&] { return dev2(w[0]); };
     HRESULT h = D3D_OK;
     switch (op)
     {
@@ -742,6 +752,58 @@ uint32_t runRecord(const uint32_t* p)
         if (data)
             memcpy(data, w + 7, w[6]);
         h = target->drawIndexedFrameVertices(app, cpu, w[1], w[2], w[3], w[4], w[5], data);
+        break;
+    }
+    case OpPresent:
+    {
+        // Present tests the rectangles for null only.
+        const RECT rect = {};
+        h = dev()->Present(app, cpu, w[1] ? &rect : nullptr, w[2] ? &rect : nullptr, w[3], w[4]);
+        break;
+    }
+    case OpPassDraw:
+    {
+        const HRESULT passed = effect::pass(app, cpu, w[0], w[1]);
+        if (__builtin_expect(passed != D3D_OK, 0))
+            noteResult(MethodEffectPass, w, 2, passed, NotReturned);
+        h = dev2(w[2])->DrawIndexedPrimitive(app, cpu, w[3], LONG(w[4]), w[5], w[6], w[7], w[8]);
+        if (__builtin_expect(h != D3D_OK, 0))
+            noteResult(MethodDrawIndexedPrimitive, w + 2, 7, h, NotReturned);
+        h = D3D_OK;
+        break;
+    }
+    case OpEffectCalls:
+    {
+        const uint32_t* e = w + 1;
+        const uint32_t* end = w + length - 1;
+        while (e < end)
+        {
+            const uint32_t kind = e[0] & 0xff, count = e[0] >> 8;
+            const float* data = reinterpret_cast<const float*>(e + 2);
+            HRESULT r;
+            uint32_t method, floats;
+            switch (kind)
+            {
+            case EffectCalls::KindVector:
+                r = effect::setVector(app, cpu, w[0], e[1], data);
+                method = MethodEffectSetVector;
+                floats = 4;
+                break;
+            case EffectCalls::KindFloat:
+                r = effect::setFloat(app, cpu, w[0], e[1], data[0]);
+                method = MethodEffectSetFloat;
+                floats = 1;
+                break;
+            default:
+                r = effect::setVectorArray(app, cpu, w[0], e[1], data, count);
+                method = MethodEffectSetVectorArray;
+                floats = count * 4;
+                break;
+            }
+            if (__builtin_expect(r != D3D_OK, 0))
+                noteResult(method, e, 2 + floats, r, NotReturned);
+            e += 2 + floats;
+        }
         break;
     }
     case OpFpscr:
@@ -1471,7 +1533,10 @@ HRESULT clear(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD count, cons
     if (deferring(cpu))
         fallback();
     drain();
-    return device(guest)->Clear(app, cpu, count, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
+    const HRESULT h = device(guest)->Clear(app, cpu, count, reinterpret_cast<const D3DRECT*>(rects), flags, color, z,
+                                           stencil);
+    refreshBindings();
+    return h;
 }
 
 HRESULT beginScene(WinApplication* app, x86::CPU& cpu, reg32 guest)
@@ -1479,7 +1544,9 @@ HRESULT beginScene(WinApplication* app, x86::CPU& cpu, reg32 guest)
     if (deferringDraw(cpu, guest))
         return D3D_OK;
     drain();
-    return device(guest)->BeginScene(app, cpu);
+    const HRESULT h = device(guest)->BeginScene(app, cpu);
+    refreshBindings();
+    return h;
 }
 
 HRESULT endScene(WinApplication* app, x86::CPU& cpu, reg32 guest)
@@ -1550,7 +1617,123 @@ HRESULT drawFrameVertices(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD
         return D3D_OK;
     if (frame)
         memcpy(frame, data, bytes);
-    return d->drawIndexedFrameVertices(app, cpu, type, minIndex, vertices, startIndex, count, frame);
+    const HRESULT h = d->drawIndexedFrameVertices(app, cpu, type, minIndex, vertices, startIndex, count, frame);
+    refreshBindings();
+    return h;
+}
+
+HRESULT present(WinApplication* app, x86::CPU& cpu, reg32 guest, const void* source, const void* dest, reg32 window,
+                reg32 dirtyRegion)
+{
+    if (deferringDraw(cpu, guest))
+    {
+        Texture::trimKept();
+        uint32_t* w = put(OpPresent, 5);
+        w[0] = guest;
+        w[1] = source ? 1 : 0;
+        w[2] = dest ? 1 : 0;
+        w[3] = window;
+        w[4] = dirtyRegion;
+        s_defer.frameOpen = false;
+        const HRESULT h = queued();
+        publish();
+        return h;
+    }
+    if (deferring(cpu))
+        fallback();
+    drain();
+    const HRESULT h = device(guest)->Present(app, cpu, static_cast<const RECT*>(source),
+                                             static_cast<const RECT*>(dest), window, dirtyRegion);
+    refreshBindings();
+    return h;
+}
+
+HRESULT passDrawIndexed(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass, reg32 guest, DWORD type,
+                        LONG baseVertex, UINT minIndex, UINT vertices, UINT startIndex, UINT count)
+{
+    if (s_defer.inWindow && deferringDraw(cpu, guest))
+    {
+        uint32_t* w = put(OpPassDraw, 9);
+        w[0] = effect;
+        w[1] = pass;
+        w[2] = guest;
+        w[3] = type;
+        w[4] = reg32(baseVertex);
+        w[5] = minIndex;
+        w[6] = vertices;
+        w[7] = startIndex;
+        w[8] = count;
+        const HRESULT h = queued();
+        publishDraw();
+        return h;
+    }
+    effectPass(app, cpu, effect, pass);
+    return drawIndexedPrimitive(app, cpu, guest, type, baseVertex, minIndex, vertices, startIndex, count);
+}
+
+// ---- EffectCalls ----
+
+EffectCalls::EffectCalls(WinApplication* app, x86::CPU& cpu, reg32 effect)
+    :   m_app(app), m_cpu(cpu), m_effect(effect), m_queued(s_defer.inWindow && deferring(cpu))
+{
+}
+
+void EffectCalls::queueEntries()
+{
+    if (!m_size)
+        return;
+    uint32_t* w = put(OpEffectCalls, 1 + m_size);
+    w[0] = m_effect;
+    copyWords(w + 1, m_words, m_size);
+    m_last = queued();
+    m_size = 0;
+}
+
+uint32_t* EffectCalls::entry(Kind kind, reg32 handle, uint32_t count, uint32_t floats)
+{
+    if (!m_queued || handle >= 0x10000 || 2 + floats > MaxWords)
+    {
+        queueEntries();
+        return nullptr;
+    }
+    if (m_size + 2 + floats > MaxWords)
+        queueEntries();
+    uint32_t* e = m_words + m_size;
+    e[0] = kind | count << 8;
+    e[1] = handle;
+    m_size += 2 + floats;
+    return e + 2;
+}
+
+void EffectCalls::setVector(reg32 handle, const float* vector)
+{
+    if (uint32_t* e = vector ? entry(KindVector, handle, 1, 4) : (queueEntries(), nullptr))
+        copyWords(e, vector, 4);
+    else
+        m_last = effectSetVector(m_app, m_cpu, m_effect, handle, vector);
+}
+
+void EffectCalls::setFloat(reg32 handle, float value)
+{
+    if (uint32_t* e = entry(KindFloat, handle, 1, 1))
+        e[0] = bits(value);
+    else
+        m_last = effectSetFloat(m_app, m_cpu, m_effect, handle, value);
+}
+
+void EffectCalls::setVectorArray(reg32 handle, const float* vectors, UINT count)
+{
+    if (uint32_t* e = vectors && count <= MaxArrayFloats / 4 ? entry(KindVectorArray, handle, count, count * 4)
+                                                             : (queueEntries(), nullptr))
+        copyWords(e, vectors, count * 4);
+    else
+        m_last = effectSetVectorArray(m_app, m_cpu, m_effect, handle, vectors, count);
+}
+
+HRESULT EffectCalls::run()
+{
+    queueEntries();
+    return m_last;
 }
 
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage, reg32 texture)
@@ -1739,7 +1922,10 @@ HRESULT drawIndexedPrimitiveDirect(WinApplication* app, x86::CPU& cpu, reg32 gue
         r.done(h);
         return h;
     }
-    return device(guest)->DrawIndexedPrimitive(app, cpu, type, baseVertex, minIndex, vertices, startIndex, count);
+    const HRESULT h = device(guest)->DrawIndexedPrimitive(app, cpu, type, baseVertex, minIndex, vertices, startIndex,
+                                                          count);
+    refreshBindings();
+    return h;
 }
 
 HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD type, UINT count, const void* data,
@@ -2272,6 +2458,13 @@ void SetSamplerState(WinApplication* app, x86::CPU& cpu)
 {
     cpu.eax = bridge::setSamplerState(app, cpu, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3));
     cpu.esp += 20;
+}
+
+void Present(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::present(app, cpu, arg(cpu, 0), pointer<uint8_t>(arg(cpu, 1)), pointer<uint8_t>(arg(cpu, 2)),
+                              arg(cpu, 3), arg(cpu, 4));
+    cpu.esp += 24;
 }
 
 void SetViewport(WinApplication* app, x86::CPU& cpu)

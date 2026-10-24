@@ -313,6 +313,7 @@ void LightEnable(WinApplication* app, x86::CPU& cpu);
 void SetRenderState(WinApplication* app, x86::CPU& cpu);
 void SetTextureStageState(WinApplication* app, x86::CPU& cpu);
 void SetSamplerState(WinApplication* app, x86::CPU& cpu);
+void Present(WinApplication* app, x86::CPU& cpu);
 void SetViewport(WinApplication* app, x86::CPU& cpu);
 void SetFVF(WinApplication* app, x86::CPU& cpu);
 void Clear(WinApplication* app, x86::CPU& cpu);

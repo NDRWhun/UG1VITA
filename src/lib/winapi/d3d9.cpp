@@ -223,7 +223,7 @@ const MethodEntry s_device[] = {
     D3D_TRAP(GetSwapChain),
     D3D_METHOD(Device, GetNumberOfSwapChains),
     D3D_METHOD(Device, Reset),
-    D3D_METHOD(Device, Present),
+    D3D_GUEST(Present),
     D3D_METHOD(Device, GetBackBuffer),
     D3D_METHOD(Device, GetRasterStatus),
     D3D_METHOD(Device, SetDialogBoxMode),

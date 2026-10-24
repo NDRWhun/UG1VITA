@@ -363,7 +363,7 @@ bool drawIndexed(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 f)
             r.ecx = rc::ld32(r.eax);
             rc::st32(f - 4, r.edi);
             rc::st32(f - 8, r.eax);
-            r.eax = bridge::effectPass(app, cpu, r.eax, r.edi);
+            const reg32 effect = r.eax, pass = r.edi;
             r.edx = rc::ld32(DevicePointer);
             r.ecx = rc::ld32(r.edx);
             r.edx = rc::ld32(f + 0x10);
@@ -379,7 +379,7 @@ bool drawIndexed(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 f)
             rc::st32(f - 20, 0);
             rc::st32(f - 24, 4);
             rc::st32(f - 28, r.edx);
-            r.eax = bridge::drawIndexedPrimitive(app, cpu, r.edx, 4, 0, 0, r.eax, start, primitives);
+            r.eax = bridge::passDrawIndexed(app, cpu, effect, pass, r.edx, 4, 0, 0, r.eax, start, primitives);
             ++s_usage.draws;
             r.eax = rc::ld32(r.esi + 0x18);
             r.ecx = rc::ld32(r.eax + 0x14);
