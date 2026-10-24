@@ -367,7 +367,7 @@ HRESULT Effect::setFloats(x86::reg32 handle, const float* data, uint32_t count, 
 
 void Effect::store(int p, const void* data, uint32_t n)
 {
-    if (memcmp(floats(p), data, n * 4) == 0)
+    if (sameWords(floats(p), data, n))
         return;
     memcpy(floats(p), data, n * 4);
     Values& v = values(p);

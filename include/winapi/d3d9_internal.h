@@ -22,6 +22,22 @@ namespace win32 { namespace d3d9
 namespace render = pf::render;
 namespace texture = pf::texture;
 
+// Bitwise equality of count dwords at a and b.
+inline bool sameWords(const void* a, const void* b, uint32_t count)
+{
+    const uint8_t* p = static_cast<const uint8_t*>(a);
+    const uint8_t* q = static_cast<const uint8_t*>(b);
+    for (uint32_t i = 0; i < count; ++i, p += 4, q += 4)
+    {
+        uint32_t x, y;
+        memcpy(&x, p, 4);
+        memcpy(&y, q, 4);
+        if (x != y)
+            return false;
+    }
+    return true;
+}
+
 // ---- Constants and types -------------------------------------------------------------------------------------------
 
 enum : HRESULT
