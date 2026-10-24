@@ -74,6 +74,9 @@ void framePresented(uint32_t drawCalls, uint32_t triangles);
 // Called on the render thread after each log line with the interval length in microseconds.
 typedef void (*Reporter)(uint32_t intervalUs);
 void setReporter(Reporter reporter);
+// Called on the render thread at each framePresented with its now() time.
+typedef void (*FrameObserver)(uint32_t presentUs);
+void setFrameObserver(FrameObserver observer);
 
 }}
 
