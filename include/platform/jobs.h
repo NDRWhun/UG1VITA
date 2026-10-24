@@ -2,8 +2,7 @@
 #define PLATFORM_JOBS_H_
 
 // A small pool of worker threads for data-parallel native phases of the game thread. The workers sit on core 2,
-// and on core 3 with core3_layout=1 (cores.h); with core 3 and core3_layout=0 a core 3 worker runs posted tasks
-// only. A phase splits [0, count) into batches that the calling thread
+// and on core 3 with core3_layout=1 (cores.h); with core3_layout=0 the core 3 worker runs posted tasks only. A phase splits [0, count) into batches that the calling thread
 // and the workers claim with one atomic counter; results go to per-item slots, so they do not depend on which
 // thread ran an item or on how many workers there are.
 //

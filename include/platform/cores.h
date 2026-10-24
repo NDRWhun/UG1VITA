@@ -12,10 +12,9 @@
 //   Helper   2                3             other guest threads
 //   Io       2                3             guest file reading threads
 //
-// The "with core 3" column applies with core3_layout=1. The system can hold a thread on core 3 back for a while, so
-// with core3_layout=0 (default) core 3 runs only work nobody waits for at once (the job pool's posted tasks) and the
-// roles keep the cores-0-2 layout: a guest thread there could hold the execution lock while held back, and a phase
-// batch or a command list there would hold up the game or the render thread.
+// With core 3, core3_layout=1 (default) uses the "with core 3" column, and core 3 also runs a job phase worker and a
+// GXM command list worker. core3_layout=0 uses the "without core 3" column, and core 3 runs only a worker for the job
+// pool's posted tasks.
 
 namespace pf { namespace cores
 {
@@ -37,8 +36,8 @@ void init();
 
 // True when user threads run on core 3.
 bool hasCore3();
-// True when core 3 also runs work other threads wait for (core3_layout=1): job phases, GXM command lists, guest
-// threads.
+// True with core 3 and core3_layout=1: helper and io threads, a job phase worker and a GXM command list worker on
+// core 3.
 bool core3Waited();
 // Core number (0-3) and pf::Thread::Cpu mask of a role.
 int core(Role role);
