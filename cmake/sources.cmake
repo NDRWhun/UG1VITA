@@ -95,6 +95,7 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/bankcode.cpp
   src/nfsu/coll.cpp
   src/nfsu/cull.cpp
+  src/nfsu/load.cpp
   src/nfsu/movie_yuv.cpp
   src/nfsu/native.cpp
 )

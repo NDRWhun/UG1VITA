@@ -75,6 +75,12 @@ NATIVE_OVERRIDES = [
     0x440a40,   # ground height under a point from a topology coordinate's polygon cache
     0x4400e0,   # distance of a point outside a track polygon
     0x4407b0,   # interest box and polygon cache of a topology coordinate
+    # Resource loading (src/nfsu/load.cpp): the JDLZ decompressor, the 8-bit palette texture expansion and the car
+    # skin compositor with its pixel blend.
+    0x58d190,   # JDLZ decompressor
+    0x407db0,   # texture creation: palette textures expanded to A8R8G8B8, levels copied into the D3D texture
+    0x5a8a50,   # CompositeSkin32: car skin layers blended into a 32-bit texture
+    0x5a8640,   # weighted sum of up to n pixels
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
