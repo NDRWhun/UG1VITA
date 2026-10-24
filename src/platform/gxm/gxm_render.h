@@ -192,6 +192,17 @@ private:
         uint32_t                    firstJob, jobCount;
     };
     void planFrame(const render::Frame& frame, bool stretchDirect);
+    // Moves the alpha-tested draws of a scene's order after the opaque draws that follow them up to the next draw
+    // that is not depth-tested LESS/LESSEQUAL with depth write, full colour mask and no blend (setting draw_sort).
+    void sortScene(const render::Frame& frame, uint32_t scene);
+    // perf_log: HSR flush transitions (alpha-tested to opaque or blended draw) before and after sortScene.
+    struct SortStats
+    {
+        uint32_t    frames = 0;
+        uint64_t    draws = 0, discards = 0, before = 0, after = 0;     // largest scene of each frame
+        uint64_t    allBefore = 0, allAfter = 0;                        // every scene
+        uint32_t    largest = 0, largestDiscards = 0, largestBefore = 0, largestAfter = 0;  // this frame
+    };
     struct Pending
     {
         int         kind;           // 0 texture, 1 depth, 2 buffer
@@ -354,6 +365,9 @@ private:
     std::vector<DrawPrograms>   m_programs;             // per draw of the frame being drawn
     std::vector<ScenePlan>      m_plan;
     std::vector<uint32_t>       m_order;                // draw indices of the scenes, carried clears first
+    bool                        m_drawSort = true;      // setting draw_sort
+    std::vector<uint32_t>       m_held;                 // sortScene: alpha-tested draws not placed yet
+    SortStats                   m_sortStats;
 
     // Command lists. m_workers[0] is the render thread's own deferred context.
     std::vector<Worker*>        m_workers;

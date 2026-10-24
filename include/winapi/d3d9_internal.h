@@ -656,6 +656,9 @@ void effectBinding(const EffectDraw& effect, const float* own, const float* shar
                    EffectBinding& binding);
 void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
+// Car passes: the smallest diffuse alpha car_v outputs (DiffuseMin.w and DiffuseRange.w); false for other kinds or
+// when it has no lower bound.
+bool effectCarDiffuseAlpha(const EffectDraw& effect, const float* own, const float* shared, float* lowest);
 // The sampler stage a pass reads with its sampler slot (ps_1_1: tN reads stage N), or -1 for an unused slot.
 int effectSamplerStage(const EffectDraw& effect, uint32_t slot);
 

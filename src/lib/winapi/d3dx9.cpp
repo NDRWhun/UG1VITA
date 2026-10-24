@@ -660,6 +660,20 @@ void effectVertexConstants(const EffectDraw& effect, const float* own, const flo
     }
 }
 
+bool effectCarDiffuseAlpha(const EffectDraw& effect, const float* own, const float* shared, float* lowest)
+{
+    const View v(effect, own, shared);
+    if (v.kind != EffectCar)
+        return false;
+    const float min = v.floats(PDiffuseMin)[3], range = v.floats(PDiffuseRange)[3];
+    // car_v: alpha = saturate(0.5 * (min + max(0.01, v.n) * range)).
+    if (!(range >= 0.0f) || !(min == min))
+        return false;
+    const float a = 0.5f * (min + 0.01f * range);
+    *lowest = a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a;
+    return true;
+}
+
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out)
 {
     const View v(effect, own, shared);

@@ -387,6 +387,9 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     m_cullSwap = Config::getBool("cull_swap", false);
     if (m_cullSwap)
         logInfo("gxm: cull winding swapped (cull_swap=1)");
+    m_drawSort = Config::getBool("draw_sort", true);
+    logInfo("gxm: alpha-tested draws %s (draw_sort=%d)", m_drawSort ? "after opaque draws" : "in game order",
+            m_drawSort ? 1 : 0);
     m_textureHeap = new GpuHeap("gxm_textures", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 16 * 1024 * 1024,
                                 SCE_GXM_MEMORY_ATTRIB_RW);
     m_bufferHeap = new GpuHeap("gxm_buffers", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, 8 * 1024 * 1024,
@@ -1446,6 +1449,126 @@ void FrameRenderer::planFrame(const render::Frame& frame, bool stretchDirect)
     }
 }
 
+namespace
+{
+
+enum SortClass
+{
+    SortFixed,          // stays in place; no draw moves across it
+    SortOpaque,
+    SortDiscard
+};
+
+SortClass sortClass(const render::DrawCall& d, const render::TextureStorage* target)
+{
+    if (!d.count)
+        return SortOpaque;
+    const render::DrawState& s = d.state;
+    // D3DCMP_LESS 2, D3DCMP_LESSEQUAL 4.
+    if (s.vertexProgram == render::VpClear || s.blendEnable || s.colorMask != 0xf || !s.depthEnable || !s.depthWrite
+        || (s.depthFunc != 2 && s.depthFunc != 4))
+        return SortFixed;
+    for (const render::TextureStorage* t : s.textures)
+        if (t && t == target)
+            return SortFixed;
+    return s.alphaTest ? SortDiscard : SortOpaque;
+}
+
+// Hidden-surface pass of a draw: 2 alpha-tested, 1 blended, 0 opaque.
+uint32_t hsrPass(const render::DrawState& s)
+{
+    return s.alphaTest ? 2 : s.blendEnable ? 1 : 0;
+}
+
+uint32_t flushTransitions(const render::Frame& frame, const uint32_t* order, uint32_t count)
+{
+    uint32_t transitions = 0, previous = 0;
+    for (uint32_t n = 0; n < count; ++n)
+    {
+        const uint32_t pass = hsrPass(frame.draws[order[n]].state);
+        transitions += previous == 2 && pass < 2;
+        previous = pass;
+    }
+    return transitions;
+}
+
+uint64_t geometryBit(const void* vertices)
+{
+    return uint64_t(1) << ((uintptr_t(vertices) >> 4) & 63);
+}
+
+}
+
+void FrameRenderer::sortScene(const render::Frame& frame, uint32_t scene)
+{
+    const ScenePlan& p = m_plan[scene];
+    if (p.skipped || p.orderCount < 2)
+        return;
+    uint32_t* order = m_order.data() + p.firstOrder;
+    const bool timed = perf::enabled();
+    const uint32_t before = timed ? flushTransitions(frame, order, p.orderCount) : 0;
+    if (m_drawSort && p.depthUsed)
+    {
+        const render::TextureStorage* target = frame.scenes[scene].target.color;
+        m_held.clear();
+        uint64_t held = 0;
+        uint32_t out = 0;
+        for (uint32_t n = 0; n < p.orderCount; ++n)
+        {
+            const uint32_t index = order[n];
+            const render::DrawCall& d = frame.draws[index];
+            const SortClass c = sortClass(d, target);
+            if (c == SortDiscard)
+            {
+                m_held.push_back(index);
+                held |= geometryBit(d.vertices);
+                continue;
+            }
+            bool release = c == SortFixed;
+            // The same geometry drawn again stays after its alpha-tested draw.
+            if (!release && (held & geometryBit(d.vertices)))
+            {
+                for (uint32_t h : m_held)
+                {
+                    const render::DrawCall& e = frame.draws[h];
+                    if (e.vertices == d.vertices && e.indices == d.indices && e.count == d.count)
+                    {
+                        release = true;
+                        break;
+                    }
+                }
+            }
+            if (release)
+            {
+                for (uint32_t h : m_held)
+                    order[out++] = h;
+                m_held.clear();
+                held = 0;
+            }
+            order[out++] = index;
+        }
+        for (uint32_t h : m_held)
+            order[out++] = h;
+        m_held.clear();
+    }
+    if (!timed)
+        return;
+    const uint32_t after = flushTransitions(frame, order, p.orderCount);
+    SortStats& s = m_sortStats;
+    s.allBefore += before;
+    s.allAfter += after;
+    if (p.orderCount > s.largest)
+    {
+        uint32_t discards = 0;
+        for (uint32_t n = 0; n < p.orderCount; ++n)
+            discards += frame.draws[order[n]].state.alphaTest ? 1 : 0;
+        s.largest = p.orderCount;
+        s.largestDiscards = discards;
+        s.largestBefore = before;
+        s.largestAfter = after;
+    }
+}
+
 void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync,
                               bool stretchDirect)
 {
@@ -1505,6 +1628,24 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
                 m_order.push_back(scene.firstDraw + n);
         }
         p.orderCount = uint32_t(m_order.size()) - p.firstOrder;
+        sortScene(frame, i);
+    }
+    if (perf::enabled())
+    {
+        SortStats& s = m_sortStats;
+        s.draws += s.largest;
+        s.discards += s.largestDiscards;
+        s.before += s.largestBefore;
+        s.after += s.largestAfter;
+        s.largest = s.largestDiscards = s.largestBefore = s.largestAfter = 0;
+        if (++s.frames == 300)
+        {
+            const double n = s.frames;
+            logInfo("perf: draw sort %s, per frame: largest scene %.0f draws, %.1f alpha-tested, HSR flush "
+                    "transitions %.1f -> %.1f; all scenes %.1f -> %.1f", m_drawSort ? "on" : "off", s.draws / n,
+                    s.discards / n, s.before / n, s.after / n, s.allBefore / n, s.allAfter / n);
+            s = SortStats();
+        }
     }
     const bool lists = recordLists(frame);
     if (frame.uploads)

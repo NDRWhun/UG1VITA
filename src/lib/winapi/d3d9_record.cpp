@@ -5,8 +5,10 @@
 #include <winapi/d3d9_internal.h>
 #include <platform/config.h>
 #include <platform/log.h>
+#include <platform/perf.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 
 namespace win32 { namespace d3d9
@@ -94,6 +96,23 @@ struct ConstantsKey
 
 static_assert(sizeof(ConstantsKey) % 4 == 0, "ConstantsKey is whole words");
 
+// What the alpha test elision found for an alpha-tested draw.
+enum AlphaResult : uint8_t
+{
+    AlphaElided,            // discards nothing: drawn without the test
+    AlphaProgram,           // a program whose alpha is not bounded here (fixed function, worldbone, filter)
+    AlphaFunction,          // LESS, LESSEQUAL or NEVER
+    AlphaTexture,           // no texture, or its smallest alpha is 0 or unknown
+    AlphaVertex,            // vertex alpha 0 or unknown
+    AlphaCarConstants,      // car pass without a lower bound of its diffuse alpha
+    AlphaThreshold,         // the smallest alpha can fail the test
+    AlphaResultCount
+};
+
+const char* const s_alphaNames[AlphaResultCount] = {
+    "elided", "program", "function", "texture", "vertex", "car constants", "threshold"
+};
+
 // Render thread only.
 class Resolver
 {
@@ -102,7 +121,8 @@ public:
 
 private:
     bool fillState(render::Frame& frame, const DrawRecord& record, render::DrawCall& draw);
-    bool alphaTestPasses(const DrawRecord& record, const render::DrawCall& draw, const float test[2]) const;
+    AlphaResult alphaTestResult(const DrawRecord& record, const render::DrawCall& draw, const float test[2],
+                                const float* own, const float* shared) const;
     const float* block(uint16_t id) const
     {
         return id < m_blocks.size() && !m_blocks[id].empty() ? m_blocks[id].data() : nullptr;
@@ -117,6 +137,8 @@ private:
     ConstantsKey                    m_key = {};
     uint32_t                        m_vertexConstants = render::NoConstants;
     uint32_t                        m_fragmentConstants = render::NoConstants;
+    uint32_t                        m_alphaFrames = 0;
+    uint32_t                        m_alphaCounts[AlphaResultCount] = {};   // perf_log: alpha-tested draws
 };
 
 Resolver s_resolver;
@@ -171,8 +193,9 @@ uint8_t vertexAlpha(const DrawRecord& record, const render::DrawCall& draw)
     return lowest;
 }
 
-// True when the alpha test of a draw (discard when test[0] * saturate(alpha) < test[1]) discards no fragment.
-bool Resolver::alphaTestPasses(const DrawRecord& record, const render::DrawCall& draw, const float test[2]) const
+// Whether the alpha test of a draw (discard when test[0] * saturate(alpha) < test[1]) discards no fragment.
+AlphaResult Resolver::alphaTestResult(const DrawRecord& record, const render::DrawCall& draw, const float test[2],
+                                      const float* own, const float* shared) const
 {
     const render::DrawState& state = draw.state;
     switch (state.fragmentProgram)
@@ -180,29 +203,49 @@ bool Resolver::alphaTestPasses(const DrawRecord& record, const render::DrawCall&
     case render::FpWorldReflect:
     case render::FpWorldHeadlightReflect:
         // Alpha 1: the programs discard when test[0] < test[1].
-        return !(test[0] < test[1]);
+        return test[0] < test[1] ? AlphaThreshold : AlphaElided;
     case render::FpWorld:
     case render::FpWorldProjected:
     case render::FpWorldHeadlight:
+        // Alpha = texel alpha * vertex alpha * 2, from programs that pass the vertex colour through.
+        if (state.vertexProgram != render::VpWorld && state.vertexProgram != render::VpWorldProjected
+            && state.vertexProgram != render::VpWorldHeadlight)
+            return AlphaProgram;
+        break;
+    case render::FpCar:
+        // Alpha = texel alpha * diffuse alpha * 2.
+        if (state.vertexProgram != render::VpCar)
+            return AlphaProgram;
         break;
     default:
-        return false;
+        return AlphaProgram;
     }
-    // Alpha = texel alpha * vertex alpha * 2, from programs that pass the vertex colour through.
-    if (state.vertexProgram != render::VpWorld && state.vertexProgram != render::VpWorldProjected
-        && state.vertexProgram != render::VpWorldHeadlight)
-        return false;
-    if (test[0] <= 0.0f || !state.textures[0])
-        return false;
+    if (test[0] <= 0.0f)
+        return AlphaFunction;
+    if (!state.textures[0])
+        return AlphaTexture;
     const uint8_t texel = render::minAlpha(*state.textures[0]);
     if (!texel)
-        return false;
-    const uint8_t vertex = vertexAlpha(record, draw);
-    if (!vertex)
-        return false;
+        return AlphaTexture;
+    float factor;
+    if (state.fragmentProgram == render::FpCar)
+    {
+        float diffuse;
+        if (!own || !effectCarDiffuseAlpha(record.effect, own, shared, &diffuse))
+            return AlphaCarConstants;
+        // Rounded down to a multiple of 1/255.
+        factor = float(int(diffuse * 255.0f)) / 255.0f;
+    }
+    else
+    {
+        const uint8_t vertex = vertexAlpha(record, draw);
+        if (!vertex)
+            return AlphaVertex;
+        factor = float(vertex) / 255.0f;
+    }
     // Two steps below the lowest product for filtering and interpolation rounding.
-    const float lowest = float(texel) / 255.0f * float(vertex) / 255.0f * 2.0f - 2.0f / 255.0f;
-    return test[0] * std::min(lowest, 1.0f) >= test[1];
+    const float lowest = float(texel) / 255.0f * factor * 2.0f - 2.0f / 255.0f;
+    return test[0] * std::min(lowest, 1.0f) >= test[1] ? AlphaElided : AlphaThreshold;
 }
 
 bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::DrawCall& draw)
@@ -308,8 +351,13 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
     state.alphaTest = alphaEnabled && alphaTest(rs[D3DRS_ALPHAFUNC], alphaRef, test) ? 1 : 0;
     // A test that discards nothing: the program without it (the draw becomes opaque to the GPU).
     static const bool s_elide = pf::Config::getBool("alpha_test_elide", true);
-    if (state.alphaTest && s_elide && alphaTestPasses(record, draw, test))
-        state.alphaTest = 0;
+    if (state.alphaTest && (s_elide || pf::perf::enabled()))
+    {
+        const AlphaResult result = alphaTestResult(record, draw, test, own, shared);
+        ++m_alphaCounts[result];
+        if (s_elide && result == AlphaElided)
+            state.alphaTest = 0;
+    }
 
     const render::FragmentProgramInfo& fragment =
         render::fragmentProgram(render::FragmentProgram(state.fragmentProgram));
@@ -491,6 +539,17 @@ void Resolver::resolve(render::Frame& f)
         default:
             pf::fatal("d3d9: frame %u: bad command 0x%08x", f.index, header);
         }
+    }
+    if (pf::perf::enabled() && ++m_alphaFrames == 300)
+    {
+        char line[256];
+        int length = snprintf(line, sizeof(line), "perf: alpha-tested draws per frame:");
+        for (uint32_t i = 0; i < AlphaResultCount && length > 0 && length < int(sizeof(line)); ++i)
+            length += snprintf(line + length, sizeof(line) - length, " %s %.1f", s_alphaNames[i],
+                               double(m_alphaCounts[i]) / m_alphaFrames);
+        pf::logInfo("%s", line);
+        m_alphaFrames = 0;
+        memset(m_alphaCounts, 0, sizeof(m_alphaCounts));
     }
     s_resolved.store(f.index, std::memory_order_release);
 }
