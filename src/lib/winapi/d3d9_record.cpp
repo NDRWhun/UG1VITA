@@ -90,6 +90,8 @@ struct ConstantsKey
     uint8_t     vertexProgram, fragmentProgram, texComponents, alphaTest;
 };
 
+static_assert(sizeof(ConstantsKey) % 4 == 0, "ConstantsKey is whole words");
+
 // Render thread only.
 class Resolver
 {
@@ -241,7 +243,7 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
     key.fragmentProgram = state.fragmentProgram;
     key.texComponents = uint8_t(record.texComponents | (positionT ? 0x80 : 0));
     key.alphaTest = state.alphaTest;
-    if (m_keyValid && memcmp(&key, &m_key, sizeof(key)) == 0)
+    if (m_keyValid && sameWords(&key, &m_key, sizeof(key) / 4))
     {
         draw.vertexConstants = m_vertexConstants;
         draw.fragmentConstants = m_fragmentConstants;

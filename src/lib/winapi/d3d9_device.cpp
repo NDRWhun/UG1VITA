@@ -11,6 +11,8 @@
 namespace win32 { namespace d3d9
 {
 
+static_assert(sizeof(D3DVIEWPORT9) % 4 == 0 && sizeof(render::Viewport) % 4 == 0, "viewports are whole words");
+
 namespace
 {
 
@@ -294,7 +296,8 @@ render::Scene* Device::scene()
     if (m_sceneOpen && f.sceneCount)
     {
         render::Scene& last = f.scenes[f.sceneCount - 1];
-        if (memcmp(&last.target, &target, sizeof(target)) == 0)
+        if (last.target.color == target.color && last.target.face == target.face
+            && last.target.depth == target.depth)
             return &last;
     }
     if (f.sceneCount == f.sceneCapacity)
@@ -320,7 +323,7 @@ render::Scene* Device::scene()
 
 uint16_t Device::viewportIndex(render::Frame& f, const render::Viewport& viewport)
 {
-    if (f.viewportCount && memcmp(&f.viewports[f.viewportCount - 1], &viewport, sizeof(viewport)) == 0)
+    if (f.viewportCount && sameWords(&f.viewports[f.viewportCount - 1], &viewport, sizeof(viewport) / 4))
         return uint16_t(f.viewportCount - 1);
     if (f.viewportCount == f.viewportCapacity)
         return uint16_t(f.viewportCount - 1);
@@ -966,7 +969,7 @@ HRESULT Device::SetTransform(WinApplication* app, x86::CPU& cpu, DWORD state, co
     case D3DTS_TEXTURE0:    t = TransformTexture0; break;
     default:                D3D_LOG_ONCE("d3d9: transform %u ignored", state); return D3D_OK;
     }
-    if (memcmp(&m_state.transforms[t], matrix, sizeof(D3DMATRIX)) == 0)
+    if (sameWords(&m_state.transforms[t], matrix, sizeof(D3DMATRIX) / 4))
         return D3D_OK;
     m_state.transforms[t] = *matrix;
     recordWords(CmdTransform | t << 8, matrix, 16);
@@ -1007,7 +1010,7 @@ HRESULT Device::SetViewport(WinApplication* app, x86::CPU& cpu, const D3DVIEWPOR
     RC_USE(cpu);
     if (!viewport)
         return D3DERR_INVALIDCALL;
-    if (memcmp(&m_state.viewport, viewport, sizeof(D3DVIEWPORT9)) == 0)
+    if (sameWords(&m_state.viewport, viewport, sizeof(D3DVIEWPORT9) / 4))
         return D3D_OK;
     m_state.viewport = *viewport;
     recordWords(CmdViewport, viewport, sizeof(D3DVIEWPORT9) / 4);
