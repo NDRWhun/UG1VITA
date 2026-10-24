@@ -66,6 +66,18 @@ Not final yet.
 Optional settings go in `ux0:data/NFSUG1VITA/nfsug1vita.cfg`, one `key=value` per line. The list of settings is not
 final yet. The log is written to `ux0:data/NFSUG1VITA/nfsug1vita.log`.
 
+Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your
+car; the timing log is on and a `bench: summary` line gives the fps and frame times from the start signal to the
+finish. Off by default; the other keys need `bench=1`:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `bench_track` | 1001 | track number (1001-1008 are the circuits; 1001 is Market St.) |
+| `bench_laps` | 2 | laps, 1-10 |
+| `bench_opponents` | 3 | AI opponents, 0-3 |
+| `bench_seconds` | 0 | ends the measurement after this many seconds (0: at the finish) |
+| `bench_exit` | 0 | 1 quits the game after the summary |
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Known issues

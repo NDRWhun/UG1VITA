@@ -93,6 +93,7 @@ set(NFSU_WINAPI_SOURCES
 set(NFSU_GAME_PORT_SOURCES
   src/nfsu/audio_mixer.cpp
   src/nfsu/bankcode.cpp
+  src/nfsu/bench.cpp
   src/nfsu/coll.cpp
   src/nfsu/cull.cpp
   src/nfsu/mathfn.cpp

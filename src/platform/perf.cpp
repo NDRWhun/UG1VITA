@@ -20,6 +20,7 @@ const uint32_t LogIntervalUs = 5000000;
 
 std::atomic<uint32_t> s_counters[CounterCount];
 std::atomic<Reporter> s_reporter{nullptr};
+std::atomic<FrameObserver> s_frameObserver{nullptr};
 std::atomic<uint32_t> s_preemptCount{0};
 std::atomic<uint32_t> s_preemptSum{0};
 std::atomic<uint32_t> s_preemptMax{0};
@@ -273,6 +274,8 @@ void framePresented(uint32_t drawCalls, uint32_t triangles)
     if (s_lastPresent && time - s_lastPresent > s_frameMax)
         s_frameMax = time - s_lastPresent;
     s_lastPresent = time;
+    if (FrameObserver observer = s_frameObserver.load(std::memory_order_acquire))
+        observer(time);
     const uint32_t elapsed = time - s_intervalStart;
     if (elapsed < LogIntervalUs)
         return;
@@ -317,6 +320,11 @@ void framePresented(uint32_t drawCalls, uint32_t triangles)
 void setReporter(Reporter reporter)
 {
     s_reporter.store(reporter, std::memory_order_release);
+}
+
+void setFrameObserver(FrameObserver observer)
+{
+    s_frameObserver.store(observer, std::memory_order_release);
 }
 
 }}
