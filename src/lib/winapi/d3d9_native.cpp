@@ -15,8 +15,9 @@ namespace win32 { namespace d3d9 { namespace bridge
 namespace
 {
 
-Capture* s_capture = nullptr;
-uint32_t s_paused = 0;
+// Per thread: calls of other threads during a capture run and are not recorded.
+thread_local Capture* s_capture = nullptr;
+thread_local uint32_t s_paused = 0;
 WinApplication* s_app = nullptr;
 MemMap* s_calloutMemory = nullptr;
 reg32 s_calloutTargets[CalloutCount] = {};

@@ -104,10 +104,10 @@ struct Capture
     void clear();
 };
 
-// Starts recording or replaying into capture (one capture at a time); end() stops it.
+// Starts recording or replaying the calling thread's calls into capture; end() stops it.
 void begin(Capture& capture, Capture::Mode mode);
 void end();
-// True while a capture runs.
+// True while a capture runs on the calling thread.
 bool capturing();
 
 // While the guest run of a shadow compare is recorded, a guest call through one of these addresses is recorded as a
