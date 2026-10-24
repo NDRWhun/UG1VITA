@@ -52,6 +52,9 @@ NATIVE_OVERRIDES = [
     0x6734a0,   # _chkstk / _alloca_probe: page-probing stack allocation
     0x647cb0,   # movie YUV420 -> ARGB converter: the guest has only an MMX path
     0x4086b0,   # back buffer size: the display's with widescreen=1, and the 2D mapping the patches below read
+    0x4f5730,   # end of an FE package's rendering: places the HUD packages' objects before the render list is drawn
+    0x514b90,   # FE render object draw: its polygons at the object's place (centred, screen edge or full width)
+    0x58e810,   # track map draw: the whole map at its place
     # D3DX (include/winapi/d3dx9.h): effects without the guest HLSL compiler; the math entries are jumps through
     # the PSGP dispatch table.
     0x5af9e5,   # D3DXCreateEffectPool
@@ -141,7 +144,8 @@ PATCHES = [
     (0x40dcdb, 'a134107000 d1f8 89442400 da7c2400', 'd80d0ccc6c00 da3d38107000 909090'),
     # 0x42F020, camera framing: the vertical extent is 0.75 of the horizontal one instead of height / width.
     (0x42f09e, 'db0538107000 d8ca da3534107000', 'd90508ca6c00 d8ca 909090909090'),
-    # 2D polygons 0x40BEF0: x of the 640x480 space times [0x6D3440] minus [0x6D3444] (sub_4086b0 in native.cpp).
+    # 2D polygons 0x40BEF0: x of the 640x480 space times [0x6D3440] minus [0x6D3444] (sub_4086b0 in native.cpp;
+    # sub_514b90 and sub_58e810 change them around the HUD's draws).
     (0x40bf07, 'd80d14c96c00', 'd80d40346d00'),
     (0x40bf15, 'd825bcc76c00', 'd82544346d00'),
     (0x40bf98, 'd80d14c96c00', 'd80d40346d00'),
