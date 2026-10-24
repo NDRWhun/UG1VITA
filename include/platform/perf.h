@@ -90,6 +90,8 @@ enum Audio
     AudioBankUs,                // their time, called library functions included
     AudioBankInstructions,      // bank instructions interpreted
     AudioBankDecodes,           // bank instructions decoded (not taken from the cache)
+    AudioBankNative,            // bank routine runs translated (nested ones included)
+    AudioBankInterpreted,       // bank routine runs interpreted (nested and shadow ones included)
     AudioOutputSamples,         // samples the SND output module converted to 16 bits
     AudioSaturatedHigh,         // of them saturated to 32767
     AudioSaturatedLow,          // of them saturated to -32768

@@ -1,26 +1,38 @@
 // Machine code inside the game's EA audio banks (Sound/**/*.abk, magic "ABKC"). Each bank entry carries a small
 // x86 routine that the audio library runs from its mixer tick through a callback list (0x00652960). The bank loader
 // 0x0064DF30 patches the routine's call targets to the library's functions and links the bank into the list at
-// 0x00713C74. That code is not part of Speed.exe, so it has no translation: it is interpreted here. The routines
-// of all 106 banks use only the instructions below (integer moves, adds, compares, pushes and calls); anything else
-// traps with its address. Decoded instructions are kept per routine, linked to the instruction that follows, and
-// reused while their bytes are unchanged.
+// 0x00713C74. That code is not part of Speed.exe: the routines of the game's banks are translated at build time
+// (banknative.h), and a routine runs translated while its bytes are the ones it was translated from. Other routines
+// are interpreted. The routines of all 106 banks use only the instructions below (integer moves, adds, compares,
+// pushes and calls); anything else traps with its address. Decoded instructions are kept per routine, linked to
+// the instruction that follows, and reused while their bytes are unchanged. shadow_bank=1 runs each translated
+// routine both ways, call by call, and compares registers, flags, stores and calls.
 
 #include "bankcode.h"
+#include "banknative.h"
 
 #include <lib/foreigncode.h>
 #include <lib/memmap.h>
+#include <platform/config.h>
 #include <platform/log.h>
 #include <platform/perf.h>
 #include <recomp.h>
 #include <x86.h>
 
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace nfsu { namespace bankcode {
+
+void unsupported(x86::reg32 ip, const char* what)
+{
+    pf::logError("bank code: %s at 0x%08x (%02x %02x %02x)", what, ip, rc::ld8(ip), rc::ld8(ip + 1), rc::ld8(ip + 2));
+    x86::guestTrap(ip, "bank code");
+}
 
 namespace {
 
@@ -29,11 +41,30 @@ const x86::reg32 BankNode    = 0x50;
 const x86::reg32 BankMagic   = 0x434B4241;  // "ABKC"
 const int        MaxBanks    = 4096;        // list walk bound
 
-// Bytes [begin, end) of one entry's routine, after relocation.
+struct Settings
+{
+    bool native;
+    bool shadow;
+};
+
+const Settings& settings()
+{
+    static const Settings s = []
+    {
+        const Settings r = { pf::Config::getBool("bank_native", true), pf::Config::getBool("shadow_bank", false) };
+        pf::logInfo("bank code: %u translated routines, %s%s", unsigned(g_translationCount),
+                    r.native ? "native" : "interpreted", r.native && r.shadow ? ", shadow compare" : "");
+        return r;
+    }();
+    return s;
+}
+
+// Bytes [begin, end) of one entry's routine, after relocation, in the bank at bank.
 struct Range
 {
     x86::reg32 begin;
     x86::reg32 end;
+    x86::reg32 bank;
 };
 
 // Header fields: entry count (u16 at +0x0A), first entry (offset at +0x1C). Entry: routine at +0x28, its data
@@ -55,19 +86,13 @@ bool findRoutine(x86::reg32 address, Range& range)
             const x86::reg32 end = rc::ld32(entry + 0x2C);
             if (address >= begin && address < end)
             {
-                range = Range{ begin, end };
+                range = Range{ begin, end, bank };
                 return true;
             }
             entry += 0x3C + 4 * (x86::reg32(rc::ld8(entry + 0x24)) + rc::ld8(entry + 0x27));
         }
     }
     return false;
-}
-
-[[noreturn]] void unsupported(x86::reg32 ip, const char* what)
-{
-    pf::logError("bank code: %s at 0x%08x (%02x %02x %02x)", what, ip, rc::ld8(ip), rc::ld8(ip + 1), rc::ld8(ip + 2));
-    x86::guestTrap(ip, "bank code");
 }
 
 const uint8_t NoRegister = 0xff;
@@ -113,12 +138,20 @@ struct Instruction
     x86::reg32 immediate;   // imm8 sign-extended, or the jump or call target
 };
 
-// Decoded instructions of one routine; a slot per routine byte holds an index into instructions plus 1.
+// Decoded instructions of one routine; a slot per routine byte holds an index into instructions plus 1. native is
+// the translation whose bytes, relocated for nativeBegin and nativeBank (expected), the routine had at its last
+// check; seen holds the routine bytes of the last run that found no translation, in the bank at seenBank.
 struct Routine
 {
     std::vector<uint32_t>    slots;
     std::vector<Instruction> instructions;
     int                      running = 0;   // interpreters inside it (nested or preempted)
+    const Translation*       native = nullptr;
+    x86::reg32               nativeBegin = 0;
+    x86::reg32               nativeBank = 0;
+    std::vector<uint8_t>     expected;
+    std::vector<uint8_t>     seen;
+    x86::reg32               seenBank = 0;
 };
 
 // Routines by begin and end. Only threads holding the execution lock run bank code, so no lock here; a routine
@@ -149,30 +182,52 @@ Routine* routine(const Range& range)
     return result;
 }
 
+// Counts a run inside a routine while it lasts.
+class Running
+{
+public:
+    explicit Running(Routine& routine) : m_routine(routine) { ++m_routine.running; }
+    ~Running() { --m_routine.running; }
+
+private:
+    Running(const Running&) = delete;
+    Running& operator=(const Running&) = delete;
+    Routine& m_routine;
+};
+
+// Runs a routine from one call to the next: segment() stops at a call with the registers and flags in cpu and
+// cpu.ip the target, resume() continues after it. Stores go to record when one is given.
 class Interpreter
 {
 public:
-    Interpreter(win32::WinApplication* app, x86::CPU& cpu, const Range& range, Routine& routine)
-        :   m_app(app)
-        ,   m_cpu(cpu)
+    Interpreter(x86::CPU& cpu, const Range& range, Routine& routine, Recording* record = nullptr)
+        :   m_cpu(cpu)
         ,   m_range(range)
         ,   m_routine(routine)
+        ,   m_record(record)
+        ,   m_running(routine)
     {
-        ++m_routine.running;
-    }
-
-    ~Interpreter()
-    {
-        --m_routine.running;
     }
 
     x86::reg32 executed() const { return m_executed; }
     x86::reg32 decoded() const { return m_decoded; }
+    // Offset from the routine's start of the instruction after the current one.
+    x86::reg32 followingOffset() const
+    {
+        const Instruction& in = m_routine.instructions[m_current];
+        return in.start + in.length - m_range.begin;
+    }
 
-    void run(x86::reg32 ip)
+    void begin(x86::reg32 ip)
     {
         load();
-        uint32_t current = at(ip);
+        m_current = at(ip);
+    }
+
+    // True at a call, false at the return.
+    bool segment()
+    {
+        uint32_t current = m_current;
         for (;;)
         {
             ++m_executed;
@@ -185,7 +240,7 @@ public:
             {
                 const x86::reg32 value = m_r[in.reg];
                 m_r[4] -= 4;
-                rc::st32(m_r[4], value);
+                st32(m_r[4], value);
                 break;
             }
             case OpPop:
@@ -217,7 +272,7 @@ public:
                 compare(read32(in, address(in)), in.immediate);
                 break;
             case OpStoreByte:
-                rc::st8(address(in), x86::reg8(in.immediate));
+                st8(address(in), x86::reg8(in.immediate));
                 break;
             case OpImul:
             {
@@ -241,24 +296,26 @@ public:
                 break;
             }
             case OpCall:
-            {
-                const x86::reg32 target = in.immediate;
                 m_r[4] -= 4;
                 store();
-                m_cpu.ip = target;
-                m_app->dynamic_call(target, m_cpu);
-                if (m_cpu.terminate)
-                    return;
-                load();
-                break;
-            }
+                m_cpu.ip = in.immediate;
+                m_current = current;
+                return true;
             case OpRet:
                 m_r[4] += 4;
                 store();
-                return;
+                m_current = current;
+                return false;
             }
             current = following(current);
         }
+    }
+
+    // After the call: registers from cpu, then the instruction that follows the call.
+    void resume()
+    {
+        load();
+        m_current = following(m_current);
     }
 
 private:
@@ -314,6 +371,22 @@ private:
         m_cpu.flags.zf = r == 0;
         m_cpu.flags.sf = r >> 31;
         m_pending = PendingNone;
+    }
+
+    void st32(x86::reg32 address, x86::reg32 value)
+    {
+        if (m_record)
+            m_record->st32(address, value);
+        else
+            rc::st32(address, value);
+    }
+
+    void st8(x86::reg32 address, x86::reg8 value)
+    {
+        if (m_record)
+            m_record->st8(address, value);
+        else
+            rc::st8(address, value);
     }
 
     // Index of the instruction at address, decoded when not cached; traps outside the routine.
@@ -525,7 +598,7 @@ private:
     void write32(const Instruction& in, x86::reg32 address, x86::reg32 value)
     {
         if (in.memory)
-            rc::st32(address, value);
+            st32(address, value);
         else
             m_r[in.rm] = value;
     }
@@ -548,27 +621,275 @@ private:
         m_flagResult = a - b;
     }
 
-    win32::WinApplication* m_app;
     x86::CPU&              m_cpu;
     Range                  m_range;
     Routine&               m_routine;
+    Recording*             m_record;
+    Running                m_running;
     x86::reg32             m_r[8];          // eax ecx edx ebx esp ebp esi edi, in cpu at calls and on return
     Pending                m_pending = PendingNone;
     x86::reg32             m_flagA = 0;
     x86::reg32             m_flagB = 0;
     x86::reg32             m_flagResult = 0;
+    uint32_t               m_current = 0;   // the instruction segment() continues with, or stopped at
     x86::reg32             m_ip = 0;        // decode position
     x86::reg32             m_start = 0;     // the instruction being decoded
     x86::reg32             m_executed = 0;
     x86::reg32             m_decoded = 0;
 };
 
+void countInterpreted(const Interpreter& interpreter)
+{
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioBankInterpreted, 1);
+        pf::perf::audio(pf::perf::AudioBankInstructions, interpreter.executed());
+        pf::perf::audio(pf::perf::AudioBankDecodes, interpreter.decoded());
+    }
+}
+
+void interpret(win32::WinApplication* app, x86::CPU& cpu, const Range& range, Routine& routine)
+{
+    Interpreter interpreter(cpu, range, routine);
+    interpreter.begin(cpu.ip);
+    while (interpreter.segment())
+    {
+        app->dynamic_call(cpu.ip, cpu);
+        if (cpu.terminate)
+            break;
+        interpreter.resume();
+    }
+    countInterpreted(interpreter);
+}
+
+// ---- translations ----
+
+// The translation's bytes as the loader leaves them for a routine at begin in the bank at bank.
+void relocate(const Translation& t, x86::reg32 begin, x86::reg32 bank, std::vector<uint8_t>& out)
+{
+    out.assign(t.bytes, t.bytes + t.byteCount);
+    for (uint32_t i = 0; i < t.relocationCount; ++i)
+    {
+        const Relocation& r = t.relocations[i];
+        const x86::reg32 value = r.kind == CallTarget ? r.value - (begin + r.offset) - 4 : r.value + bank;
+        memcpy(&out[r.offset], &value, sizeof(value));
+    }
+}
+
+bool spansMatch(const Translation& t, x86::reg32 begin, const std::vector<uint8_t>& expected)
+{
+    for (uint32_t i = 0; i < t.spanCount; ++i)
+    {
+        const Span& s = t.spans[i];
+        if (memcmp(rc::host(begin + s.offset), &expected[s.offset], s.length) != 0)
+            return false;
+    }
+    return true;
+}
+
+// Content hashes of the routines logged as having no translation.
+std::unordered_set<uint32_t> s_untranslated;
+
+void logUntranslated(const Range& range)
+{
+    const x86::reg32 size = range.end - range.begin;
+    uint32_t hash = 2166136261u;
+    for (x86::reg32 i = 0; i < size; ++i)
+        hash = (hash ^ rc::ld8(range.begin + i)) * 16777619u;
+    if (s_untranslated.size() < 256 && s_untranslated.insert(hash).second)
+        pf::logInfo("bank code: routine 0x%08x-0x%08x (%u bytes, FNV-1a %08x) has no translation, interpreted",
+                    unsigned(range.begin), unsigned(range.end), unsigned(size), unsigned(hash));
+}
+
+// The translation of the routine's current bytes, or null.
+const Translation* translation(Routine& routine, const Range& range)
+{
+    if (routine.native && routine.nativeBegin == range.begin && routine.nativeBank == range.bank
+        && spansMatch(*routine.native, range.begin, routine.expected))
+        return routine.native;
+    routine.native = nullptr;
+    const x86::reg32 size = range.end - range.begin;
+    if (!routine.seen.empty() && routine.seenBank == range.bank
+        && memcmp(rc::host(range.begin), routine.seen.data(), size) == 0)
+        return nullptr;
+    for (uint32_t i = 0; i < g_translationCount; ++i)
+    {
+        const Translation& t = g_translations[i];
+        if (t.length != size)
+            continue;
+        relocate(t, range.begin, range.bank, routine.expected);
+        if (spansMatch(t, range.begin, routine.expected))
+        {
+            routine.native = &t;
+            routine.nativeBegin = range.begin;
+            routine.nativeBank = range.bank;
+            routine.seen.clear();
+            return &t;
+        }
+    }
+    routine.seen.assign(rc::host(range.begin), rc::host(range.begin) + size);
+    routine.seenBank = range.bank;
+    logUntranslated(range);
+    return nullptr;
+}
+
+void runNative(win32::WinApplication* app, x86::CPU& cpu, const Translation& t, const Range& range)
+{
+    Direct memory;
+    uint32_t resume = 0;
+    for (;;)
+    {
+        resume = t.run(cpu, memory, range.begin, range.bank, resume);
+        if (resume == Returned)
+            break;
+        app->dynamic_call(cpu.ip, cpu);
+        if (cpu.terminate)
+            break;
+    }
+    if (pf::perf::enabled())
+        pf::perf::audio(pf::perf::AudioBankNative, 1);
+}
+
+// ---- shadow compare ----
+
+struct Shadow
+{
+    uint32_t runs = 0;
+    uint32_t differing = 0;
+    uint32_t logged = 0;
+};
+
+Shadow s_shadow;
+const uint32_t ShadowSummaryRuns = 5000;
+const uint32_t ShadowDetails = 16;
+
+// The first difference between a segment run translated (cpu native, stores of native) and interpreted (cpu, stores
+// of guest), written to text; false when there is none.
+bool segmentDiffers(const x86::CPU& native, const x86::CPU& guest, const Recording& nativeStores,
+                    const Recording& guestStores, char* text, size_t size)
+{
+    static const char* const names[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
+    const x86::reg32 n[] = { native.eax, native.ecx, native.edx, native.ebx, native.esp, native.ebp, native.esi,
+                             native.edi };
+    const x86::reg32 g[] = { guest.eax, guest.ecx, guest.edx, guest.ebx, guest.esp, guest.ebp, guest.esi,
+                             guest.edi };
+    for (int i = 0; i < 8; ++i)
+    {
+        if (n[i] != g[i])
+        {
+            snprintf(text, size, "%s native 0x%08x interpreted 0x%08x", names[i], unsigned(n[i]), unsigned(g[i]));
+            return true;
+        }
+    }
+    if (native.flags.eflags != guest.flags.eflags)
+    {
+        snprintf(text, size, "eflags native 0x%08x interpreted 0x%08x", unsigned(native.flags.eflags),
+                 unsigned(guest.flags.eflags));
+        return true;
+    }
+    if (native.ip != guest.ip)
+    {
+        snprintf(text, size, "ip native 0x%08x interpreted 0x%08x", unsigned(native.ip), unsigned(guest.ip));
+        return true;
+    }
+    const size_t count = nativeStores.stores.size() < guestStores.stores.size() ? nativeStores.stores.size()
+                                                                                 : guestStores.stores.size();
+    for (size_t i = 0; i < count; ++i)
+    {
+        const Recording::Store& a = nativeStores.stores[i];
+        const Recording::Store& b = guestStores.stores[i];
+        if (a.address != b.address || a.size != b.size || a.value != b.value)
+        {
+            snprintf(text, size, "store %u native [0x%08x]:%u = 0x%08x interpreted [0x%08x]:%u = 0x%08x",
+                     unsigned(i), unsigned(a.address), unsigned(a.size), unsigned(a.value), unsigned(b.address),
+                     unsigned(b.size), unsigned(b.value));
+            return true;
+        }
+    }
+    if (nativeStores.stores.size() != guestStores.stores.size())
+    {
+        snprintf(text, size, "stores native %u interpreted %u", unsigned(nativeStores.stores.size()),
+                 unsigned(guestStores.stores.size()));
+        return true;
+    }
+    return false;
+}
+
+// Each segment runs translated from the state before it, its stores undone, then interpreted; the interpreted run
+// is kept. After a difference the rest of the run is interpreted only.
+void runShadow(win32::WinApplication* app, x86::CPU& cpu, const Translation& t, const Range& range,
+               Routine& routine)
+{
+    Shadow& s = s_shadow;
+    Recording nativeStores, guestStores;
+    Interpreter interpreter(cpu, range, routine, &guestStores);
+    bool compare = true;
+    uint32_t resume = 0;
+    char text[160] = {};
+    interpreter.begin(cpu.ip);
+    for (uint32_t segment = 0; ; ++segment)
+    {
+        bool differs = false;
+        x86::CPU native;
+        if (compare)
+        {
+            const x86::CPU before = cpu;
+            resume = t.record(cpu, nativeStores, range.begin, range.bank, resume);
+            native = cpu;
+            nativeStores.undo();
+            cpu = before;
+        }
+        guestStores.stores.clear();
+        const bool called = interpreter.segment();
+        if (compare)
+        {
+            if (called != (resume != Returned))
+            {
+                snprintf(text, sizeof(text), "native %s, interpreted %s", resume == Returned ? "returned" : "called",
+                         called ? "called" : "returned");
+                differs = true;
+            }
+            else if (called && t.resumeOffsets[resume] != interpreter.followingOffset())
+            {
+                snprintf(text, sizeof(text), "call returns to +0x%x native, +0x%x interpreted",
+                         unsigned(t.resumeOffsets[resume]), unsigned(interpreter.followingOffset()));
+                differs = true;
+            }
+            else
+            {
+                differs = segmentDiffers(native, cpu, nativeStores, guestStores, text, sizeof(text));
+            }
+            nativeStores.stores.clear();
+            if (differs)
+            {
+                compare = false;
+                ++s.differing;
+                if (s.logged < ShadowDetails)
+                {
+                    ++s.logged;
+                    pf::logInfo("shadow_bank: run %u %s at 0x%08x segment %u: %s", unsigned(s.runs + 1), t.name,
+                                unsigned(range.begin), unsigned(segment), text);
+                }
+            }
+        }
+        if (!called)
+            break;
+        app->dynamic_call(cpu.ip, cpu);
+        if (cpu.terminate)
+            break;
+        interpreter.resume();
+    }
+    countInterpreted(interpreter);
+    if (++s.runs % ShadowSummaryRuns == 0)
+        pf::logInfo("shadow_bank: %u runs compared, %u differ", unsigned(s.runs), unsigned(s.differing));
+}
+
 // Bank routines running on the thread holding the execution lock (perf_log times the outermost one).
 int s_depth = 0;
 
 // The range resolve found for the address dynamic_call is about to run.
 x86::reg32 s_resolvedAddress = 0;
-Range      s_resolvedRange = { 0, 0 };
+Range      s_resolvedRange = { 0, 0, 0 };
 
 // Entered like a translated function: cpu.ip is the routine, cpu.esp points at the return address slot.
 void runRoutine(win32::WinApplication* app, x86::CPU& cpu)
@@ -583,25 +904,33 @@ void runRoutine(win32::WinApplication* app, x86::CPU& cpu)
     const bool timed = pf::perf::enabled() && s_depth == 0;
     const uint32_t start = timed ? pf::perf::now() : 0;
     ++s_depth;
+    const Settings& options = settings();
     Routine* cached = routine(range);
-    std::unique_ptr<Routine> uncached;
-    if (!cached)
+    const Translation* native = cached && options.native && cpu.ip == range.begin ? translation(*cached, range)
+                                                                                  : nullptr;
+    if (native && options.shadow)
     {
-        uncached.reset(new Routine);
-        uncached->slots.assign(range.end - range.begin, 0);
+        runShadow(app, cpu, *native, range, *cached);
     }
-    Interpreter interpreter(app, cpu, range, cached ? *cached : *uncached);
-    interpreter.run(cpu.ip);
+    else if (native)
+    {
+        runNative(app, cpu, *native, range);
+    }
+    else if (cached)
+    {
+        interpret(app, cpu, range, *cached);
+    }
+    else
+    {
+        Routine uncached;
+        uncached.slots.assign(range.end - range.begin, 0);
+        interpret(app, cpu, range, uncached);
+    }
     --s_depth;
     if (timed)
     {
         pf::perf::audio(pf::perf::AudioBankRuns, 1);
         pf::perf::audio(pf::perf::AudioBankUs, pf::perf::now() - start);
-    }
-    if (pf::perf::enabled())
-    {
-        pf::perf::audio(pf::perf::AudioBankInstructions, interpreter.executed());
-        pf::perf::audio(pf::perf::AudioBankDecodes, interpreter.decoded());
     }
 }
 

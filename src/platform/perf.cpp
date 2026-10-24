@@ -226,7 +226,8 @@ void logHolders(uint32_t elapsed, uint32_t frames)
 }
 
 // Fifth log line, per interval: EA SND voice renders without and with the execution lock (count, ms per frame,
-// why the lock was kept), the bank routines (runs, ms per frame, instructions, decodes) and the SND output
+// why the lock was kept), the bank routines (runs, ms per frame, translated and interpreted runs, instructions
+// interpreted, decodes) and the SND output
 // module's 16-bit saturation.
 void logAudio(uint32_t frames)
 {
@@ -250,10 +251,11 @@ void logAudio(uint32_t frames)
                     unsigned(locked.address.load(std::memory_order_relaxed)), unsigned(count));
         first = false;
     }
-    line.append(") | bank code %u runs %.2f ms %u instructions %u decodes | output %u samples saturated %u high"
-                " %u low", unsigned(a[AudioBankRuns]), msPerFrame(a[AudioBankUs], frames),
-                unsigned(a[AudioBankInstructions]), unsigned(a[AudioBankDecodes]), unsigned(a[AudioOutputSamples]),
-                unsigned(a[AudioSaturatedHigh]), unsigned(a[AudioSaturatedLow]));
+    line.append(") | bank code %u runs %.2f ms (%u native %u interpreted) %u instructions %u decodes | output %u"
+                " samples saturated %u high %u low", unsigned(a[AudioBankRuns]), msPerFrame(a[AudioBankUs], frames),
+                unsigned(a[AudioBankNative]), unsigned(a[AudioBankInterpreted]), unsigned(a[AudioBankInstructions]),
+                unsigned(a[AudioBankDecodes]), unsigned(a[AudioOutputSamples]), unsigned(a[AudioSaturatedHigh]),
+                unsigned(a[AudioSaturatedLow]));
     logInfo("%s", line.text);
 }
 
