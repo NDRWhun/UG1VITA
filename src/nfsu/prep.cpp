@@ -4,6 +4,7 @@
 // body.
 
 #include "prep.h"
+#include "flares.h"
 #include "mathfn.h"
 
 #include <platform/config.h>
@@ -370,6 +371,7 @@ void frame(win32::WinApplication* app, x86::CPU& cpu)
                 math.calls / s_frames, math.ms / s_frames);
     if (s.native && s.shadow)
         pf::logInfo("shadow_prep: %u calls compared, %u differ", unsigned(s_shadow.calls), unsigned(s_shadow.differing));
+    flares::report(s_frames);
     s_perf = PerfSums();
     s_frames = 0;
 }

@@ -13,8 +13,8 @@ namespace nfsu { namespace prep
 // or return value that differs.
 void stuffScenery(win32::WinApplication* app, x86::CPU& cpu);
 
-// Guest 0x40a580, the frame render: runs the guest code and logs the render-preparation and math-helper perf lines
-// (perf builds, every ReportFrames frames).
+// Guest 0x40a580, the frame render: runs the guest code and logs the render-preparation, math-helper and flare perf
+// lines (perf builds, every ReportFrames frames).
 void frame(win32::WinApplication* app, x86::CPU& cpu);
 
 }}
