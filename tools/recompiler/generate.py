@@ -120,6 +120,11 @@ NATIVE_OVERRIDES = [
     0x40fae0,   # material: fixed-function material or the diffuse, specular and envmap terms
 ]
 
+# Byte patches applied to the code before discovery: (address, original bytes, new bytes) in hex. Generation stops
+# when the executable's bytes differ from the original ones.
+PATCHES = [
+]
+
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
 THREAD_SEGMENTS = []
 
@@ -164,6 +169,19 @@ def check_binary(directory):
     if sha256 != EXE_SHA256:
         sys.exit('%s: SHA-256 %s, expected %s' % (path, sha256, EXE_SHA256))
     return pe_image.Image(path)
+
+
+def apply_patches(image):
+    for address, original, patched in PATCHES:
+        original, patched = bytes.fromhex(original), bytes.fromhex(patched)
+        s = image.section_of(address)
+        if s is None or len(original) != len(patched):
+            sys.exit('patch 0x%x: no section or lengths differ' % address)
+        offset = address - s.address
+        if s.data[offset:offset + len(original)] != original:
+            sys.exit('patch 0x%x: bytes %s, expected %s'
+                     % (address, s.data[offset:offset + len(original)].hex(), original.hex()))
+        s.data = s.data[:offset] + patched + s.data[offset + len(patched):]
 
 
 def simd_range(address):
@@ -295,8 +313,9 @@ def main():
     args = parser.parse_args()
     started = time.time()
     image = check_binary(args.binaries)
-    print('%s: SHA-256 ok, %d sections, %d relocations, %d imports'
-          % (EXE_NAME, len(image.sections), len(image.relocations), len(image.imports)))
+    apply_patches(image)
+    print('%s: SHA-256 ok, %d sections, %d relocations, %d imports, %d patches'
+          % (EXE_NAME, len(image.sections), len(image.relocations), len(image.imports), len(PATCHES)))
     os.makedirs(args.out, exist_ok=True)
 
     cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
