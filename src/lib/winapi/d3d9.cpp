@@ -2,6 +2,7 @@
 
 #include <winapi/d3d9.h>
 #include <winapi/d3d9_internal.h>
+#include <winapi/d3d9_native.h>
 #include <lib/fpucontrol.h>
 #include <platform/gxm.h>
 #include <platform/log.h>
@@ -232,20 +233,20 @@ const MethodEntry s_device[] = {
     D3D_METHOD(Device, BeginScene),
     D3D_METHOD(Device, EndScene),
     D3D_METHOD(Device, Clear),
-    D3D_METHOD(Device, SetTransform),
+    D3D_GUEST(SetTransform),
     D3D_METHOD(Device, GetTransform),
     D3D_METHOD(Device, MultiplyTransform),
     D3D_METHOD(Device, SetViewport),
     D3D_METHOD(Device, GetViewport),
-    D3D_METHOD(Device, SetMaterial),
+    D3D_GUEST(SetMaterial),
     D3D_METHOD(Device, GetMaterial),
-    D3D_METHOD(Device, SetLight),
+    D3D_GUEST(SetLight),
     D3D_METHOD(Device, GetLight),
-    D3D_METHOD(Device, LightEnable),
+    D3D_GUEST(LightEnable),
     D3D_METHOD(Device, GetLightEnable),
     D3D_METHOD(Device, SetClipPlane),
     D3D_TRAP(GetClipPlane),
-    D3D_METHOD(Device, SetRenderState),
+    D3D_GUEST(SetRenderState),
     D3D_METHOD(Device, GetRenderState),
     D3D_TRAP(CreateStateBlock),
     D3D_TRAP(BeginStateBlock),
@@ -253,7 +254,7 @@ const MethodEntry s_device[] = {
     D3D_TRAP(SetClipStatus),
     D3D_TRAP(GetClipStatus),
     D3D_METHOD(Device, GetTexture),
-    D3D_METHOD(Device, SetTexture),
+    D3D_GUEST(SetTexture),
     D3D_METHOD(Device, GetTextureStageState),
     D3D_METHOD(Device, SetTextureStageState),
     D3D_METHOD(Device, GetSamplerState),
@@ -275,7 +276,7 @@ const MethodEntry s_device[] = {
     D3D_METHOD(Device, DrawIndexedPrimitiveUP),
     D3D_TRAP(ProcessVertices),
     D3D_METHOD(Device, CreateVertexDeclaration),
-    D3D_METHOD(Device, SetVertexDeclaration),
+    D3D_GUEST(SetVertexDeclaration),
     D3D_METHOD(Device, GetVertexDeclaration),
     D3D_METHOD(Device, SetFVF),
     D3D_METHOD(Device, GetFVF),
@@ -394,6 +395,7 @@ void initInterfaces(WinApplication* app)
     D3D_BUILD(KindIndexBuffer, "IDirect3DIndexBuffer9", s_indexBuffer);
     D3D_BUILD(KindVertexDeclaration, "IDirect3DVertexDeclaration9", s_vertexDeclaration);
     initEffectInterfaces(app);
+    bridge::init(app);
 }
 
 // ---- IDirect3D9 ----------------------------------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 
 #include <winapi/d3dx9.h>
 #include <winapi/d3d9_internal.h>
+#include <winapi/d3d9_native.h>
 #include <platform/log.h>
 #include <platform/sha256.h>
 #include <algorithm>
@@ -958,21 +959,21 @@ const MethodEntry s_effect[] = {
     D3D_METHOD(Effect, GetTechniqueByName), D3D_METHOD(Effect, GetPass), D3D_TRAP(GetPassByName),
     D3D_TRAP(GetFunction), D3D_TRAP(GetFunctionByName), D3D_TRAP(GetAnnotation), D3D_TRAP(GetAnnotationByName),
     D3D_METHOD(Effect, SetValue), D3D_METHOD(Effect, GetValue), D3D_METHOD(Effect, SetBool), D3D_TRAP(GetBool),
-    D3D_TRAP(SetBoolArray), D3D_TRAP(GetBoolArray), D3D_METHOD(Effect, SetInt), D3D_METHOD(Effect, GetInt),
-    D3D_TRAP(SetIntArray), D3D_TRAP(GetIntArray), D3D_METHOD(Effect, SetFloat), D3D_METHOD(Effect, GetFloat),
-    D3D_METHOD(Effect, SetFloatArray), D3D_TRAP(GetFloatArray), D3D_METHOD(Effect, SetVector),
-    D3D_METHOD(Effect, GetVector), D3D_METHOD(Effect, SetVectorArray), D3D_TRAP(GetVectorArray),
-    D3D_METHOD(Effect, SetMatrix), D3D_METHOD(Effect, GetMatrix), D3D_METHOD(Effect, SetMatrixArray),
+    D3D_TRAP(SetBoolArray), D3D_TRAP(GetBoolArray), D3D_GUEST_NAMED("SetInt", EffectSetInt), D3D_METHOD(Effect, GetInt),
+    D3D_TRAP(SetIntArray), D3D_TRAP(GetIntArray), D3D_GUEST_NAMED("SetFloat", EffectSetFloat), D3D_METHOD(Effect, GetFloat),
+    D3D_METHOD(Effect, SetFloatArray), D3D_TRAP(GetFloatArray), D3D_GUEST_NAMED("SetVector", EffectSetVector),
+    D3D_METHOD(Effect, GetVector), D3D_GUEST_NAMED("SetVectorArray", EffectSetVectorArray), D3D_TRAP(GetVectorArray),
+    D3D_GUEST_NAMED("SetMatrix", EffectSetMatrix), D3D_METHOD(Effect, GetMatrix), D3D_GUEST_NAMED("SetMatrixArray", EffectSetMatrixArray),
     D3D_TRAP(GetMatrixArray), D3D_TRAP(SetMatrixPointerArray), D3D_TRAP(GetMatrixPointerArray),
     D3D_METHOD(Effect, SetMatrixTranspose), D3D_TRAP(GetMatrixTranspose), D3D_METHOD(Effect, SetMatrixTransposeArray),
     D3D_TRAP(GetMatrixTransposeArray), D3D_TRAP(SetMatrixTransposePointerArray),
     D3D_TRAP(GetMatrixTransposePointerArray), D3D_TRAP(SetString), D3D_TRAP(GetString),
-    D3D_METHOD(Effect, SetTexture), D3D_METHOD(Effect, GetTexture), D3D_TRAP(SetPixelShader),
+    D3D_GUEST_NAMED("SetTexture", EffectSetTexture), D3D_METHOD(Effect, GetTexture), D3D_TRAP(SetPixelShader),
     D3D_TRAP(GetPixelShader), D3D_TRAP(SetVertexShader), D3D_TRAP(GetVertexShader),
     D3D_METHOD(Effect, GetPool), D3D_METHOD(Effect, SetTechnique), D3D_METHOD(Effect, GetCurrentTechnique),
     D3D_METHOD(Effect, ValidateTechnique), D3D_METHOD(Effect, FindNextValidTechnique),
-    D3D_METHOD(Effect, IsParameterUsed), D3D_METHOD(Effect, Begin), D3D_METHOD(Effect, Pass),
-    D3D_METHOD(Effect, End), D3D_METHOD(Effect, GetDevice), D3D_METHOD(Effect, OnLostDevice),
+    D3D_METHOD(Effect, IsParameterUsed), D3D_GUEST_NAMED("Begin", EffectBegin), D3D_GUEST_NAMED("Pass", EffectPass),
+    D3D_GUEST_NAMED("End", EffectEnd), D3D_METHOD(Effect, GetDevice), D3D_METHOD(Effect, OnLostDevice),
     D3D_METHOD(Effect, OnResetDevice), D3D_TRAP(Slot70), D3D_TRAP(Slot71), D3D_TRAP(Slot72), D3D_TRAP(Slot73),
     D3D_TRAP(Slot74), D3D_TRAP(Slot75),
 };
@@ -990,6 +991,75 @@ void initEffectInterfaces(WinApplication* app)
     buildInterface(app, KindEffect, "ID3DXEffect", s_effect, sizeof(s_effect) / sizeof(s_effect[0]));
     buildInterface(app, KindEffectPool, "ID3DXEffectPool", s_pool, sizeof(s_pool) / sizeof(s_pool[0]));
 }
+
+// ---- Direct calls (d3d9_native.h) ----------------------------------------------------------------------------------
+
+namespace bridge { namespace effect
+{
+
+namespace
+{
+
+inline Effect* object(reg32 guest)
+{
+    return static_cast<Effect*>(lookup(guest));
+}
+
+}
+
+HRESULT setInt(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, x86::sreg32 value)
+{
+    return object(effect)->SetInt(app, cpu, handle, value);
+}
+
+HRESULT setFloat(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, float value)
+{
+    return object(effect)->SetFloat(app, cpu, handle, value);
+}
+
+HRESULT setVector(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* vector)
+{
+    return object(effect)->SetVector(app, cpu, handle, vector);
+}
+
+HRESULT setVectorArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* vectors,
+                       UINT count)
+{
+    return object(effect)->SetVectorArray(app, cpu, handle, vectors, count);
+}
+
+HRESULT setMatrix(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrix)
+{
+    return object(effect)->SetMatrix(app, cpu, handle, matrix);
+}
+
+HRESULT setMatrixArray(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, const float* matrices,
+                       UINT count)
+{
+    return object(effect)->SetMatrixArray(app, cpu, handle, matrices, count);
+}
+
+HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 effect, reg32 handle, reg32 texture)
+{
+    return object(effect)->SetTexture(app, cpu, handle, lookup(texture));
+}
+
+HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags)
+{
+    return object(effect)->Begin(app, cpu, passes, flags);
+}
+
+HRESULT pass(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass)
+{
+    return object(effect)->Pass(app, cpu, pass);
+}
+
+HRESULT end(WinApplication* app, x86::CPU& cpu, reg32 effect)
+{
+    return object(effect)->End(app, cpu);
+}
+
+}}
 
 // ---- Entry points --------------------------------------------------------------------------------------------------
 
@@ -1074,8 +1144,7 @@ x86::reg32 vecTransform(x86::reg32 out, const float v[4], x86::reg32 m)
 {
     float mm[16], r[4];
     memcpy(mm, hostFloats(m), 64);
-    for (int j = 0; j < 4; ++j)
-        r[j] = v[0] * mm[j] + v[1] * mm[4 + j] + v[2] * mm[8 + j] + v[3] * mm[12 + j];
+    bridge::vec4Transform(v, mm, r);
     store(out, r, 4);
     return out;
 }
