@@ -1074,8 +1074,7 @@ x86::reg32 vecTransform(x86::reg32 out, const float v[4], x86::reg32 m)
 {
     float mm[16], r[4];
     memcpy(mm, hostFloats(m), 64);
-    for (int j = 0; j < 4; ++j)
-        r[j] = v[0] * mm[j] + v[1] * mm[4 + j] + v[2] * mm[8 + j] + v[3] * mm[12 + j];
+    d3dx9::transform(v, mm, r);
     store(out, r, 4);
     return out;
 }
@@ -1148,6 +1147,12 @@ void Vec4Transform(WinApplication* app, x86::CPU& cpu)
 void MatrixTranspose(WinApplication* app, x86::CPU& cpu)
 {
     Wrapper<decltype(&d3d9::matrixTranspose), &d3d9::matrixTranspose>::stdcall(app, cpu);
+}
+
+void transform(const float v[4], const float m[16], float r[4])
+{
+    for (int j = 0; j < 4; ++j)
+        r[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j];
 }
 
 }}
