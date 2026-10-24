@@ -5,6 +5,7 @@
 // registers and stack arguments the guest gives them.
 
 #include "draw.h"
+#include "retflags.h"
 #include "phases.h"
 
 #include <winapi/d3d9_native.h>
@@ -844,15 +845,16 @@ void submitNative(WinApplication* app, x86::CPU& cpu)
 
 // ---- Shadow compares ----
 
+// One per function: the submit compare runs the enqueue compares inside its guest run.
 struct Shadow
 {
     bridge::Capture capture;
     std::vector<Span> spans;
     std::vector<reg8> before, guestAfter, nativeAfter;
-    uint32_t logged = 0;
 };
 
-Shadow s_shadow;
+Shadow s_enqueueShadow, s_submitShadow, s_flushShadow;
+uint32_t s_logged = 0;
 
 void report(const char* what, const x86::CPU& entry, bool same, const char* text)
 {
@@ -860,9 +862,9 @@ void report(const char* what, const x86::CPU& entry, bool same, const char* text
     if (same)
         return;
     ++s_usage.differing;
-    if (s_shadow.logged < ShadowLogLimit)
+    if (s_logged < ShadowLogLimit)
     {
-        ++s_shadow.logged;
+        ++s_logged;
         pf::logInfo("shadow_draw: %s call %u (esp 0x%08x): %s", what, unsigned(s_usage.compared),
                     unsigned(entry.esp), text);
     }
@@ -967,13 +969,13 @@ void submitSpans(const x86::CPU& cpu, std::vector<Span>& spans)
 struct Compare
 {
     const char* what;
+    Shadow& s;
     x86::CPU entry, guest, native;
 
-    Compare(const char* name, const x86::CPU& cpu) : what(name), entry(cpu) {}
+    Compare(const char* name, Shadow& shadow, const x86::CPU& cpu) : what(name), s(shadow), entry(cpu) {}
 
     void runNative(WinApplication* app, x86::CPU& cpu, void (*run)(WinApplication*, x86::CPU&), bool replay)
     {
-        Shadow& s = s_shadow;
         guest = cpu;
         snapshot(s.spans, s.guestAfter);
         restoreSpans(s.spans, s.before);
@@ -995,14 +997,14 @@ struct Compare
 
 void enqueueShadow(WinApplication* app, x86::CPU& cpu)
 {
-    Shadow& s = s_shadow;
+    Shadow& s = s_enqueueShadow;
     if (!enqueueSpans(cpu, s.spans))
     {
         ++s_usage.skipped;
         sub_40f1e0_guest(app, cpu);
         return;
     }
-    Compare c("enqueue 0x40f1e0", cpu);
+    Compare c("enqueue 0x40f1e0", s, cpu);
     snapshot(s.spans, s.before);
     sub_40f1e0_guest(app, cpu);
     if (cpu.terminate)
@@ -1011,16 +1013,17 @@ void enqueueShadow(WinApplication* app, x86::CPU& cpu)
     c.runNative(app, cpu, &enqueueNative, false);
     s_usage.enqueues = enqueues;
     char text[200] = {};
-    const bool same = sameState(RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, 0, c.guest, c.native, text, sizeof(text))
+    const bool same = sameState(RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, retflags::of(0x40f1e0), c.guest,
+                                c.native, text, sizeof(text))
                       && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     report(c.what, c.entry, same, text);
 }
 
 void submitShadow(WinApplication* app, x86::CPU& cpu)
 {
-    Shadow& s = s_shadow;
+    Shadow& s = s_submitShadow;
     submitSpans(cpu, s.spans);
-    Compare c("submit 0x40c910", cpu);
+    Compare c("submit 0x40c910", s, cpu);
     snapshot(s.spans, s.before);
     std::vector<EnqueueCall> calls;
     s_recording = &calls;
@@ -1045,17 +1048,17 @@ void submitShadow(WinApplication* app, x86::CPU& cpu)
         snprintf(text, sizeof(text), "enqueues guest %u native %u", unsigned(replay.calls.size()),
                  unsigned(replay.next));
     }
-    same = same && sameState(RegEcx | RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, 0, c.guest, c.native, text,
-                             sizeof(text))
+    same = same && sameState(RegEcx | RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, retflags::of(0x40c910), c.guest,
+                             c.native, text, sizeof(text))
            && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     report(c.what, c.entry, same, text);
 }
 
 void flushShadow(WinApplication* app, x86::CPU& cpu)
 {
-    Shadow& s = s_shadow;
+    Shadow& s = s_flushShadow;
     flushSpans(s.spans);
-    Compare c("flush 0x40ed50", cpu);
+    Compare c("flush 0x40ed50", s, cpu);
     snapshot(s.spans, s.before);
 
     // The effect group functions go through the callouts while the guest code runs.
@@ -1097,7 +1100,7 @@ void flushShadow(WinApplication* app, x86::CPU& cpu)
     s_usage.nodes = counts.nodes;
     char text[200] = {};
     const bool same = sameCalls(s.capture, text, sizeof(text))
-                      && sameState(0xff & ~RegEbp, 0, c.guest, c.native, text, sizeof(text))
+                      && sameState(0xff & ~RegEbp, retflags::of(0x40ed50), c.guest, c.native, text, sizeof(text))
                       && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
     report(c.what, c.entry, same, text);
 }
