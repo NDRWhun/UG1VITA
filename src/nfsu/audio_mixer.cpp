@@ -39,10 +39,10 @@ namespace
 // Thread block (fs) of the guest thread in the render loop without the execution lock, 0 while there is none. Only
 // that thread stores it; a thread compares it with its own block.
 std::atomic<x86::reg32> s_thread{0};
-// The execution lock that thread gave up, and whether it took it again for the rest of the loop; only that thread
-// uses them.
+// The execution lock that thread gave up, and whether SND state may have changed under the lock since the handle
+// audit; only that thread uses them.
 win32::Mutex* s_lock = nullptr;
-bool s_lockedRest = false;
+bool s_changed = true;
 
 void setLock(win32::WinApplication* app, const x86::CPU& cpu, win32::Mutex* lock)
 {
@@ -54,16 +54,6 @@ void setLock(win32::WinApplication* app, const x86::CPU& cpu, win32::Mutex* lock
 bool unlocked(const x86::CPU& cpu)
 {
     return s_thread.load(std::memory_order_relaxed) == cpu.efs;
-}
-
-void lockRest(win32::WinApplication* app, const x86::CPU& cpu)
-{
-    if (!unlocked(cpu))
-        return;
-    s_thread.store(0, std::memory_order_relaxed);
-    setLock(app, cpu, s_lock);
-    s_lockedRest = true;
-    app->lockContext(cpu);
 }
 
 Locked::Locked(win32::WinApplication* app, const x86::CPU& cpu)
@@ -84,6 +74,7 @@ Locked::~Locked()
         return;
     m_app->unlockContext(m_cpu);
     setLock(m_app, m_cpu, nullptr);
+    s_changed = true;
     s_thread.store(m_cpu.efs, std::memory_order_relaxed);
 }
 
@@ -310,8 +301,9 @@ bool renderAudited(Audit& audit)
 //
 // The audit checks every handle that is not free and the handles those list: software kind, and every driver
 // function either null (a call of it fails as it does with the lock) or the software voice's. Only a sound start
-// (driver set up, voices created) changes what it checks, and a start keeps the lock; the stops, parameter changes
-// and module inserts the other calls make keep it true. So it is made once per run of the render loop.
+// (driver set up, voices created) changes what it checks, and a start runs with the lock; the stops, parameter
+// changes and module inserts the other calls make keep it true. So it is made once per run of the render loop and
+// again after each call that took the lock (mixer::Locked).
 
 const reg32 Handles         = 0x713f48;     // 0x8C bytes each: +0 id, +4 listed handles, +0x23 their count,
                                             // +0x24 kind flags, +0x69 state (0 = free)
@@ -434,6 +426,11 @@ Audit s_driverAudit;
 
 bool driversAudited(Audit& audit)
 {
+    if (mixer::s_changed)
+    {
+        mixer::s_changed = false;
+        s_driverState = DriversUnchecked;
+    }
     if (s_driverState == DriversUnchecked)
         s_driverState = driversChecked(s_driverAudit) ? DriversPassed : DriversFailed;
     if (s_driverState == DriversFailed)
@@ -453,10 +450,16 @@ bool tickAudited(Audit& audit)
 // ---- Sound calls of bank routines -----------------------------------------------------------------------------
 
 // 0x64D860 (instance): moves the instance's sound to the target state [+0x18] (clamped to 0..2) from [+0xC] through
-// the handlers of sound kind [+0x10] (the tables at 0x6E9A98..0x6E9AD8 hold kind 0 only; -1 is none): 0 stops it,
-// 2 pauses it, 1 starts it when there is none (0x6E9A98: voices and a driver are set up) or resumes it, and while it
-// stays at 1 the parameters whose value changed go to the setters at 0x6E9A38 by their kind [+0x1C + 0xC n], and
-// with [+0xF] set the handle's play position is read (driver +0x108: the position query of its first voice).
+// the handlers of sound kind [+0x10] (tables of 4 kinds from 0x6E9A98 to 0x6E9AD8; -1 is none): 0 stops it, 2 pauses
+// it, 1 starts it when there is none (0x6E9A98: voices and a driver, or a stream, are set up) or resumes it, and
+// while it stays at 1 its parameters go to the kind's update. Kind 0 is a sample: its update passes the parameters
+// whose value changed to the setters at 0x6E9A38 by their kind [+0x1C + 0xC n], and with [+0xF] set reads the
+// handle's play position (driver +0x108: the position query of its first voice). Kinds 1 and 2 are streams (handlers
+// set by 0x64F320): their pause 0x64EDF0, resume 0x64EE30 and update 0x64EEF0 (parameters to the setters at
+// 0x6E9B98) reach SND state and the stream's handles only; their stop 0x64F290 reaches the game's stream reader, so
+// a stop runs with the lock, as do starts of every kind.
+const x86::sreg32 StreamKinds = 2;
+const reg32 StreamSetters = 8;
 bool positionAudited(reg32 instance, Audit& audit)
 {
     const reg32 id = rc::ld32(instance + 8);
@@ -483,23 +486,26 @@ bool soundAudited(reg32 instance, Audit& audit)
     const x86::sreg32 state = wanted < 0 ? 0 : wanted > 2 ? 2 : wanted;
     const x86::sreg32 current = x86::sreg8(rc::ld8(instance + 0xc));
     const x86::sreg32 sound = x86::sreg8(rc::ld8(instance + 0x10));
-    if (sound > 0)
+    if (sound > StreamKinds)
         return audit.fail("sound kind", reg32(sound));
     if (state != current && state == 1 && sound < 0 && !(current == 2 && rc::ld8(instance + 0xd) == 1))
         return audit.fail("sound start", instance);
-    if (state == 1 && sound == 0)
+    if (state != current && state == 0 && sound > 0)
+        return audit.fail("stream stop", instance);
+    if (state == 1 && sound >= 0)
     {
-        // Setter kinds 9..11 are the empty function 0x40A880; past them the table holds other handlers.
+        // Sample setter kinds 9..11 are the empty function 0x40A880; past them the table holds other handlers.
+        const reg32 setters = sound == 0 ? 12 : StreamSetters;
         const reg32 parameters = rc::ld8(instance + 0xe);
         for (reg32 k = 0; k < parameters; ++k)
         {
             const reg32 kind = rc::ld8(instance + 0x1c + 0xc * k);
-            if (kind > 11)
+            if (kind >= setters)
                 return audit.fail("parameter kind", kind);
         }
         if (!driversAudited(audit))
             return false;
-        return !rc::ld8(instance + 0xf) || positionAudited(instance, audit);
+        return sound != 0 || !rc::ld8(instance + 0xf) || positionAudited(instance, audit);
     }
     return driversAudited(audit);
 }
@@ -599,9 +605,8 @@ const reg32 Notifications   = 0x7160d8;     // count; entries of 8 bytes from 0x
 
 // Render loop (pointer to the output pointer, frames): SND ticks of 10 ms, the millisecond callbacks, the voice
 // render and the stream notifications, until the frames are written. The audio thread runs it with the SND mutex
-// and gives the execution lock up meanwhile. A tick, callback walk or library call that fails its audit takes the
-// lock for the rest of the run (mixer::lockRest), so a run takes the lock once; a voice render that fails its audit
-// and a notification delivery take it for the call only.
+// and gives the execution lock up meanwhile; a part that fails its audit, and every notification delivery, takes it
+// for that call only (mixer::Locked).
 void sub_654050(win32::WinApplication* app, x86::CPU& cpu)
 {
     const reg32 slot = cpu.efs + win32::teb::HostLock;
@@ -615,9 +620,8 @@ void sub_654050(win32::WinApplication* app, x86::CPU& cpu)
     const uint32_t start = timed ? pf::perf::now() : 0;
     app->unlockContext(cpu);
     app->getMemory<win32::Mutex*>(slot) = nullptr;
-    s_driverState = DriversUnchecked;
     mixer::s_lock = lock;
-    mixer::s_lockedRest = false;
+    mixer::s_changed = true;
     mixer::s_thread.store(cpu.efs, std::memory_order_relaxed);
     sub_654050_guest(app, cpu);
     mixer::s_thread.store(0, std::memory_order_relaxed);
@@ -627,62 +631,70 @@ void sub_654050(win32::WinApplication* app, x86::CPU& cpu)
         pf::perf::audio(pf::perf::AudioLoopsUnlocked, 1);
         pf::perf::audio(pf::perf::AudioLoopUnlockedUs, pf::perf::now() - start);
     }
-    if (mixer::s_lockedRest)
-        mixer::s_lockedRest = false;
-    else
-        app->lockContext(cpu);
+    app->lockContext(cpu);
 }
 
 // SND tick.
 void sub_64e330(win32::WinApplication* app, x86::CPU& cpu)
 {
     Audit audit;
-    if (mixer::unlocked(cpu) && !tickAudited(audit))
+    if (!mixer::unlocked(cpu) || tickAudited(audit))
     {
-        mixer::lockRest(app, cpu);
-        if (pf::perf::enabled())
-        {
-            pf::perf::audio(pf::perf::AudioTicksLocked, 1);
-            pf::perf::audioLocked(audit.reason, audit.address);
-        }
+        sub_64e330_guest(app, cpu);
+        return;
     }
-    sub_64e330_guest(app, cpu);
+    {
+        mixer::Locked locked(app, cpu);
+        sub_64e330_guest(app, cpu);
+    }
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioTicksLocked, 1);
+        pf::perf::audioLocked(audit.reason, audit.address);
+    }
 }
 
 // Millisecond callbacks.
 void sub_64e2f0(win32::WinApplication* app, x86::CPU& cpu)
 {
     Audit audit;
-    if (mixer::unlocked(cpu) && !callbacksAudited(app, audit))
+    if (!mixer::unlocked(cpu) || callbacksAudited(app, audit))
     {
-        mixer::lockRest(app, cpu);
-        if (pf::perf::enabled())
-        {
-            pf::perf::audio(pf::perf::AudioCallbacksLocked, 1);
-            pf::perf::audioLocked(audit.reason, audit.address);
-        }
+        sub_64e2f0_guest(app, cpu);
+        return;
     }
-    sub_64e2f0_guest(app, cpu);
+    {
+        mixer::Locked locked(app, cpu);
+        sub_64e2f0_guest(app, cpu);
+    }
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioCallbacksLocked, 1);
+        pf::perf::audioLocked(audit.reason, audit.address);
+    }
 }
 
 // Releases an object (this = ecx), called by the game and by instance teardowns of bank routines.
 void sub_64bbd0(win32::WinApplication* app, x86::CPU& cpu)
 {
     Audit audit;
-    if (mixer::unlocked(cpu) && !releaseAudited(cpu.ecx, audit))
+    if (!mixer::unlocked(cpu) || releaseAudited(cpu.ecx, audit))
     {
-        mixer::lockRest(app, cpu);
-        if (pf::perf::enabled())
-        {
-            pf::perf::audio(pf::perf::AudioLibraryLocked, 1);
-            pf::perf::audioLocked(audit.reason, audit.address);
-        }
+        sub_64bbd0_guest(app, cpu);
+        return;
     }
-    sub_64bbd0_guest(app, cpu);
+    {
+        mixer::Locked locked(app, cpu);
+        sub_64bbd0_guest(app, cpu);
+    }
+    if (pf::perf::enabled())
+    {
+        pf::perf::audio(pf::perf::AudioLibraryLocked, 1);
+        pf::perf::audioLocked(audit.reason, audit.address);
+    }
 }
 
-// Stream notifications: without any queued, the guest only clears the count. The game's callbacks may start sounds,
-// so the handle audit is made again after them.
+// Stream notifications: without any queued, the guest only clears the count.
 void sub_655880(win32::WinApplication* app, x86::CPU& cpu)
 {
     if (!mixer::unlocked(cpu) || x86::sreg32(rc::ld32(Notifications)) <= 0)
@@ -694,7 +706,6 @@ void sub_655880(win32::WinApplication* app, x86::CPU& cpu)
         mixer::Locked locked(app, cpu);
         sub_655880_guest(app, cpu);
     }
-    s_driverState = DriversUnchecked;
     if (pf::perf::enabled())
         pf::perf::audio(pf::perf::AudioNotificationsLocked, 1);
 }
@@ -717,13 +728,11 @@ void sub_656d70(win32::WinApplication* app, x86::CPU& cpu)
         }
         return;
     }
-    const char* const reason = mixer::unlocked(cpu) ? audit.reason
-                             : mixer::s_lockedRest ? "rest of the loop locked" : "outside the render loop";
+    const char* const reason = mixer::unlocked(cpu) ? audit.reason : "outside the render loop";
     {
         mixer::Locked locked(app, cpu);
         sub_656d70_guest(app, cpu);
     }
-    s_driverState = DriversUnchecked;
     if (timed)
     {
         pf::perf::audio(pf::perf::AudioRendersLocked, 1);
