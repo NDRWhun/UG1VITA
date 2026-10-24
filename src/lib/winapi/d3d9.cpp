@@ -25,6 +25,8 @@ MemMap*                 s_objectMemory = nullptr;
 MemMap*                 s_vtableMemory = nullptr;
 x86::reg32              s_vtableNext = 0;
 x86::reg32              s_vtables[KindCount] = {};
+x86::reg32              s_objectStart = 0;          // guest range of s_objectMemory
+x86::reg32              s_objectEnd = 0;
 std::vector<Object*>    s_objects(1, nullptr);      // handle 0 is never used
 std::vector<uint32_t>   s_freeHandles;
 std::vector<x86::reg32> s_freeBlocks;
@@ -131,8 +133,7 @@ Object* lookup(x86::reg32 guest)
 {
     if (!guest)
         return nullptr;
-    if (!s_objectMemory || guest < s_objectMemory->getBlockStart()
-        || guest >= s_objectMemory->getBlockStart() + s_objectMemory->getBlockSize())
+    if (guest - s_objectStart >= s_objectEnd - s_objectStart)
     {
         pf::logError("d3d9: 0x%08x is not a Direct3D object", guest);
         return nullptr;
@@ -385,6 +386,8 @@ void initInterfaces(WinApplication* app)
         return;
     s_app = app;
     s_objectMemory = new MemMap(ObjectArena);
+    s_objectStart = s_objectMemory->getBlockStart();
+    s_objectEnd = s_objectStart + s_objectMemory->getBlockSize();
     s_vtableMemory = new MemMap(VtableArena);
     D3D_BUILD(KindDirect3D, "IDirect3D9", s_direct3D);
     D3D_BUILD(KindDevice, "IDirect3DDevice9", s_device);
