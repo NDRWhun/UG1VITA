@@ -21,7 +21,6 @@ void sub_420380_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_420890_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_44b1b0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_462430_guest(win32::WinApplication* app, x86::CPU& cpu);
-void sub_403a60_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_48e8b0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_51d240_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_445050_guest(win32::WinApplication* app, x86::CPU& cpu);
@@ -213,12 +212,6 @@ void sub_462430(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::AiDriver);
     sub_462430_guest(app, cpu);
-}
-
-void sub_403a60(win32::WinApplication* app, x86::CPU& cpu)
-{
-    phases::Scope scope(phases::ParticleUpdate);
-    sub_403a60_guest(app, cpu);
 }
 
 void sub_48e8b0(win32::WinApplication* app, x86::CPU& cpu)

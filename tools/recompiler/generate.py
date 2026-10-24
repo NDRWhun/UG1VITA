@@ -133,7 +133,6 @@ NATIVE_OVERRIDES = [
     0x420890,   # World::DoPredictiveCollision
     0x44b1b0,   # AICarController::Think
     0x462430,   # AIDriver::Think
-    0x403a60,   # particle systems update
     0x48e8b0,   # UpdateCameraMovers
     0x51d240,   # EAXSound::Update
     0x445050,   # TrackStreamer::Service
@@ -143,6 +142,7 @@ NATIVE_OVERRIDES = [
     0x571050,   # RenderCars
     # Particle draw (src/nfsu/particles.cpp): the quads of every particle on the workers, the draws in order.
     0x404110,   # particle system list draw for a view
+    0x403a60,   # particle system update: emitters, then every particle's motion
 ]
 
 # Byte patches applied to the code before discovery: (address, original bytes, new bytes) in hex. Generation stops
