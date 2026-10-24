@@ -100,13 +100,14 @@ const Settings& settings()
         const int async = pf::Config::getInt("flush_async", 0);
         if (r.native && !r.shadow && (async == 1 || async == 2))
             r.async = async == 1 ? bridge::DeferThread : bridge::DeferInline;
-        int core = pf::Config::getInt("flush_async_core", 1);
+        const int defaultCore = pf::cores::hasCore3() ? 3 : 2;
+        int core = pf::Config::getInt("flush_async_core", defaultCore);
         if (core < 1 || core > 3 || (core == 3 && !pf::cores::hasCore3()))
-            core = 1;
+            core = defaultCore;
         int priority = pf::Config::getInt("flush_async_priority", pf::Thread::PriorityHigh + 6);
         if (priority < pf::Thread::PriorityHigh || priority > pf::Thread::PriorityLow)
             priority = pf::Thread::PriorityHigh + 6;
-        bridge::configureDeferral(r.async, core, priority);
+        bridge::configureDeferral(r.async, pf::Config::getBool("flush_async_frame", true), core, priority);
         pf::logInfo("draw: queue %s%s%s", r.native ? "native" : "guest", r.native && r.shadow ? ", shadow compare" : "",
                     r.async == bridge::DeferThread ? ", device calls of the flush on the queue thread (flush_async=1)"
                     : r.async == bridge::DeferInline ? ", device calls of the flush queued, run at the next drain"
@@ -1165,7 +1166,17 @@ void logDeferral(unsigned frames)
             at += snprintf(errors + at, sizeof(errors) - at, " %s %.1f/frame (0x%08x),", bridge::deferOpName(op),
                            double(d.errors[op]) / frames, unsigned(d.errorCodes[op]));
     }
-    pf::logInfo("flush_async: %u windows/frame, %u queued calls/frame (%u KiB), %u ran at once; queue run %.2f ms/frame;"
+    char sites[512] = {};
+    int siteAt = 0;
+    for (uint32_t i = 0; i < bridge::DeferSiteCount && siteAt < int(sizeof(sites)); ++i)
+    {
+        if (d.sites[i].count)
+            siteAt += snprintf(sites + siteAt, sizeof(sites) - siteAt, " %s %.1f/frame %.2f ms/frame,",
+                               bridge::drainSiteName(d.sites[i].address), double(d.sites[i].count) / frames,
+                               double(d.sites[i].us) / 1000.0 / frames);
+    }
+    pf::logInfo("flush_async: drains that waited, by method:%s", siteAt ? sites : " none");
+    pf::logInfo("flush_async: %u flushes/frame, %u queued calls/frame (%u KiB), %u ran at once; queue run %.2f ms/frame;"
                 " drains that waited %u/frame (%u inside a flush), wait %.2f ms/frame; in these frames: results that"
                 " differ from the returned ones %u, Begin pass counts that differ %u, late deletes %u; results not"
                 " D3D_OK by method:%s", d.windows / frames, d.calls / frames, d.words / frames / 256,

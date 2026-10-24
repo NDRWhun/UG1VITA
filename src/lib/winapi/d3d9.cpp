@@ -58,8 +58,11 @@ x86::reg32 allocateBlock()
 
 }
 
+uint32_t g_objectGeneration = 0;
+
 Object::~Object()
 {
+    ++g_objectGeneration;
     if (m_boundOnly)
         bridge::countBoundOnly(-1);
     if (!m_guest || !s_app)
@@ -122,6 +125,7 @@ ULONG Object::Release(WinApplication* app, x86::CPU& cpu)
 x86::reg32 publish(WinApplication* app, Object* object)
 {
     initInterfaces(app);
+    ++g_objectGeneration;
     uint32_t handle;
     if (!s_freeHandles.empty())
     {
@@ -239,17 +243,17 @@ const MethodEntry s_device[] = {
     D3D_TRAP(StretchRect),
     D3D_TRAP(ColorFill),
     D3D_TRAP(CreateOffscreenPlainSurface),
-    D3D_METHOD(Device, SetRenderTarget),
+    D3D_GUEST(SetRenderTarget),
     D3D_METHOD(Device, GetRenderTarget),
-    D3D_METHOD(Device, SetDepthStencilSurface),
+    D3D_GUEST(SetDepthStencilSurface),
     D3D_METHOD(Device, GetDepthStencilSurface),
-    D3D_METHOD(Device, BeginScene),
-    D3D_METHOD(Device, EndScene),
-    D3D_METHOD(Device, Clear),
+    D3D_GUEST(BeginScene),
+    D3D_GUEST(EndScene),
+    D3D_GUEST(Clear),
     D3D_GUEST(SetTransform),
     D3D_METHOD(Device, GetTransform),
     D3D_METHOD(Device, MultiplyTransform),
-    D3D_METHOD(Device, SetViewport),
+    D3D_GUEST(SetViewport),
     D3D_METHOD(Device, GetViewport),
     D3D_GUEST(SetMaterial),
     D3D_METHOD(Device, GetMaterial),
@@ -291,7 +295,7 @@ const MethodEntry s_device[] = {
     D3D_METHOD(Device, CreateVertexDeclaration),
     D3D_GUEST(SetVertexDeclaration),
     D3D_METHOD(Device, GetVertexDeclaration),
-    D3D_METHOD(Device, SetFVF),
+    D3D_GUEST(SetFVF),
     D3D_METHOD(Device, GetFVF),
     D3D_TRAP(CreateVertexShader),
     D3D_METHOD(Device, SetVertexShader),

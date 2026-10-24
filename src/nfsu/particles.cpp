@@ -413,19 +413,14 @@ bool drawDirect(win32::WinApplication* app, x86::CPU& c, reg32 device, uint32_t 
         || !com(app, c, device, SetIndices, { rc::ld32(IndexBuffer) }, at[1])
         || !com(app, c, device, SetRenderState, { AlphaBlendEnable, 1 }, at[2]))
         return false;
-    win32::d3d9::bridge::drain();
-    win32::d3d9::Object* object = win32::d3d9::lookup(device);
+    const win32::d3d9::Object* object = win32::d3d9::lookup(device);
     if (!object || object->kind() != win32::d3d9::KindDevice)
         return true;
-    win32::d3d9::Device* d = static_cast<win32::d3d9::Device*>(object);
-    const uint32_t bytes = count * QuadWords * 4;
-    uint8_t* data = static_cast<uint8_t*>(d->frameVertices(app, c, bytes));
-    if (c.terminate)
-        return false;
-    if (data)
-        for (uint32_t i = 0; i < count; ++i)
-            memcpy(data + i * QuadWords * 4, s_quads[s_pending[i]].words, QuadWords * 4);
-    c.eax = reg32(d->drawIndexedFrameVertices(app, c, 4, 0, count * 4, 0, count * 2, data));
+    static reg32 s_vertices[BatchParticles * QuadWords];
+    for (uint32_t i = 0; i < count; ++i)
+        memcpy(s_vertices + i * QuadWords, s_quads[s_pending[i]].words, QuadWords * 4);
+    c.eax = reg32(win32::d3d9::bridge::drawFrameVertices(app, c, device, 4, 0, count * 4, 0, count * 2, s_vertices,
+                                                         count * QuadWords * 4));
     return !c.terminate;
 }
 

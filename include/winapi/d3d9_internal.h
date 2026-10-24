@@ -237,8 +237,8 @@ public:
     virtual ULONG release();
     // A reference of a binding that deferred calls change (device texture stages, vertex declaration, stream and
     // indices; effect textures), counted apart as well.
-    void bind()                     { ++m_bindings; addRef(); }
-    ULONG unbind()                  { --m_bindings; return release(); }
+    virtual void bind()             { ++m_bindings; addRef(); }
+    virtual ULONG unbind()          { --m_bindings; return release(); }
 
     HRESULT QueryInterface(WinApplication* app, x86::CPU& cpu, const GUID* iid, x86::reg32* object);
     ULONG AddRef(WinApplication* app, x86::CPU& cpu);
@@ -261,6 +261,8 @@ Object* lookup(x86::reg32 guest);
 // Builds the vtables and registers the methods, once.
 void initInterfaces(WinApplication* app);
 
+class Device;
+
 namespace bridge
 {
 
@@ -271,15 +273,21 @@ void deleteLater(Object* object);
 // Objects that only bindings hold: +1 when one becomes so, -1 when it is deleted. While there are any, calls that
 // change bindings are not deferred. Game thread.
 void countBoundOnly(int delta);
+// A device is deleted.
+void deviceGone(const Device* device);
 
 }
 
-// A guest method that drains the deferred calls (d3d9_native.h) before it runs.
+// Counts object publications and deletions.
+extern uint32_t g_objectGeneration;
+
+// A guest method that drains the deferred calls (d3d9_native.h) before it runs; cpu.ip is its slot address.
 template< MethodPtr M >
 void drained(WinApplication* app, x86::CPU& cpu)
 {
-    bridge::drain();
+    bridge::drain(cpu.ip);
     M(app, cpu);
+    bridge::afterDirect();
 }
 
 // A vtable slot: the method, or null for one that logs its name and guest address and traps.
@@ -305,6 +313,13 @@ void LightEnable(WinApplication* app, x86::CPU& cpu);
 void SetRenderState(WinApplication* app, x86::CPU& cpu);
 void SetTextureStageState(WinApplication* app, x86::CPU& cpu);
 void SetSamplerState(WinApplication* app, x86::CPU& cpu);
+void SetViewport(WinApplication* app, x86::CPU& cpu);
+void SetFVF(WinApplication* app, x86::CPU& cpu);
+void Clear(WinApplication* app, x86::CPU& cpu);
+void BeginScene(WinApplication* app, x86::CPU& cpu);
+void EndScene(WinApplication* app, x86::CPU& cpu);
+void SetRenderTarget(WinApplication* app, x86::CPU& cpu);
+void SetDepthStencilSurface(WinApplication* app, x86::CPU& cpu);
 void SetTexture(WinApplication* app, x86::CPU& cpu);
 void SetVertexDeclaration(WinApplication* app, x86::CPU& cpu);
 void SetStreamSource(WinApplication* app, x86::CPU& cpu);
@@ -456,6 +471,8 @@ public:
     void setDepth(render::DepthStorage* depth) { m_depth = depth; }
     ULONG addRef() override;
     ULONG release() override;
+    void bind() override;
+    ULONG unbind() override;
 
     HRESULT GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* device);
     DWORD SetPriority(WinApplication* app, x86::CPU& cpu, DWORD priority);
@@ -775,6 +792,15 @@ public:
     void effectTextureApplied(uint32_t stage)   { m_deviceSamplers &= ~(uint32_t(DeviceTexture) << (stage * 8)); }
     // The stream of the frame being recorded; null between frames.
     Stream* stream() const                      { return m_stream; }
+    // What draws need bound: stream 0 and its stride, indices, a declaration, the FVF.
+    void bindings(bool& stream, UINT& stride, bool& indices, bool& declaration, DWORD& fvf) const
+    {
+        stream = m_state.stream != nullptr;
+        stride = m_state.streamStride;
+        indices = m_state.indices != nullptr;
+        declaration = m_state.declaration != nullptr;
+        fvf = m_state.fvf;
+    }
 
     HRESULT TestCooperativeLevel(WinApplication* app, x86::CPU& cpu);
     UINT GetAvailableTextureMem(WinApplication* app, x86::CPU& cpu);
@@ -890,8 +916,7 @@ private:
 
     void defaults();
     void resetBackBuffer(const D3DPRESENT_PARAMETERS& params);
-    template< typename T > void hold(T*& slot, T* object);
-    // hold for the slots deferred calls change, with binding references (Object::bind).
+    // Sets a state slot with a binding reference (Object::bind).
     template< typename T > void bindSlot(T*& slot, T* object);
     render::Frame* frame(WinApplication* app, x86::CPU& cpu);
     render::Scene* scene();

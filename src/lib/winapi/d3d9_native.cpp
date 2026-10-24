@@ -251,13 +251,19 @@ uint32_t primitiveVertices(DWORD type, UINT count)
 
 // ---- Deferral ----
 
-// Queue records: a header word (operation in bits 0-7, payload words above) and the payload. Operations are the
-// capture methods and these.
+// Queue records: a header word (operation in bits 0-7, payload words above) and the payload, whose last word is the
+// result the call returned to its caller. Operations are the capture methods and these.
 enum : uint8_t
 {
     OpSetTextureStageState = MethodCount,
     OpSetSamplerState,
     OpSetMatrixProduct,     // effect, handle, count, FPSCR, count matrices
+    OpSetViewport,
+    OpSetFVF,
+    OpClear,                // device, count, flags, colour, z, stencil, rects flag, rects
+    OpSetRenderTarget,
+    OpSetDepthStencilSurface,
+    OpDrawFrameVertices,    // device, type, minimum index, vertices, start index, count, bytes, data
     OpFpscr,                // the FPSCR the following calls run with
     OpWrap,                 // the next record is at the start of the ring
     OpCount
@@ -286,6 +292,12 @@ const char* opName(uint32_t op)
     case OpSetTextureStageState: return "SetTextureStageState";
     case OpSetSamplerState:      return "SetSamplerState";
     case OpSetMatrixProduct:     return "Effect::SetMatrix (product)";
+    case OpSetViewport:          return "SetViewport";
+    case OpSetFVF:               return "SetFVF";
+    case OpClear:                return "Clear";
+    case OpSetRenderTarget:      return "SetRenderTarget";
+    case OpSetDepthStencilSurface: return "SetDepthStencilSurface";
+    case OpDrawFrameVertices:    return "DrawIndexedPrimitive (frame vertices)";
     default:                     return methodName(uint8_t(op));
     }
 }
@@ -299,9 +311,24 @@ struct Deferral
 
     // Callers holding the execution lock.
     WinApplication* app = nullptr;
-    const x86::CPU* owner = nullptr;    // the open window's CPU
+    bool owned = false;                 // the calls of the guest thread with this fs base are queued
+    reg32 ownerFs = 0;
+    bool inWindow = false;
     reg32 deviceGuest = 0;
     Device* device = nullptr;
+    // The device's stream, indices and declaration as the queued calls leave them, for the results of draws.
+    bool streamBound = false, indicesBound = false, declarationBound = false;
+    UINT streamStride = 0;
+    DWORD fvf = 0;
+    // The parameter types of the last effect looked up (effect::paramTypes), valid while the object generation is
+    // the same.
+    reg32 typesEffect = 0;
+    uint32_t typesGeneration = 0;
+    const uint8_t* types = nullptr;
+    // Drains that waited, by guest method address (0: native callers; the last slot: the others).
+    struct Site { reg32 address; uint32_t count; uint32_t us; };
+    Site sites[DeferSiteCount] = {};
+    bool frameScope = true;             // calls stay queued between windows
     uint32_t head = 0;                  // words written
     uint32_t roomEnd = QueueWords;      // the head may advance to here without overwriting unrun records
     uint32_t drained = 0;               // head at the last completed drain
@@ -322,7 +349,8 @@ struct Deferral
     bool runningInline = false;
     x86::CPU runCpu;                    // passed to the queued methods, not read by them
 
-    const uint32_t* last = nullptr;     // the payload and operation of the last record put
+    uint32_t* last = nullptr;           // the payload, its words and the operation of the last record put
+    uint32_t lastWords = 0;
     uint32_t lastOp = 0;
 
     // Statistics.
@@ -338,12 +366,12 @@ Deferral s_defer;
 
 inline bool deferring(const x86::CPU& cpu)
 {
-    return s_defer.owner == &cpu;
+    return s_defer.owned && s_defer.ownerFs == cpu.efs;
 }
 
 inline bool deferringDevice(const x86::CPU& cpu, reg32 guest)
 {
-    return s_defer.owner == &cpu && guest == s_defer.deviceGuest;
+    return deferring(cpu) && guest == s_defer.deviceGuest;
 }
 
 inline bool deferringDraw(const x86::CPU& cpu, reg32 guest)
@@ -381,10 +409,45 @@ inline bool isKind(const Object* object, Kind kind)
     return object && object->kind() == kind;
 }
 
-// The result of a queued call for its payload w: the method's checks of arguments, handles and object kinds; D3D_OK
-// for draws.
-HRESULT predict(uint32_t op, const uint32_t* w)
+// The type of an effect parameter handle (effect::ParamNone: not one of the effect's); game thread.
+uint8_t paramType(reg32 effect, reg32 handle)
 {
+    Deferral& d = s_defer;
+    if (effect != d.typesEffect || d.typesGeneration != g_objectGeneration || !d.types)
+    {
+        d.types = effect::paramTypes(effect);
+        d.typesEffect = effect;
+        d.typesGeneration = g_objectGeneration;
+    }
+    const uint32_t i = handle - effect::ParamHandleBase;
+    return d.types && i < effect::ParamHandleCount ? d.types[i] : uint8_t(effect::ParamNone);
+}
+
+// Device::draw's result for a primitive type with the geometry bound.
+inline HRESULT typeResult(uint32_t type)
+{
+    return type >= 1 && type <= 6 ? D3D_OK : D3DERR_INVALIDCALL;
+}
+
+inline bool drawBindings()
+{
+    const Deferral& d = s_defer;
+    return d.streamBound && d.indicesBound && (d.declarationBound || d.fvf) && d.streamStride;
+}
+
+// The bindings of the device after a call that ran at once; game thread, queue empty.
+void refreshBindings()
+{
+    Deferral& d = s_defer;
+    if (d.device)
+        d.device->bindings(d.streamBound, d.streamStride, d.indicesBound, d.declarationBound, d.fvf);
+}
+
+// The result of a queued call for its payload w, as the method's checks of arguments, handles, object kinds and
+// bindings give it; the bindings it changes are noted. Game thread, in queue order.
+HRESULT expected(uint32_t op, const uint32_t* w)
+{
+    Deferral& d = s_defer;
     const HRESULT invalid = D3DERR_INVALIDCALL;
     switch (op)
     {
@@ -394,6 +457,7 @@ HRESULT predict(uint32_t op, const uint32_t* w)
     case MethodLightEnable:         return w[1] < 8 ? D3D_OK : invalid;
     case MethodSetRenderState:      return w[1] < MaxRenderStates ? D3D_OK : invalid;
     case OpSetTextureStageState:    return w[1] < MaxStages && w[2] < D3DTSS_COUNT ? D3D_OK : invalid;
+    case OpSetViewport:             return w[1] ? D3D_OK : invalid;
     case MethodSetTexture:
     {
         if (w[1] >= MaxSamplerStages)
@@ -406,24 +470,93 @@ HRESULT predict(uint32_t op, const uint32_t* w)
         if (w[1] != 0)
             return D3D_OK;
         const Object* b = lookup(w[2]);
-        return !b || isKind(b, KindVertexBuffer) ? D3D_OK : invalid;
+        if (b && !isKind(b, KindVertexBuffer))
+            return invalid;
+        d.streamBound = b != nullptr;
+        d.streamStride = w[4];
+        return D3D_OK;
     }
     case MethodSetIndices:
     {
         const Object* b = lookup(w[1]);
-        return !b || isKind(b, KindIndexBuffer) ? D3D_OK : invalid;
+        if (b && !isKind(b, KindIndexBuffer))
+            return invalid;
+        d.indicesBound = b != nullptr;
+        return D3D_OK;
     }
-    case MethodDrawPrimitiveUP:         return w[4] && w[3] ? D3D_OK : invalid;
-    case MethodEffectSetInt:            return effect::checkInt(w[0], w[1]);
-    case MethodEffectSetFloat:          return effect::checkFloat(w[0], w[1]);
+    case MethodSetVertexDeclaration:
+        d.declarationBound = lookup(w[1]) != nullptr;
+        d.fvf = 0;
+        return D3D_OK;
+    case OpSetFVF:
+        d.declarationBound = false;
+        d.fvf = w[1];
+        return D3D_OK;
+    case OpSetRenderTarget:
+    {
+        if (w[1] != 0)
+            return w[1] < 4 && !w[2] ? D3D_OK : invalid;
+        const Surface* s = static_cast<const Surface*>(lookup(w[2]));
+        if (!s || s->role() == Surface::RoleDepth
+            || (s->role() == Surface::RoleLevel && (!s->container() || !s->container()->desc().target)))
+            return invalid;
+        return D3D_OK;
+    }
+    case OpSetDepthStencilSurface:
+    {
+        const Surface* s = static_cast<const Surface*>(lookup(w[1]));
+        return s && s->role() != Surface::RoleDepth ? invalid : D3D_OK;
+    }
+    case MethodDrawIndexedPrimitive:
+    case OpDrawFrameVertices:       return drawBindings() ? typeResult(w[1]) : invalid;
+    case MethodDrawPrimitiveUP:
+    {
+        d.streamBound = false;
+        d.streamStride = 0;
+        return (d.declarationBound || d.fvf) && w[4] && w[3] ? typeResult(w[1]) : invalid;
+    }
+    case MethodEffectSetInt:
+    case MethodEffectSetFloat:
+    {
+        const uint8_t t = paramType(w[0], w[1]);
+        return t == effect::ParamInt || t == effect::ParamFloat ? D3D_OK : invalid;
+    }
     case MethodEffectSetVector:
-    case MethodEffectSetMatrix:         return effect::checkFloats(w[0], w[1], w[2] != 0);
+    case MethodEffectSetMatrix:
+        return w[2] && paramType(w[0], w[1]) == effect::ParamFloat ? D3D_OK : invalid;
     case MethodEffectSetVectorArray:
-    case MethodEffectSetMatrixArray:    return effect::checkFloats(w[0], w[1], w[3] != 0);
-    case OpSetMatrixProduct:            return effect::checkFloats(w[0], w[1], true);
-    case MethodEffectSetTexture:        return effect::checkTexture(w[0], w[1], w[2]);
-    case MethodEffectPass:              return effect::checkPass(w[0], w[1]);
-    default:                            return D3D_OK;
+    case MethodEffectSetMatrixArray:
+        return w[3] && paramType(w[0], w[1]) == effect::ParamFloat ? D3D_OK : invalid;
+    case OpSetMatrixProduct:
+        return paramType(w[0], w[1]) == effect::ParamFloat ? D3D_OK : invalid;
+    case MethodEffectSetTexture:
+    {
+        if (paramType(w[0], w[1]) != effect::ParamTexture)
+            return invalid;
+        const Object* t = lookup(w[2]);
+        return !t || isKind(t, KindTexture) || isKind(t, KindCubeTexture) ? D3D_OK : invalid;
+    }
+    case MethodEffectPass:          return effect::checkPass(w[0], w[1]);
+    default:                        return D3D_OK;
+    }
+}
+
+// A drain that waited us, at a guest method address.
+void noteSite(reg32 site, uint32_t us)
+{
+    Deferral& d = s_defer;
+    const uint32_t count = sizeof(d.sites) / sizeof(d.sites[0]);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        Deferral::Site& s = d.sites[i];
+        if (s.count == 0 || s.address == site || i == count - 1)
+        {
+            if (s.count == 0)
+                s.address = i == count - 1 ? 0xffffffffu : site;
+            ++s.count;
+            s.us += us;
+            return;
+        }
     }
 }
 
@@ -462,10 +595,13 @@ void noteResult(uint32_t op, const uint32_t* w, uint32_t length, HRESULT h, HRES
     }
 }
 
-// The result a queued call returns to its caller: that of the last record put.
+// The result a queued call returns to its caller, that of the last record put; stored as its last word.
 inline HRESULT queued()
 {
-    return predict(s_defer.lastOp, s_defer.last);
+    Deferral& d = s_defer;
+    const HRESULT h = expected(d.lastOp, d.last);
+    d.last[d.lastWords] = h;
+    return h;
 }
 
 // Runs the record at p; returns its length in words.
@@ -478,47 +614,48 @@ uint32_t runRecord(const uint32_t* p)
     const uint32_t length = p[0] >> 8;
     const uint32_t* w = p + 1;
     const float* f = reinterpret_cast<const float*>(w);
+    const auto dev = [&] { return w[0] == d.deviceGuest ? d.device : device(w[0]); };
     HRESULT h = D3D_OK;
     switch (op)
     {
     case MethodSetTransform:
-        h = device(w[0])->SetTransform(app, cpu, w[1], w[2] ? reinterpret_cast<const D3DMATRIX*>(w + 3) : nullptr);
+        h = dev()->SetTransform(app, cpu, w[1], w[2] ? reinterpret_cast<const D3DMATRIX*>(w + 3) : nullptr);
         break;
     case MethodSetMaterial:
-        h = device(w[0])->SetMaterial(app, cpu, w[1] ? w + 2 : nullptr);
+        h = dev()->SetMaterial(app, cpu, w[1] ? w + 2 : nullptr);
         break;
     case MethodSetLight:
-        h = device(w[0])->SetLight(app, cpu, w[1], w[2] ? w + 3 : nullptr);
+        h = dev()->SetLight(app, cpu, w[1], w[2] ? w + 3 : nullptr);
         break;
     case MethodLightEnable:
-        h = device(w[0])->LightEnable(app, cpu, w[1], BOOL(w[2]));
+        h = dev()->LightEnable(app, cpu, w[1], BOOL(w[2]));
         break;
     case MethodSetRenderState:
-        h = device(w[0])->SetRenderState(app, cpu, w[1], w[2]);
+        h = dev()->SetRenderState(app, cpu, w[1], w[2]);
         break;
     case OpSetTextureStageState:
-        h = device(w[0])->SetTextureStageState(app, cpu, w[1], w[2], w[3]);
+        h = dev()->SetTextureStageState(app, cpu, w[1], w[2], w[3]);
         break;
     case OpSetSamplerState:
-        h = device(w[0])->SetSamplerState(app, cpu, w[1], w[2], w[3]);
+        h = dev()->SetSamplerState(app, cpu, w[1], w[2], w[3]);
         break;
     case MethodSetTexture:
-        h = device(w[0])->SetTexture(app, cpu, w[1], lookup(w[2]));
+        h = dev()->SetTexture(app, cpu, w[1], lookup(w[2]));
         break;
     case MethodSetVertexDeclaration:
-        h = device(w[0])->SetVertexDeclaration(app, cpu, static_cast<VertexDeclaration*>(lookup(w[1])));
+        h = dev()->SetVertexDeclaration(app, cpu, static_cast<VertexDeclaration*>(lookup(w[1])));
         break;
     case MethodSetStreamSource:
-        h = device(w[0])->SetStreamSource(app, cpu, w[1], static_cast<Buffer*>(lookup(w[2])), w[3], w[4]);
+        h = dev()->SetStreamSource(app, cpu, w[1], static_cast<Buffer*>(lookup(w[2])), w[3], w[4]);
         break;
     case MethodSetIndices:
-        h = device(w[0])->SetIndices(app, cpu, static_cast<Buffer*>(lookup(w[1])));
+        h = dev()->SetIndices(app, cpu, static_cast<Buffer*>(lookup(w[1])));
         break;
     case MethodDrawIndexedPrimitive:
-        h = device(w[0])->DrawIndexedPrimitive(app, cpu, w[1], LONG(w[2]), w[3], w[4], w[5], w[6]);
+        h = dev()->DrawIndexedPrimitive(app, cpu, w[1], LONG(w[2]), w[3], w[4], w[5], w[6]);
         break;
     case MethodDrawPrimitiveUP:
-        h = device(w[0])->DrawPrimitiveUP(app, cpu, w[1], w[2], w[4] ? w + 5 : nullptr, w[3]);
+        h = dev()->DrawPrimitiveUP(app, cpu, w[1], w[2], w[4] ? w + 5 : nullptr, w[3]);
         break;
     case MethodEffectSetInt:
         h = effect::setInt(app, cpu, w[0], w[1], x86::sreg32(w[2]));
@@ -569,6 +706,31 @@ uint32_t runRecord(const uint32_t* p)
     case MethodEffectEnd:
         h = effect::end(app, cpu, w[0]);
         break;
+    case OpSetViewport:
+        h = dev()->SetViewport(app, cpu, w[1] ? reinterpret_cast<const D3DVIEWPORT9*>(w + 2) : nullptr);
+        break;
+    case OpSetFVF:
+        h = dev()->SetFVF(app, cpu, w[1]);
+        break;
+    case OpClear:
+        h = dev()->Clear(app, cpu, w[1], w[6] ? reinterpret_cast<const D3DRECT*>(w + 7) : nullptr, w[2], w[3],
+                         asFloat(w[4]), w[5]);
+        break;
+    case OpSetRenderTarget:
+        h = dev()->SetRenderTarget(app, cpu, w[1], static_cast<Surface*>(lookup(w[2])));
+        break;
+    case OpSetDepthStencilSurface:
+        h = dev()->SetDepthStencilSurface(app, cpu, static_cast<Surface*>(lookup(w[1])));
+        break;
+    case OpDrawFrameVertices:
+    {
+        Device* const target = dev();
+        void* data = target->frameVertices(app, cpu, w[6]);
+        if (data)
+            memcpy(data, w + 7, w[6]);
+        h = target->drawIndexedFrameVertices(app, cpu, w[1], w[2], w[3], w[4], w[5], data);
+        break;
+    }
     case OpFpscr:
         if (readFpscr() != w[0])
             writeFpscr(w[0]);
@@ -578,9 +740,9 @@ uint32_t runRecord(const uint32_t* p)
     }
     if (op != OpFpscr)
     {
-        const HRESULT expected = predict(op, w);
-        if (__builtin_expect(h != D3D_OK || h != expected, 0))
-            noteResult(op, w, length, h, expected);
+        const HRESULT returned = HRESULT(w[length - 1]);
+        if (__builtin_expect(h != D3D_OK || h != returned, 0))
+            noteResult(op, w, length - 1, h, returned);
     }
     return 1 + length;
 }
@@ -717,10 +879,12 @@ void makeRoom(uint32_t words)
     d.roomEnd = d.read.load(std::memory_order_acquire) + QueueWords;
 }
 
-// Appends a record of words payload words and returns its payload.
+// Appends a record of words payload words and the result word, and returns its payload.
 uint32_t* put(uint32_t op, uint32_t words)
 {
     Deferral& d = s_defer;
+    d.lastWords = words;
+    ++words;
     const uint32_t need = words + 1;
     uint32_t at = d.head & QueueMask;
     if (at + need > QueueWords)
@@ -843,12 +1007,13 @@ void callGuest(WinApplication* app, x86::CPU& cpu, reg32 address)
 
 // ---- Deferral ----
 
-void configureDeferral(DeferMode mode, int core, int priority)
+void configureDeferral(DeferMode mode, bool frame, int core, int priority)
 {
     Deferral& d = s_defer;
     if (d.ring)
         return;
     d.mode = mode;
+    d.frameScope = frame;
     d.core = core;
     d.priority = priority;
     if (mode != DeferOff)
@@ -858,17 +1023,27 @@ void configureDeferral(DeferMode mode, int core, int priority)
 bool deferBegin(WinApplication* app, x86::CPU& cpu, reg32 guest)
 {
     Deferral& d = s_defer;
-    if (d.mode == DeferOff || d.owner || s_capture)
+    if (d.mode == DeferOff || d.inWindow || s_capture || (d.owned && d.ownerFs != cpu.efs))
         return false;
-    Object* object = lookup(guest);
-    if (!object || object->kind() != KindDevice || !static_cast<Device*>(object)->stream())
-        return false;
-    if (!d.app)
+    if (!d.device)
     {
-        d.app = app;
-        d.runCpu = cpu;
-        if (d.mode == DeferThread)
-            startThread();
+        Object* object = lookup(guest);
+        if (!object || object->kind() != KindDevice)
+            return false;
+        if (!d.app)
+        {
+            d.app = app;
+            d.runCpu = cpu;
+            if (d.mode == DeferThread)
+                startThread();
+        }
+        d.deviceGuest = guest;
+        d.device = static_cast<Device*>(object);
+        refreshBindings();
+    }
+    else if (guest != d.deviceGuest)
+    {
+        return false;
     }
     const uint32_t fpscr = readFpscr();
     if (!d.fpscrSent || fpscr != d.fpscr)
@@ -877,9 +1052,9 @@ bool deferBegin(WinApplication* app, x86::CPU& cpu, reg32 guest)
         d.fpscr = fpscr;
         d.fpscrSent = true;
     }
-    d.owner = &cpu;
-    d.deviceGuest = guest;
-    d.device = static_cast<Device*>(object);
+    d.owned = true;
+    d.ownerFs = cpu.efs;
+    d.inWindow = true;
     ++d.stats.windows;
     return true;
 }
@@ -888,12 +1063,28 @@ void deferEnd()
 {
     Deferral& d = s_defer;
     publish();
-    d.owner = nullptr;
-    d.deviceGuest = 0;
-    d.device = nullptr;
+    d.inWindow = false;
+    if (!d.frameScope)
+        d.owned = false;
 }
 
-void drainSlow()
+void afterDirect()
+{
+    refreshBindings();
+}
+
+void deviceGone(const Device* device)
+{
+    Deferral& d = s_defer;
+    if (device != d.device)
+        return;
+    d.owned = false;
+    d.inWindow = false;
+    d.device = nullptr;
+    d.deviceGuest = 0;
+}
+
+void drainSlow(reg32 site)
 {
     Deferral& d = s_defer;
     if (d.head != d.drained)
@@ -906,9 +1097,11 @@ void drainSlow()
         {
             publish();
             ++d.stats.drains;
-            if (d.owner)
+            if (d.inWindow)
                 ++d.stats.windowDrains;
+            const uint32_t start = clockUs();
             waitRead(d.head);
+            noteSite(site, clockUs() - start);
         }
         else
         {
@@ -935,6 +1128,11 @@ DeferStats takeDeferStats()
         s.errors[i] = d.errors[i].exchange(0, std::memory_order_relaxed);
         s.errorCodes[i] = d.errorCodes[i].load(std::memory_order_relaxed);
     }
+    for (uint32_t i = 0; i < DeferSiteCount; ++i)
+    {
+        s.sites[i] = DeferStats::Site{ d.sites[i].address, d.sites[i].count, d.sites[i].us };
+        d.sites[i] = Deferral::Site{};
+    }
     d.stats = DeferStats{};
     return s;
 }
@@ -942,6 +1140,16 @@ DeferStats takeDeferStats()
 const char* deferOpName(uint32_t op)
 {
     return opName(op);
+}
+
+const char* drainSiteName(reg32 address)
+{
+    if (address == 0)
+        return "native callers";
+    if (address == 0xffffffffu)
+        return "others";
+    const char* name = s_app ? s_app->getMethodName(address) : nullptr;
+    return name ? name : "?";
 }
 
 bool onQueueThread()
@@ -1144,6 +1352,143 @@ HRESULT setSamplerState(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD s
     return device(guest)->SetSamplerState(app, cpu, sampler, type, value);
 }
 
+HRESULT setViewport(WinApplication* app, x86::CPU& cpu, reg32 guest, const DWORD* viewport)
+{
+    if (deferringDevice(cpu, guest))
+    {
+        uint32_t* w = put(OpSetViewport, viewport ? 8 : 2);
+        w[0] = guest;
+        w[1] = viewport ? 1 : 0;
+        if (viewport)
+            copyWords(w + 2, viewport, 6);
+        return queued();
+    }
+    drain();
+    return device(guest)->SetViewport(app, cpu, reinterpret_cast<const D3DVIEWPORT9*>(viewport));
+}
+
+HRESULT setFVF(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD fvf)
+{
+    if (deferringBinding(cpu, guest))
+    {
+        uint32_t* w = put(OpSetFVF, 2);
+        w[0] = guest;
+        w[1] = fvf;
+        return queued();
+    }
+    if (deferring(cpu))
+        fallback();
+    drain();
+    const HRESULT h = device(guest)->SetFVF(app, cpu, fvf);
+    refreshBindings();
+    return h;
+}
+
+HRESULT clear(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD count, const DWORD* rects, DWORD flags,
+              DWORD color, float z, DWORD stencil)
+{
+    const uint32_t words = rects && count ? count * 4 : 0;
+    if (deferringDraw(cpu, guest) && words <= MaxArrayFloats)
+    {
+        uint32_t* w = put(OpClear, 7 + words);
+        w[0] = guest;
+        w[1] = count;
+        w[2] = flags;
+        w[3] = color;
+        w[4] = bits(z);
+        w[5] = stencil;
+        w[6] = rects ? 1 : 0;
+        if (words)
+            copyWords(w + 7, rects, words);
+        const HRESULT h = queued();
+        publish();
+        return h;
+    }
+    if (deferring(cpu))
+        fallback();
+    drain();
+    return device(guest)->Clear(app, cpu, count, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
+}
+
+HRESULT beginScene(WinApplication* app, x86::CPU& cpu, reg32 guest)
+{
+    if (deferringDraw(cpu, guest))
+        return D3D_OK;
+    drain();
+    return device(guest)->BeginScene(app, cpu);
+}
+
+HRESULT endScene(WinApplication* app, x86::CPU& cpu, reg32 guest)
+{
+    return device(guest)->EndScene(app, cpu);
+}
+
+HRESULT setRenderTarget(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD index, reg32 surface)
+{
+    if (deferringBinding(cpu, guest))
+    {
+        uint32_t* w = put(OpSetRenderTarget, 3);
+        w[0] = guest;
+        w[1] = index;
+        w[2] = surface;
+        return queued();
+    }
+    if (deferring(cpu))
+        fallback();
+    drain();
+    return device(guest)->SetRenderTarget(app, cpu, index, static_cast<Surface*>(lookup(surface)));
+}
+
+HRESULT setDepthStencilSurface(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 surface)
+{
+    if (deferringBinding(cpu, guest))
+    {
+        uint32_t* w = put(OpSetDepthStencilSurface, 2);
+        w[0] = guest;
+        w[1] = surface;
+        return queued();
+    }
+    if (deferring(cpu))
+        fallback();
+    drain();
+    return device(guest)->SetDepthStencilSurface(app, cpu, static_cast<Surface*>(lookup(surface)));
+}
+
+HRESULT drawFrameVertices(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD type, UINT minIndex, UINT vertices,
+                          UINT startIndex, UINT count, const void* data, uint32_t bytes)
+{
+    const uint32_t words = (bytes + 3) / 4;
+    if (deferringDraw(cpu, guest) && words <= MaxRecordWords)
+    {
+        uint32_t* w = put(OpDrawFrameVertices, 7 + words);
+        w[0] = guest;
+        w[1] = type;
+        w[2] = minIndex;
+        w[3] = vertices;
+        w[4] = startIndex;
+        w[5] = count;
+        w[6] = bytes;
+        if (words)
+        {
+            w[6 + words] = 0;
+            memcpy(w + 7, data, bytes);
+        }
+        const HRESULT h = queued();
+        publish();
+        return h;
+    }
+    if (deferring(cpu))
+        fallback();
+    drain();
+    Device* d = device(guest);
+    void* frame = d->frameVertices(app, cpu, bytes);
+    if (cpu.terminate)
+        return D3D_OK;
+    if (frame)
+        memcpy(frame, data, bytes);
+    return d->drawIndexedFrameVertices(app, cpu, type, minIndex, vertices, startIndex, count, frame);
+}
+
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage, reg32 texture)
 {
     if (deferringBinding(cpu, guest))
@@ -1202,7 +1547,10 @@ HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 guest, re
         r.done(h);
         return h;
     }
-    return device(guest)->SetVertexDeclaration(app, cpu, static_cast<VertexDeclaration*>(lookup(declaration)));
+    const HRESULT h = device(guest)->SetVertexDeclaration(app, cpu,
+                                                          static_cast<VertexDeclaration*>(lookup(declaration)));
+    refreshBindings();
+    return h;
 }
 
 HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT stream, reg32 buffer, UINT offset,
@@ -1239,7 +1587,10 @@ HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT st
         r.done(h);
         return h;
     }
-    return device(guest)->SetStreamSource(app, cpu, stream, static_cast<Buffer*>(lookup(buffer)), offset, stride);
+    const HRESULT h = device(guest)->SetStreamSource(app, cpu, stream, static_cast<Buffer*>(lookup(buffer)), offset,
+                                                     stride);
+    refreshBindings();
+    return h;
 }
 
 HRESULT setIndices(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 buffer)
@@ -1268,7 +1619,9 @@ HRESULT setIndices(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 buffer
         r.done(h);
         return h;
     }
-    return device(guest)->SetIndices(app, cpu, static_cast<Buffer*>(lookup(buffer)));
+    const HRESULT h = device(guest)->SetIndices(app, cpu, static_cast<Buffer*>(lookup(buffer)));
+    refreshBindings();
+    return h;
 }
 
 HRESULT drawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD type, LONG baseVertex,
@@ -1284,8 +1637,9 @@ HRESULT drawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, reg32 guest, DW
         w[4] = vertices;
         w[5] = startIndex;
         w[6] = count;
+        const HRESULT h = queued();
         publish();
-        return queued();
+        return h;
     }
     if (deferring(cpu))
         fallback();
@@ -1331,8 +1685,9 @@ HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD t
             w[4 + words] = 0;
             memcpy(w + 5, data, bytes);
         }
+        const HRESULT h = queued();
         publish();
-        return queued();
+        return h;
     }
     if (deferring(cpu))
         fallback();
@@ -1354,7 +1709,9 @@ HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD t
         r.done(h);
         return h;
     }
-    return device(guest)->DrawPrimitiveUP(app, cpu, type, count, data, stride);
+    const HRESULT h = device(guest)->DrawPrimitiveUP(app, cpu, type, count, data, stride);
+    refreshBindings();
+    return h;
 }
 
 // ---- Effect ----
@@ -1797,6 +2154,49 @@ void SetSamplerState(WinApplication* app, x86::CPU& cpu)
 {
     cpu.eax = bridge::setSamplerState(app, cpu, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3));
     cpu.esp += 20;
+}
+
+void SetViewport(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::setViewport(app, cpu, arg(cpu, 0), pointer<DWORD>(arg(cpu, 1)));
+    cpu.esp += 12;
+}
+
+void SetFVF(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::setFVF(app, cpu, arg(cpu, 0), arg(cpu, 1));
+    cpu.esp += 12;
+}
+
+void Clear(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::clear(app, cpu, arg(cpu, 0), arg(cpu, 1), pointer<DWORD>(arg(cpu, 2)), arg(cpu, 3),
+                            arg(cpu, 4), asFloat(arg(cpu, 5)), arg(cpu, 6));
+    cpu.esp += 32;
+}
+
+void BeginScene(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::beginScene(app, cpu, arg(cpu, 0));
+    cpu.esp += 8;
+}
+
+void EndScene(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::endScene(app, cpu, arg(cpu, 0));
+    cpu.esp += 8;
+}
+
+void SetRenderTarget(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::setRenderTarget(app, cpu, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2));
+    cpu.esp += 16;
+}
+
+void SetDepthStencilSurface(WinApplication* app, x86::CPU& cpu)
+{
+    cpu.eax = bridge::setDepthStencilSurface(app, cpu, arg(cpu, 0), arg(cpu, 1));
+    cpu.esp += 12;
 }
 
 void SetTexture(WinApplication* app, x86::CPU& cpu)

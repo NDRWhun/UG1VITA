@@ -129,14 +129,15 @@ Device::Device(WinApplication* app, Direct3D* d3d, const D3DPRESENT_PARAMETERS& 
 
 Device::~Device()
 {
+    bridge::deviceGone(this);
     // Values recorded into a frame that is never submitted.
     if (m_frame)
         markEffectValuesDirty();
     bindSlot(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
     bindSlot(m_state.stream, static_cast<Buffer*>(nullptr));
     bindSlot(m_state.indices, static_cast<Buffer*>(nullptr));
-    hold(m_state.target, static_cast<Surface*>(nullptr));
-    hold(m_state.depth, static_cast<Surface*>(nullptr));
+    bindSlot(m_state.target, static_cast<Surface*>(nullptr));
+    bindSlot(m_state.depth, static_cast<Surface*>(nullptr));
     for (Object*& texture : m_state.textures)
         bindSlot(texture, static_cast<Object*>(nullptr));
     for (VertexDeclaration* d : m_fvfDeclarations)
@@ -144,18 +145,6 @@ Device::~Device()
     delete m_backBuffer;
     delete m_autoDepth;
     m_d3d->release();
-}
-
-template< typename T >
-void Device::hold(T*& slot, T* object)
-{
-    if (slot == object)
-        return;
-    if (object)
-        object->addRef();
-    if (slot)
-        slot->release();
-    slot = object;
 }
 
 template< typename T >
@@ -179,9 +168,9 @@ void Device::resetBackBuffer(const D3DPRESENT_PARAMETERS& params)
         m_params.BackBufferHeight = pf::gxm::DisplayHeight;
     }
     if (m_state.target == m_backBuffer)
-        hold(m_state.target, static_cast<Surface*>(nullptr));
+        bindSlot(m_state.target, static_cast<Surface*>(nullptr));
     if (m_state.depth == m_autoDepth)
-        hold(m_state.depth, static_cast<Surface*>(nullptr));
+        bindSlot(m_state.depth, static_cast<Surface*>(nullptr));
     delete m_backBuffer;
     delete m_autoDepth;
     m_autoDepth = nullptr;
@@ -238,8 +227,8 @@ void Device::defaults()
     }
     for (D3DMATRIX& m : m_state.transforms)
         m = s_identity;
-    hold(m_state.target, m_backBuffer);
-    hold(m_state.depth, m_autoDepth);
+    bindSlot(m_state.target, m_backBuffer);
+    bindSlot(m_state.depth, m_autoDepth);
     m_state.viewport = D3DVIEWPORT9{ 0, 0, m_params.BackBufferWidth, m_params.BackBufferHeight, 0.0f, 1.0f };
     m_sceneOpen = false;
     m_stateDirty = true;
@@ -830,7 +819,7 @@ HRESULT Device::SetRenderTarget(WinApplication* app, x86::CPU& cpu, DWORD index,
     if (!surface || surface->role() == Surface::RoleDepth
         || (surface->role() == Surface::RoleLevel && (!surface->container() || !surface->container()->desc().target)))
         return D3DERR_INVALIDCALL;
-    hold(m_state.target, surface);
+    bindSlot(m_state.target, surface);
     // A new render target resets the viewport to the whole target.
     m_state.viewport = D3DVIEWPORT9{ 0, 0, surface->width(), surface->height(), 0.0f, 1.0f };
     recordWords(CmdViewport, &m_state.viewport, sizeof(D3DVIEWPORT9) / 4);
@@ -859,7 +848,7 @@ HRESULT Device::SetDepthStencilSurface(WinApplication* app, x86::CPU& cpu, Surfa
     RC_USE(cpu);
     if (surface && surface->role() != Surface::RoleDepth)
         return D3DERR_INVALIDCALL;
-    hold(m_state.depth, surface);
+    bindSlot(m_state.depth, surface);
     return D3D_OK;
 }
 

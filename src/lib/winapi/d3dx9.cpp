@@ -363,29 +363,27 @@ public:
     HRESULT setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count, uint32_t fpscr);
     // The pass count Begin stores.
     UINT passCount() const                  { return info().passes[m_technique]; }
-    // The results of the setters for these arguments, without setting.
-    HRESULT checkFloats(x86::reg32 handle, bool data) const
+    // The type of each parameter handle in this effect (bridge::effect::paramTypes).
+    const uint8_t* paramTypes() const
     {
-        const int p = param(handle);
-        return p < 0 || !data || s_params[p].type != TypeFloat ? D3DERR_INVALIDCALL : D3D_OK;
-    }
-    HRESULT checkInt(x86::reg32 handle) const
-    {
-        const int p = param(handle);
-        return p >= 0 && (s_params[p].type == TypeInt || s_params[p].type == TypeFloat) ? D3D_OK : D3DERR_INVALIDCALL;
-    }
-    HRESULT checkFloat(x86::reg32 handle) const
-    {
-        const int p = param(handle);
-        return p >= 0 && s_params[p].type == TypeInt ? D3D_OK : checkFloats(handle, true);
-    }
-    HRESULT checkTexture(x86::reg32 handle, const Object* texture) const
-    {
-        const int p = param(handle);
-        if (p < 0 || s_params[p].type != TypeTexture)
-            return D3DERR_INVALIDCALL;
-        return texture && texture->kind() != KindTexture && texture->kind() != KindCubeTexture ? D3DERR_INVALIDCALL
-                                                                                                : D3D_OK;
+        static_assert(uint32_t(HandleParam) == bridge::effect::ParamHandleBase
+                      && uint32_t(ParamCount) <= bridge::effect::ParamHandleCount, "parameter handles");
+        static uint8_t s_types[EffectCount][bridge::effect::ParamHandleCount];
+        static bool s_built = false;
+        if (!s_built)
+        {
+            for (int k = 0; k < EffectCount; ++k)
+                for (uint32_t i = 0; i < bridge::effect::ParamHandleCount; ++i)
+                {
+                    const bool used = i < uint32_t(ParamCount) && (s_effects[k].params & BIT(i));
+                    s_types[k][i] = !used ? uint8_t(bridge::effect::ParamNone)
+                                  : s_params[i].type == TypeFloat ? uint8_t(bridge::effect::ParamFloat)
+                                  : s_params[i].type == TypeInt ? uint8_t(bridge::effect::ParamInt)
+                                                                : uint8_t(bridge::effect::ParamTexture);
+                }
+            s_built = true;
+        }
+        return s_types[m_kind];
     }
     HRESULT checkPass(UINT pass) const      { return pass >= info().passes[m_technique] ? D3DERR_INVALIDCALL : D3D_OK; }
 
@@ -1217,24 +1215,10 @@ UINT passCount(reg32 effect)
     return object(effect)->passCount();
 }
 
-HRESULT checkFloats(reg32 effect, reg32 handle, bool data)
+const uint8_t* paramTypes(reg32 effect)
 {
-    return object(effect)->checkFloats(handle, data);
-}
-
-HRESULT checkInt(reg32 effect, reg32 handle)
-{
-    return object(effect)->checkInt(handle);
-}
-
-HRESULT checkFloat(reg32 effect, reg32 handle)
-{
-    return object(effect)->checkFloat(handle);
-}
-
-HRESULT checkTexture(reg32 effect, reg32 handle, reg32 texture)
-{
-    return object(effect)->checkTexture(handle, lookup(texture));
+    const Object* o = lookup(effect);
+    return o && o->kind() == KindEffect ? static_cast<const Effect*>(o)->paramTypes() : nullptr;
 }
 
 HRESULT checkPass(reg32 effect, UINT pass)
