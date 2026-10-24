@@ -595,8 +595,11 @@ void syncEffectValues(Stream& stream);
 // Game thread: every value block sent whole with the next frame.
 void markEffectValuesDirty();
 // Render thread: floats of a value block, and what a pass draws with from mirrored blocks (shared may be null).
+// projected: stage 0 TEXTURETRANSFORMFLAGS has PROJECTED and the draw has four texture coordinates (ps_1_1 divides
+// them by the last one).
 uint32_t effectBlockFloats();
-void effectBinding(const EffectDraw& effect, const float* own, const float* shared, EffectBinding& binding);
+void effectBinding(const EffectDraw& effect, const float* own, const float* shared, bool projected,
+                   EffectBinding& binding);
 void effectVertexConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
 void effectFragmentConstants(const EffectDraw& effect, const float* own, const float* shared, float* out);
 
