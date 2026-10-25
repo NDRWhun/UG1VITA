@@ -189,15 +189,15 @@ const KeyCap s_keyCaps[] =
 {
     { 0x001AEF69, Cross,  "PC_X" },
     { 0xC5172FE2, Circle, "PC_BACK" },
-    { 0xC51FBF74, 0,      "PC_QUIT" },
-    { 0x6B6AB9EC, 0,      "PC_CUSTOM" },
-    { 0x8CF52B6B, 0,      "PC_RACEOP" },
-    { 0x04BDFDA3, 0,      "PC_PERFORMANCE" },
-    { 0x6C9A44A4, 0,      "PC_DELETE" },
-    { 0x4073AF02, 0,      "PC_CREATEROOM" },
-    { 0xCBDF98C9, 0,      "PC_AGREEMENT" },
-    { 0xA35C52C5, 0,      "PC_TUTORIAL" },
-    { 0xC51A8C5A, 0,      "PC_HELP" },
+    { 0xC51FBF74, Select,   "PC_QUIT" },
+    { 0x6B6AB9EC, Triangle, "PC_CUSTOM" },
+    { 0x8CF52B6B, Triangle, "PC_RACEOP" },
+    { 0x04BDFDA3, Triangle, "PC_PERFORMANCE" },
+    { 0x6C9A44A4, Triangle, "PC_DELETE" },
+    { 0x4073AF02, Triangle, "PC_CREATEROOM" },
+    { 0xCBDF98C9, Triangle, "PC_AGREEMENT" },
+    { 0xA35C52C5, Triangle, "PC_TUTORIAL" },
+    { 0xC51A8C5A, 0,        "PC_HELP" },
 };
 
 void replaceKeyCap(const KeyCap& cap, const Record& r)
@@ -524,9 +524,31 @@ void pollStrings()
 
 // Object names (hashes) a screen's package has for each menu bar item, bit by bit (0x4F8000): quit, next,
 // customize, race options, back, ?, create room, change colour, performance, delete persona, agreement, delete
-// profile, decal colour, create game, stock, default settings. The hidden items are all but next, back and bit 5.
+// profile, decal colour, create game, stock, default settings. Change colour (bit 7) is hidden.
 const reg32 MenuBarTags = 0x00706FD8;
-const int s_hiddenItems[] = { 0, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+const int s_hiddenItems[] = { 7 };
+
+// The items shown on the current screen, bit by bit as above ([0x735780], 0x4F8000), the current screen's package
+// name (0x72CDD0) and the character the menu bar's tick (0x4E6F00) reads and clears ([0x7363B1]: q quit, t
+// tutorial in the quick race mode select, the others per item below). [0x7363A8]: a text field is being edited.
+const reg32 MenuBarItems = 0x00735780, CurrentScreen = 0x0072CDD0, MenuBarKey = 0x007363B1,
+            TextEditing = 0x007363A8;
+
+struct ItemKey
+{
+    int  bit;
+    char key;
+};
+
+// Triangle: the first item shown in this order.
+const ItemKey s_triangleItems[] =
+{
+    { 2, 'c' }, { 3, 'r' }, { 8, 'p' }, { 14, 'z' }, { 15, 'z' }, { 12, 'z' }, { 11, 'd' }, { 9, 'd' }, { 10, 'a' },
+    { 6, 'z' }, { 13, 'z' },
+};
+const int QuitBit = 0;
+
+char s_pendingKey = 0;
 
 // Joystick object names on the controls screen (button order of src/lib/controls.cpp, axes X, Y, Z, Rx, Ry, Rz).
 const char s_cross[] = { char(Cross), 0 }, s_circle[] = { char(Circle), 0 }, s_square[] = { char(Square), 0 },
@@ -611,8 +633,41 @@ void poll()
 {
     if (!s_on)
         return;
+    if (s_pendingKey && char(ld8(MenuBarKey)) == s_pendingKey)
+        win32::g_guestBase[MenuBarKey] = 0;
+    s_pendingKey = 0;
     pollFonts();
     pollStrings();
+}
+
+void menuButton(MenuButton button)
+{
+    if (!s_on || ld32(TextEditing) != 0)
+        return;
+    const reg32 items = ld32(MenuBarItems);
+    char key = 0;
+    if (button == MenuSelect)
+    {
+        if (items & (1u << QuitBit))
+            key = 'q';
+    }
+    else
+    {
+        for (const ItemKey& item : s_triangleItems)
+        {
+            if (items & (1u << item.bit))
+            {
+                key = item.key;
+                break;
+            }
+        }
+        if (!key && guestNameIs(CurrentScreen, "mu_quickracemodeselect.fng"))
+            key = 't';
+    }
+    if (!key)
+        return;
+    win32::g_guestBase[MenuBarKey] = reg8(key);
+    s_pendingKey = key;
 }
 
 }}
