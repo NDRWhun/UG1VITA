@@ -74,8 +74,9 @@ races and track loading; menus stay centred. `hud_anchor=0` keeps the whole HUD 
 
 Button prompts: `button_prompts=vita` (default) shows the Vita buttons where the game shows PC keys: Cross and
 Circle on the menu bar's Next and Back, Triangle on a screen's extra item (Customize, Performance, Stock, Default
-settings, Decal colour, Delete profile, the tutorials) and Select on Quit, which these buttons then press in menus,
-and Vita button glyphs in the title screen's prompt, a loading tip and the controls screen. `button_prompts=pc`
+settings, Decal colour, Delete profile, the tutorials), which Triangle then presses in menus, and Vita button glyphs
+in the title screen's prompt, a loading tip and the controls screen; the Quit item is not shown (the PS button
+closes the game). `button_prompts=pc`
 keeps the game's PC prompts and menu bar. The glyphs are original art shipped in the VPK (`glyphs.bin`).
 
 Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your

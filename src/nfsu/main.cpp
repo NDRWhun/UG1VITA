@@ -101,8 +101,8 @@ static std::vector<win32::Section> imageSections(const std::vector<uint8_t>& ima
 // direction (down, up, left, right) of each of the 4 hats the game reads. Race: R accelerates, L brakes, Cross is
 // nitrous, Square the handbrake, Triangle the camera, Circle looks back, d-pad up/down and the rear touch halves
 // shift. Menus: Cross accepts (20), Circle goes back (23), Start is the game's Start (25, also "button 2"), Square
-// "button 3" (26), L / R the triggers (27 / 28), d-pad and hat navigate; Triangle and the Select tap press the
-// menu bar's extra item and Quit (src/nfsu/prompts.cpp, button_prompts=vita).
+// "button 3" (26), L / R the triggers (27 / 28), d-pad and hat navigate; Triangle presses the menu bar's extra
+// item (src/nfsu/prompts.cpp, button_prompts=vita).
 static const x86::reg32 s_raceActions[16] = { 10, 9, 6, 5, 8, 7, 2, 1, 14, 12, 0, 0, 7, 4, 8, 3 };
 static const x86::reg32 s_menuActions[16] = { 0, 23, 20, 26, 0, 0, 27, 28, 0, 25, 0, 0, 16, 19, 17, 18 };
 static const x86::reg32 s_raceHat[4] = { 0, 0, 3, 4 };
@@ -224,14 +224,12 @@ static void padPollHook(x86::reg32* buttons, int* pov)
     if (s_hidden & hatBit)
         *pov = -1;
 
-    // Menus: Triangle (button 0) and the Select tap (button 8) give the menu bar its item keys.
+    // Menus: Triangle (button 0) gives the menu bar the key of the screen's extra item.
     static x86::reg32 s_previous = 0;
     const x86::reg32 pressed = *buttons & ~s_previous;
     s_previous = *buttons;
     if (menu && (pressed & 1u))
-        nfsu::prompts::menuButton(nfsu::prompts::MenuTriangle);
-    if (menu && (pressed & (1u << 8)))
-        nfsu::prompts::menuButton(nfsu::prompts::MenuSelect);
+        nfsu::prompts::menuTriangle();
 }
 
 int main(int, char**)
