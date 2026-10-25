@@ -70,7 +70,11 @@ Screen: `widescreen=1` (default) renders at the display's 960x544 with the 4:3 v
 one, and centres the 2D screens at 4:3; `widescreen=0` keeps the game's resolution option (800x600 by default)
 scaled to the display. `hud_anchor=1` (default) puts the race HUD's elements and the track map against the screen
 edge on their side at the same scale and stretches full-screen 2D (fades, backgrounds) to the full width during
-races and track loading; menus stay centred. `hud_anchor=0` keeps the whole HUD centred at 4:3.
+races and track loading. `hud_anchor=0` keeps the whole HUD centred at 4:3. `menu_widescreen=on` (default) lays the
+menus out for the screen width in every part of the game (front end, pause menu, results, dialogs): plain colour
+fills and gradients that reach a screen edge continue to the edge of the display, legends, titles, arrows and side
+panels next to a screen edge move to that edge, and menu blocks, text, pictures and movies keep their shape in the
+middle; 2D placed off the 4:3 screen stays hidden. `menu_widescreen=off` keeps the menus centred at 4:3.
 
 Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your
 car; a `bench: summary` line gives the fps and frame times from the start signal to the finish (the timing log stays

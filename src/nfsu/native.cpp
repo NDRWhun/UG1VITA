@@ -59,6 +59,12 @@ double s_hudWidth = 1.0;    // part of the back buffer width the 640x480 space s
 // or stretched to the full width.
 enum class Place { Centre, Left, Right, Full };
 
+void setMapping(double scale, double offset)
+{
+    rc::stf32(HudScale, float(scale));
+    rc::stf32(HudOffset, float(offset));
+}
+
 void setPlace(Place place)
 {
     const double k = s_hudWidth;
@@ -69,8 +75,7 @@ void setPlace(Place place)
         offset = 2.0 * k - 1.0;
     else if (place == Place::Full)
         scale = 1.0 / 320.0, offset = 1.0;
-    rc::stf32(HudScale, float(scale));
-    rc::stf32(HudOffset, float(offset));
+    setMapping(scale, offset);
 }
 
 // hud_anchor=1 (default): in the track game flow states (4 and up; 3 is the front end) the HUD packages' elements go
@@ -80,6 +85,18 @@ bool anchoring()
     static const bool hudAnchor = pf::Config::getBool("hud_anchor", true);
     const x86::reg32 GameFlowState = 0x77a920;
     return hudAnchor && s_hudWidth < 1.0 && rc::ld32(GameFlowState) >= 4;
+}
+
+// menu_widescreen=on (default): the packages other than the HUD's are laid out for the screen width in every game
+// flow state (menuPlace below); off keeps them centred at 4:3.
+bool menuWidescreen()
+{
+    static const bool menu = [] {
+        const bool on = pf::Config::getBool("menu_widescreen", true);
+        pf::logInfo("screen: menu_widescreen=%s", on ? "on" : "off");
+        return on;
+    }();
+    return menu && s_hudWidth < 1.0;
 }
 
 // x extent in the 640x480 space.
@@ -125,25 +142,31 @@ Span renderSpan(x86::reg32 renderObject)
     return span;
 }
 
-// HUD packages (FEPackage name at +0xC).
-bool isHudPackage(x86::reg32 package)
+// Package name (FEPackage name at +0xC) equal to one of names, ignoring case.
+template <size_t N>
+bool packageNamed(x86::reg32 package, const char* const (&names)[N])
 {
-    static const char* const names[] = {"HUD_SingleRace.fng", "HUD_Drift.fng", "drag_HUD_test.fng", "2PHudTop.fng",
-                                        "2PHudBot.fng", "Chyron.fng"};
     const x86::reg32 name = package ? rc::ld32(package + 0xc) : 0;
     if (!name)
         return false;
     const char* text = reinterpret_cast<const char*>(win32::g_guestBase + name);
-    for (const char* hud : names)
+    for (const char* wanted : names)
     {
         size_t i = 0;
-        while (hud[i] && std::tolower(static_cast<unsigned char>(text[i])) ==
-                             std::tolower(static_cast<unsigned char>(hud[i])))
+        while (wanted[i] && std::tolower(static_cast<unsigned char>(text[i])) ==
+                                std::tolower(static_cast<unsigned char>(wanted[i])))
             ++i;
-        if (!hud[i] && !text[i])
+        if (!wanted[i] && !text[i])
             return true;
     }
     return false;
+}
+
+bool isHudPackage(x86::reg32 package)
+{
+    static const char* const names[] = {"HUD_SingleRace.fng", "HUD_Drift.fng", "drag_HUD_test.fng", "2PHudTop.fng",
+                                        "2PHudBot.fng", "Chyron.fng"};
+    return packageNamed(package, names);
 }
 
 // FE objects drawn by the package flush in progress, with the place of each.
@@ -242,6 +265,228 @@ const Element* findElement(x86::reg32 object)
     return found != s_elements.end() && found->object == object ? &*found : nullptr;
 }
 
+// Menu layout (menu_widescreen). In the 640x480 space, per package flush:
+// - clusters: the drawn objects that are on the 640x480 screen, are no movie and do not reach both screen edges
+//   (x <= 8 and >= 632), joined when their boxes are less than 24 apart horizontally and 12 vertically, and the
+//   objects of one top-level group no wider than 320. A cluster left of x = 320 goes to the left screen edge at the
+//   4:3 scale when it starts at x <= 56, with a linear blend to centred at x = 88; a cluster right of x = 320 goes to
+//   the right edge from x >= 584 (centred at 552).
+// - fills (images whose texture is magnified at least 4 times across, or untextured): an end at x <= 8 or >= 632
+//   reaches the screen edge (blend to unchanged at 16 / 624), at the stretch of the full width.
+// - objects wholly left of x = 0 or right of x = 640 stay off the screen; movies stay centred.
+// PC_menubar.fng goes to the left edge as a whole; PreRaceStats.fng keeps its objects in place (fills still reach the
+// edges), its bet markers belong to the racer boxes.
+struct Box
+{
+    Span x;
+    float y0 = HUGE_VALF, y1 = -HUGE_VALF;
+};
+
+// x and y extent of an FE render object's polygons (y at +0x24, +0x34, +0x44, +0x54 of the node).
+Box renderBox(x86::reg32 renderObject)
+{
+    Box box;
+    const x86::reg32 head = renderObject + 0x18;
+    x86::reg32 node = rc::ld32(head);
+    for (int n = 0; node != head && node != 0 && n < 4096; node = rc::ld32(node), ++n)
+        for (x86::reg32 v = 0; v < 4; ++v)
+        {
+            const float x = rc::ldf32(node + 0x20 + 0x10 * v), y = rc::ldf32(node + 0x24 + 0x10 * v);
+            if (!std::isfinite(x) || !std::isfinite(y))
+                continue;
+            box.x.add(x);
+            box.y0 = std::min(box.y0, y), box.y1 = std::max(box.y1, y);
+        }
+    return box;
+}
+
+const x86::reg32 FEObjectType = 0x18, FEObjectData = 0x2c;
+const x86::reg32 TypeImage = 1, TypeMovie = 7, TypeColoredImage = 9;
+
+float rampDown(float x, float full, float none)
+{
+    return x <= full ? 1.0f : x >= none ? 0.0f : (none - x) / (none - full);
+}
+
+float rampUp(float x, float none, float full)
+{
+    return 1.0f - rampDown(x, none, full);
+}
+
+struct MenuElement
+{
+    x86::reg32 object;      // FEObject
+    x86::reg32 unit;        // its top-level group, or the object itself
+    Box box;
+    bool member;            // takes part in the clusters
+    size_t cluster;         // union-find parent while the clusters are built
+    float left, right;      // weight of the left / right screen edge placement
+};
+std::vector<MenuElement> s_menu;    // by object while a menu flush runs
+bool s_menuFlush = false;
+
+size_t clusterOf(size_t i)
+{
+    while (s_menu[i].cluster != i)
+        i = s_menu[i].cluster = s_menu[s_menu[i].cluster].cluster;
+    return i;
+}
+
+void joinClusters(size_t a, size_t b)
+{
+    a = clusterOf(a), b = clusterOf(b);
+    if (a != b)
+        s_menu[std::max(a, b)].cluster = std::min(a, b);
+}
+
+// Builds the clusters of the render list (the objects placeElements reads) and their edge weights.
+void placeMenuElements(x86::reg32 render, x86::reg32 package)
+{
+    static const char* const leftPackages[] = {"PC_menubar.fng"};
+    static const char* const fixedPackages[] = {"PreRaceStats.fng"};
+    const bool allLeft = packageNamed(package, leftPackages), fixed = packageNamed(package, fixedPackages);
+
+    s_renders.clear();
+    const x86::reg32 renders = render + 0x10;
+    x86::reg32 node = rc::ld32(renders);
+    for (int n = 0; node != renders && node != 0 && n < 65536; node = rc::ld32(node), ++n)
+        s_renders.emplace_back(rc::ld32(node + 8), node);
+    std::sort(s_renders.begin(), s_renders.end());
+
+    s_menu.clear();
+    const x86::reg32 RenderLists = 0x746118;
+    for (x86::reg32 list = RenderLists; list < RenderLists + 256 * 8; list += 8)
+    {
+        x86::reg32 entry = rc::ld32(list);
+        for (int n = 0; entry != list && entry != 0 && n < 65536; entry = rc::ld32(entry), ++n)
+        {
+            const x86::reg32 object = rc::ld32(entry + 8);
+            MenuElement element = {object, topGroup(render, object), Box(), false, 0, allLeft ? 1.0f : 0.0f, 0.0f};
+            const auto found = std::lower_bound(s_renders.begin(), s_renders.end(),
+                                                std::make_pair(object, x86::reg32(0)));
+            if (found != s_renders.end() && found->first == object)
+                element.box = renderBox(found->second);
+            const Span& x = element.box.x;
+            element.member = !allLeft && !fixed && !x.empty() && rc::ld32(object + FEObjectType) != TypeMovie &&
+                             x.x1 > 0.0f && x.x0 < 640.0f && element.box.y1 > 0.0f && element.box.y0 < 480.0f &&
+                             !(x.x0 <= 8.0f && x.x1 >= 632.0f);
+            element.cluster = s_menu.size();
+            s_menu.push_back(element);
+        }
+    }
+
+    // Objects of a top-level group no wider than 320.
+    std::vector<size_t> order(s_menu.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        order[i] = i;
+    std::sort(order.begin(), order.end(), [](size_t a, size_t b) { return s_menu[a].unit < s_menu[b].unit; });
+    for (size_t first = 0, last; first < order.size(); first = last)
+    {
+        Span unit;
+        for (last = first; last < order.size() && s_menu[order[last]].unit == s_menu[order[first]].unit; ++last)
+            if (s_menu[order[last]].member)
+                unit.add(s_menu[order[last]].box.x);
+        if (unit.empty() || unit.x1 - unit.x0 > 320.0f)
+            continue;
+        size_t head = order.size();
+        for (size_t i = first; i < last; ++i)
+            if (s_menu[order[i]].member)
+            {
+                if (head == order.size())
+                    head = order[i];
+                else
+                    joinClusters(head, order[i]);
+            }
+    }
+
+    // Boxes less than 24 apart horizontally and 12 vertically.
+    const float GapX = 24.0f, GapY = 12.0f;
+    order.erase(std::remove_if(order.begin(), order.end(), [](size_t i) { return !s_menu[i].member; }), order.end());
+    std::sort(order.begin(), order.end(), [](size_t a, size_t b) { return s_menu[a].box.x.x0 < s_menu[b].box.x.x0; });
+    for (size_t i = 0; i < order.size(); ++i)
+    {
+        const Box& a = s_menu[order[i]].box;
+        for (size_t j = i + 1; j < order.size(); ++j)
+        {
+            const Box& b = s_menu[order[j]].box;
+            if (b.x.x0 > a.x.x1 + GapX)
+                break;
+            if (b.y0 <= a.y1 + GapY && a.y0 <= b.y1 + GapY)
+                joinClusters(order[i], order[j]);
+        }
+    }
+
+    // Cluster extents, then the edge weights of their objects.
+    std::vector<Span> extents(s_menu.size());
+    for (size_t i : order)
+        extents[clusterOf(i)].add(s_menu[i].box.x);
+    for (size_t i : order)
+    {
+        const Span& extent = extents[clusterOf(i)];
+        MenuElement& element = s_menu[i];
+        element.left = extent.x1 <= 320.0f ? rampDown(extent.x0, 56.0f, 88.0f) : 0.0f;
+        element.right = extent.x0 >= 320.0f ? rampUp(extent.x1, 552.0f, 584.0f) : 0.0f;
+    }
+
+    std::sort(s_menu.begin(), s_menu.end(),
+              [](const MenuElement& a, const MenuElement& b) { return a.object < b.object; });
+}
+
+const MenuElement* findMenuElement(x86::reg32 object)
+{
+    const auto found = std::lower_bound(s_menu.begin(), s_menu.end(), object,
+                                        [](const MenuElement& element, x86::reg32 o) { return element.object < o; });
+    return found != s_menu.end() && found->object == object ? &*found : nullptr;
+}
+
+// An image whose texture is magnified at least 4 times across (u at +0x44 and +0x4C of its data, texture width at
+// +0x44 of the TextureInfo at +0x14 of the render object), or an untextured one: a plain fill or gradient.
+bool isFill(x86::reg32 renderObject, x86::reg32 object, const Span& x)
+{
+    const x86::reg32 type = rc::ld32(object + FEObjectType);
+    if (type != TypeImage && type != TypeColoredImage)
+        return false;
+    const x86::reg32 texture = rc::ld32(renderObject + 0x14);
+    if (!texture)
+        return true;
+    const x86::reg32 data = rc::ld32(object + FEObjectData);
+    const float u = data ? std::fabs(rc::ldf32(data + 0x4c) - rc::ldf32(data + 0x44)) : 1.0f;
+    const float texels = float(rc::ld16(texture + 0x44)) * (std::isfinite(u) ? u : 1.0f);
+    return texels > 0.0f && x.x1 - x.x0 >= 4.0f * texels;
+}
+
+// Sets the mapping of an FE render object of a menu flush; false keeps the centred one.
+bool menuPlace(x86::reg32 renderObject)
+{
+    const x86::reg32 object = rc::ld32(renderObject + 8);
+    const Span x = renderSpan(renderObject);
+    if (x.empty() || rc::ld32(object + FEObjectType) == TypeMovie)
+        return false;
+    if (x.x1 <= 0.0f || x.x0 >= 640.0f)
+    {
+        setMapping(0.0, 4.0);
+        return true;
+    }
+    const double k = s_hudWidth;
+    const MenuElement* element = findMenuElement(object);
+    const double left = element ? element->left : 0.0, right = element ? element->right : 0.0;
+    const double scale = k / 320.0, offset = k + (1.0 - k) * (left - right);
+    const float extendLeft = rampDown(x.x0, 8.0f, 16.0f), extendRight = rampUp(x.x1, 624.0f, 632.0f);
+    if ((extendLeft > 0.0f || extendRight > 0.0f) && x.x1 - x.x0 > 0.5f && isFill(renderObject, object, x))
+    {
+        double x0 = x.x0 * scale - offset, x1 = x.x1 * scale - offset;
+        x0 += extendLeft * (std::min(x.x0 / 320.0 - 1.0, x0) - x0);
+        x1 += extendRight * (std::max(x.x1 / 320.0 - 1.0, x1) - x1);
+        const double fillScale = (x1 - x0) / (x.x1 - x.x0);
+        setMapping(fillScale, x.x0 * fillScale - x0);
+        return true;
+    }
+    if (left == 0.0 && right == 0.0)
+        return false;
+    setMapping(scale, offset);
+    return true;
+}
+
 }
 
 // _ftol: fistp with the rounding control set to truncate, then the caller's control word again.
@@ -312,22 +557,39 @@ void sub_4086b0(win32::WinApplication* app, x86::CPU& cpu)
 }
 
 // End of an FE package's rendering (cFEng, ecx; the package in the argument): the guest draws the package's render
-// list (0x4F2EB0). In a HUD package the objects are placed first (placeElements) and FE render objects are drawn
-// at their place (sub_514b90).
+// list (0x4F2EB0). In a HUD package the objects are placed first (placeElements), in the other packages the menu
+// layout is built first (placeMenuElements), and FE render objects are drawn at their place (sub_514b90).
 void sub_4f5730(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::FrontEnd);
-    s_anchorFlush = anchoring() && isHudPackage(argument(cpu, 0));
+    const x86::reg32 package = argument(cpu, 0);
+    const bool hud = isHudPackage(package);
+    s_anchorFlush = hud && anchoring();
+    s_menuFlush = !hud && menuWidescreen();
     if (s_anchorFlush)
         placeElements(rc::ld32(cpu.ecx + 0xc));
+    else if (s_menuFlush)
+        placeMenuElements(rc::ld32(cpu.ecx + 0xc), package);
     sub_4f5730_guest(app, cpu);
-    s_anchorFlush = false;
+    s_anchorFlush = s_menuFlush = false;
 }
 
 // Draws the polygons of an FE render object (FERenderObject in the argument, its FEObject at +8) through the 2D
-// polygon routine 0x40BEF0. With anchoring: full-width objects are stretched, HUD objects go to their place.
+// polygon routine 0x40BEF0. In a menu flush the menu layout places it (menuPlace). With anchoring: full-width objects
+// are stretched, HUD objects go to their place.
 void sub_514b90(win32::WinApplication* app, x86::CPU& cpu)
 {
+    if (s_menuFlush)
+    {
+        if (!menuPlace(argument(cpu, 0)))
+        {
+            sub_514b90_guest(app, cpu);
+            return;
+        }
+        sub_514b90_guest(app, cpu);
+        setPlace(Place::Centre);
+        return;
+    }
     if (!anchoring())
     {
         sub_514b90_guest(app, cpu);
