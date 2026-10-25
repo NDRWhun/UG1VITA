@@ -104,7 +104,7 @@ enum Audio
     AudioCount
 };
 
-// Event counts of all threads, taken by the phase log (perf_phases).
+// Event counts of all threads, taken by the phase log (timing_phases).
 enum Count
 {
     CountClock,         // process clock reads (now, ticksUs, ticksMs)

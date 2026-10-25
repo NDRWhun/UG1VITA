@@ -47,7 +47,7 @@ std::atomic<int> s_busy{0};
 std::atomic<int> s_waiter{0};
 Semaphore* s_wake = nullptr;
 Semaphore* s_done = nullptr;
-// The core 3 worker with core3_layout=0: posted tasks only, woken by s_taskWake.
+// The core 3 worker with core3_tasks=jobs: posted tasks only, woken by s_taskWake.
 Semaphore* s_taskWake = nullptr;
 Thread* s_threads[MaxWorkers] = {};
 int s_workers = 0;      // workers that run phases

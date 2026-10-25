@@ -109,13 +109,13 @@ void leaveSlow(Id id)
 
 void configure()
 {
-    g_on = pf::Config::getBool("perf_phases", false);
+    g_on = pf::Config::getBool("timing_phases", false);
     if (!g_on)
         return;
     pf::perf::startCounting();
-    pf::logInfo("phases: phase log on (perf_phases), every %u frames; %s", unsigned(ReportFrames),
+    pf::logInfo("phases: phase log on (timing_phases), every %u frames; %s", unsigned(ReportFrames),
                 pf::perf::enabled() ? "lock releases taken out of the phase times"
-                                    : "phase times include lock releases (perf_log=1 takes them out)");
+                                    : "phase times include lock releases (timing_log=on takes them out)");
 }
 
 void frame()

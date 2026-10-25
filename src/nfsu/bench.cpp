@@ -168,14 +168,14 @@ bool enabled()
 
 void configure(win32::WinApplication& app)
 {
-    s_enabled = pf::Config::getBool("bench", false);
+    s_enabled = pf::Config::getBool("benchmark", false);
     if (!s_enabled)
         return;
-    s_track = pf::Config::getInt("bench_track", DefaultTrack);
-    s_laps = std::min(std::max(pf::Config::getInt("bench_laps", 2), 1), 10);
-    s_opponents = std::min(std::max(pf::Config::getInt("bench_opponents", 3), 0), 3);
-    s_seconds = std::max(pf::Config::getInt("bench_seconds", 0), 0);
-    s_exit = pf::Config::getBool("bench_exit", false);
+    s_track = pf::Config::getInt("benchmark_track", DefaultTrack);
+    s_laps = std::min(std::max(pf::Config::getInt("benchmark_laps", 2), 1), 10);
+    s_opponents = std::min(std::max(pf::Config::getInt("benchmark_opponents", 3), 0), 3);
+    s_seconds = std::max(pf::Config::getInt("benchmark_seconds", 0), 0);
+    s_exit = pf::Config::getBool("benchmark_exit", false);
     pf::logInfo("bench: on, track %d, %d laps, %d opponents, AI drives the player's car, seed 0x%08X, "
                 "measure %s, %s", s_track, s_laps, s_opponents, unsigned(fixedSeed()),
                 s_seconds ? "up to the finish or the time limit" : "up to the finish",

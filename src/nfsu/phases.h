@@ -3,7 +3,7 @@
 
 #include <lib/winapp.h>
 
-// Phase log (perf_phases=1): game thread time of the main loop's top-level phases and of the render's sub-phases,
+// Phase log (timing_phases=on): game thread time of the main loop's top-level phases and of the render's sub-phases,
 // per frame, without the time the thread had the execution lock released (known with the timing log on), plus
 // event counts of all threads (clock reads, critical sections, lock releases, preemptions). One log line pair every
 // ReportFrames frames. Off by default; a phase costs two clock reads per call when on.
@@ -64,7 +64,7 @@ private:
     Id m_id;
 };
 
-// Reads perf_phases; before guest code runs.
+// Reads timing_phases; before guest code runs.
 void configure();
 
 // Game thread, after each frame render: counts the frame and logs every ReportFrames frames.

@@ -41,9 +41,9 @@ struct ThreadControl
     std::atomic<int>    priority;       // Windows thread priority
     static const int NoHolderSlot = -2;
 
-    pf::perf::Holder    holder;         // kind of thread, for perf_log
+    pf::perf::Holder    holder;         // kind of thread, for timing_log
     const char*         name;           // log name of a guest thread
-    int                 holderSlot;     // perf_log lock holder slot, NoHolderSlot until the first release
+    int                 holderSlot;     // timing_log lock holder slot, NoHolderSlot until the first release
     std::atomic<int>    suspendCount;   // changed under s_tableMutex
     bool                startPending;   // created suspended and not started yet
     pf::Semaphore*      start;          // start semaphore of a guest thread

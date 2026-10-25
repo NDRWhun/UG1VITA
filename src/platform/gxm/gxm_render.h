@@ -193,9 +193,9 @@ private:
     };
     void planFrame(const render::Frame& frame, bool stretchDirect);
     // Moves the alpha-tested draws of a scene's order after the opaque draws that follow them up to the next draw
-    // that is not depth-tested LESS/LESSEQUAL with depth write, full colour mask and no blend (setting draw_sort).
+    // that is not depth-tested LESS/LESSEQUAL with depth write, full colour mask and no blend (setting alpha_draw_order).
     void sortScene(const render::Frame& frame, uint32_t scene);
-    // perf_log: HSR flush transitions (alpha-tested to opaque or blended draw) before and after sortScene.
+    // timing_log: HSR flush transitions (alpha-tested to opaque or blended draw) before and after sortScene.
     struct SortStats
     {
         uint32_t    frames = 0;
@@ -320,7 +320,7 @@ private:
     SceGxmTexture samplerTexture(const render::DrawState& s, uint32_t i) const;
     void upload(void* buffer, const render::UniformField* fields, uint8_t count,
                 const std::vector<const SceGxmProgramParameter*>& parameters, const float* constants);
-    // Command lists (setting gxm_lists): workers on the render core, core 3 (core3_layout=1) and core 2 record the
+    // Command lists (setting gxm_lists): workers on the render core, core 3 (core3_tasks=helpers) and core 2 record the
     // frame's scenes in ranges; the immediate context executes the lists in order.
     void initLists();
     void shutdownLists();
@@ -365,7 +365,7 @@ private:
     std::vector<DrawPrograms>   m_programs;             // per draw of the frame being drawn
     std::vector<ScenePlan>      m_plan;
     std::vector<uint32_t>       m_order;                // draw indices of the scenes, carried clears first
-    bool                        m_drawSort = true;      // setting draw_sort
+    bool                        m_drawSort = true;      // setting alpha_draw_order
     std::vector<uint32_t>       m_held;                 // sortScene: alpha-tested draws not placed yet
     SortStats                   m_sortStats;
 

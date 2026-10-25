@@ -73,11 +73,11 @@ void setPlace(Place place)
     rc::stf32(HudOffset, float(offset));
 }
 
-// hud_anchor=1 (default): in the track game flow states (4 and up; 3 is the front end) the HUD packages' elements go
-// to the screen edge on their side and full-width 2D is stretched; 0 keeps every 2D element centred.
+// hud_widescreen=on (default): in the track game flow states (4 and up; 3 is the front end) the HUD packages'
+// elements go to the screen edge on their side and full-width 2D is stretched; off keeps every 2D element centred.
 bool anchoring()
 {
-    static const bool hudAnchor = pf::Config::getBool("hud_anchor", true);
+    static const bool hudAnchor = pf::Config::getBool("hud_widescreen", true);
     const x86::reg32 GameFlowState = 0x77a920;
     return hudAnchor && s_hudWidth < 1.0 && rc::ld32(GameFlowState) >= 4;
 }
@@ -286,7 +286,7 @@ void sub_647cb0(win32::WinApplication* app, x86::CPU& cpu)
 
 // Back buffer size (0x4086B0): width in the argument, height in esi; the guest stores them in the present parameters
 // and in [0x701034] / [0x701038]. Every device creation and Reset size passes here (0x408A38, 0x4087A0..0x408804,
-// 0x4494CE). widescreen=1 (default) replaces the size with the display's, 0 keeps the game's. Afterwards the 2D
+// 0x4494CE). widescreen=on (default) replaces the size with the display's, off keeps the game's. Afterwards the 2D
 // mapping the patched code reads (generate.py PATCHES) is written: the 640x480 space spans k of the back buffer
 // width, centred, with k = (height / width) / 0.75 and at most 1.
 void sub_4086b0(win32::WinApplication* app, x86::CPU& cpu)

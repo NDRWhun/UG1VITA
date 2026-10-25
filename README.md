@@ -63,27 +63,33 @@ Not final yet.
 
 ## Settings
 
-Optional settings go in `ux0:data/NFSUG1VITA/nfsug1vita.cfg`, one `key=value` per line. The list of settings is not
-final yet. The log is written to `ux0:data/NFSUG1VITA/nfsug1vita.log`.
+Optional settings go in `ux0:data/NFSUG1VITA/nfsug1vita.cfg`, one `key=value` per line; lines starting with `#` are
+comments. The list of settings is not final yet. On/off settings also accept `true`/`false`, `yes`/`no` and `1`/`0`.
+A key that is not a setting is reported in the log as `config: unknown setting '<key>'` and ignored. The log is
+written to `ux0:data/NFSUG1VITA/nfsug1vita.log`.
 
-Screen: `widescreen=1` (default) renders at the display's 960x544 with the 4:3 vertical view and a wider horizontal
-one, and centres the 2D screens at 4:3; `widescreen=0` keeps the game's resolution option (800x600 by default)
-scaled to the display. `hud_anchor=1` (default) puts the race HUD's elements and the track map against the screen
-edge on their side at the same scale and stretches full-screen 2D (fades, backgrounds) to the full width during
-races and track loading; menus stay centred. `hud_anchor=0` keeps the whole HUD centred at 4:3.
+| Key | Values | Default | Effect |
+|-----|--------|---------|--------|
+| `widescreen` | `on`, `off` | `on` | `on` renders at the display's 960x544 with the 4:3 vertical view and a wider horizontal one, and centres the 2D screens at 4:3; `off` keeps the game's resolution option (800x600 by default) |
+| `hud_widescreen` | `on`, `off` | `on` | `on` puts the race HUD's elements and the track map against the screen edge on their side at the same scale and stretches full-screen 2D (fades, backgrounds) to the full width during races and track loading; menus stay centred. `off` keeps the whole HUD centred at 4:3 |
+| `fit_4_3` | `stretch`, `pillarbox` | `stretch` | how a picture that is not 960x544 (`widescreen=off`) fills the display: stretched to the full display, or at its own aspect with black bars |
+| `frame_rate` | `30`, `60` | `30` | frame rate limit: every second display refresh, or every one with 60 or more |
+| `car_reflection_interval` | `1`-`6` | `1` | frames over which the highest car reflection level redraws its six cube faces (`1`: all six every frame, as the game does) |
+| `rear_touch` | `on`, `off` | `on` | rear touch pad input (left and right halves) |
+| `front_touch` | `on`, `off` | `on` | front touch screen input (top strip) |
 
-Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your
-car; a `bench: summary` line gives the fps and frame times from the start signal to the finish (the timing log stays
-off unless `bench_perf=1` or `perf_log=1`). Off by default; the other keys need `bench=1`:
+Race benchmark: `benchmark=on` skips the front end and the movies and starts a circuit race in which the AI drives
+your car; a `bench: summary` line gives the fps and frame times from the start signal to the finish (the timing log
+stays off unless `benchmark_timing_log=on` or `timing_log=on`). Off by default; the other keys need `benchmark=on`:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `bench_track` | 1001 | track number (1001-1008 are the circuits; 1001 is Market St.) |
-| `bench_laps` | 2 | laps, 1-10 |
-| `bench_opponents` | 3 | AI opponents, 0-3 |
-| `bench_seconds` | 0 | ends the measurement after this many seconds (0: at the finish) |
-| `bench_exit` | 0 | 1 quits the game after the summary |
-| `bench_perf` | 0 | 1 turns the timing log (`perf:` lines) on during the benchmark |
+| `benchmark_track` | 1001 | track number (1001-1008 are the circuits; 1001 is Market St.) |
+| `benchmark_laps` | 2 | laps, 1-10 |
+| `benchmark_opponents` | 3 | AI opponents, 0-3 |
+| `benchmark_seconds` | 0 | ends the measurement after this many seconds (0: at the finish) |
+| `benchmark_exit` | `off` | `on` quits the game after the summary |
+| `benchmark_timing_log` | `off` | `on` turns the timing log (`perf:` lines) on during the benchmark |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

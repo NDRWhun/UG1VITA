@@ -210,7 +210,7 @@ int AudioDevice::threadEntry(void* self)
 // buffers' play cursors advance in real time.
 void AudioDevice::run()
 {
-    // perf_log: output level and playing buffers about every 5 s.
+    // timing_log: output level and playing buffers about every 5 s.
     const bool levels = pf::perf::enabled();
     x86::reg32 levelFrames = 0;
     x86::reg32 peak = 0;

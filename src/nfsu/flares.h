@@ -10,8 +10,8 @@ namespace nfsu { namespace flares
 // 0x5447c0 (one flare: intensity, visibility, the flare quads) and 0x5443f0 (one quad, built and submitted through
 // guest 0x40c300). In the world pass the game thread updates the flare records and pack flags in the guest's order,
 // the job workers compute each flare's visibility and quad inputs, and the game thread then builds and submits the
-// quads in the guest's order. Settings: flares_native=0 runs the guest code, flares_parallel=0 keeps the per-flare
-// work on the game thread, shadow_flares=1 runs native and guest code and logs the first difference.
+// quads in the guest's order. Settings: flares_native=off runs the guest code, flares_parallel=off keeps the per-flare
+// work on the game thread, shadow_flares=on runs native and guest code and logs the first difference.
 void worldFlares(win32::WinApplication* app, x86::CPU& cpu);
 void lightFlare(win32::WinApplication* app, x86::CPU& cpu);
 void flareQuad(win32::WinApplication* app, x86::CPU& cpu);
