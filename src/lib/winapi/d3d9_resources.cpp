@@ -32,7 +32,7 @@ x86::reg32 guestOf(Object* object)
     return object ? object->guest() : 0;
 }
 
-// Setting texture_async=0: unlocks swizzle on the game thread.
+// Setting texture_async=off: unlocks swizzle on the game thread.
 bool asyncUploads()
 {
     static const bool async = pf::Config::getBool("texture_async", true);

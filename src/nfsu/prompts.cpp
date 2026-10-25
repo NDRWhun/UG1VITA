@@ -570,14 +570,12 @@ const char* const s_axisNames[win32::controls::AxisCount] =
 
 void configure()
 {
-    const char* mode = pf::Config::getString("button_prompts", "vita");
-    if (strcmp(mode, "pc") == 0)
+    static const char* const Modes[] = { "vita", "pc" };
+    if (pf::Config::getChoice("button_prompts", Modes, 2, 0) == 1)
     {
         pf::logInfo("button prompts: the game's PC prompts (button_prompts=pc)");
         return;
     }
-    if (strcmp(mode, "vita") != 0)
-        pf::logError("button_prompts=%s: unknown value, using vita", mode);
     if (!loadAtlas("app0:glyphs.bin"))
     {
         pf::logError("button prompts: app0:glyphs.bin is missing or invalid, keeping the PC prompts");

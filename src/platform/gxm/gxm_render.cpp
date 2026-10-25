@@ -386,10 +386,11 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
     logInfo("gxm: %s draws", m_precomputed ? "precomputed" : "immediate");
     m_cullSwap = Config::getBool("cull_swap", false);
     if (m_cullSwap)
-        logInfo("gxm: cull winding swapped (cull_swap=1)");
-    m_drawSort = Config::getBool("draw_sort", true);
-    logInfo("gxm: alpha-tested draws %s (draw_sort=%d)", m_drawSort ? "after opaque draws" : "in game order",
-            m_drawSort ? 1 : 0);
+        logInfo("gxm: cull winding swapped (cull_swap=on)");
+    static const char* const DrawOrders[] = { "sorted", "game" };
+    m_drawSort = Config::getChoice("alpha_draw_order", DrawOrders, 2, 0) == 0;
+    logInfo("gxm: alpha-tested draws %s (alpha_draw_order=%s)", m_drawSort ? "after opaque draws" : "in game order",
+            m_drawSort ? "sorted" : "game");
     m_textureHeap = new GpuHeap("gxm_textures", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 16 * 1024 * 1024,
                                 SCE_GXM_MEMORY_ATTRIB_RW);
     m_bufferHeap = new GpuHeap("gxm_buffers", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, 8 * 1024 * 1024,
@@ -1802,7 +1803,7 @@ void FrameRenderer::initLists()
 {
     if (!Config::getBool("gxm_lists", true))
     {
-        logInfo("gxm: command lists off (gxm_lists=0)");
+        logInfo("gxm: command lists off (gxm_lists=off)");
         return;
     }
     // The render thread records too and takes whatever the helpers have not claimed.

@@ -12,9 +12,9 @@
 //   Helper   2                3             other guest threads
 //   Io       2                3             guest file reading threads
 //
-// With core 3, core3_layout=1 (default) uses the "with core 3" column, and core 3 also runs a job phase worker and a
-// GXM command list worker. core3_layout=0 uses the "without core 3" column, and core 3 runs only a worker for the job
-// pool's posted tasks.
+// With core 3, core3_tasks=helpers (default) uses the "with core 3" column, and core 3 also runs a job phase worker
+// and a GXM command list worker. core3_tasks=jobs uses the "without core 3" column, and core 3 runs only a worker for
+// the job pool's posted tasks.
 
 namespace pf { namespace cores
 {
@@ -30,13 +30,13 @@ enum Role
     RoleCount
 };
 
-// Probes core 3 (unless the setting core3=0 turns it off), moves the calling (main) thread to the Main core and
+// Probes core 3 (unless the setting use_core3=off turns it off), moves the calling (main) thread to the Main core and
 // logs the layout. Call once at start-up, before threads with a role are created.
 void init();
 
 // True when user threads run on core 3.
 bool hasCore3();
-// True with core 3 and core3_layout=1: helper and io threads, a job phase worker and a GXM command list worker on
+// True with core 3 and core3_tasks=helpers: helper and io threads, a job phase worker and a GXM command list worker on
 // core 3.
 bool core3Waited();
 // Core number (0-3) and pf::Thread::Cpu mask of a role.

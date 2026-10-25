@@ -48,9 +48,9 @@ void configureGameThreads();
 // Control of the calling host thread; one that is not a guest thread gets a normal-level control on first use.
 ThreadControl* currentControl();
 Level level(const ThreadControl* control);
-// Kind of thread, for the execution lock accounting of perf_log.
+// Kind of thread, for the execution lock accounting of timing_log.
 pf::perf::Holder holder(const ThreadControl* control);
-// Named lock holder slot of a thread, for perf_log; with the execution lock held.
+// Named lock holder slot of a thread, for timing_log; with the execution lock held.
 int holderSlot(ThreadControl* control);
 // Raises (never lowers) the level of the calling host thread, e.g. for a service thread running callbacks.
 void raiseCurrentLevel(Level level);

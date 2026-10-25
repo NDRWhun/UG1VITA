@@ -53,7 +53,7 @@ NATIVE_OVERRIDES = [
     0x674898,   # _ftol2: the same result without a control word change
     0x6734a0,   # _chkstk / _alloca_probe: page-probing stack allocation
     0x647cb0,   # movie YUV420 -> ARGB converter: the guest has only an MMX path
-    0x4086b0,   # back buffer size: the display's with widescreen=1, and the 2D mapping the patches below read
+    0x4086b0,   # back buffer size: the display's with widescreen=on, and the 2D mapping the patches below read
     0x4f5730,   # end of an FE package's rendering: places the HUD packages' objects before the render list is drawn
     0x514b90,   # FE render object draw: its polygons at the object's place (centred, screen edge or full width)
     0x58e810,   # track map draw: the whole map at its place
@@ -130,7 +130,7 @@ NATIVE_OVERRIDES = [
     0x40f7c0,   # light context: fixed-function lights or the harmonic coefficients
     0x4100a0,   # reflection matrices
     0x40fae0,   # material: fixed-function material or the diffuse, specular and envmap terms
-    # Phase log (src/nfsu/phases.cpp, perf_phases): the guest bodies timed per call.
+    # Phase log (src/nfsu/phases.cpp, timing_phases): the guest bodies timed per call.
     0x420b40,   # World::DoTimestep
     0x420310,   # World::DoTimestepMove
     0x4774a0,   # PhysicsMover::Move
@@ -188,7 +188,7 @@ PATCHES = [
     # Full-screen quad of the rear-view mirror frame and mask 0x409180: world _11 = [0x6D3444], as the 2D polygons.
     (0x409274, 'c74424200000803f c744242400000000', '8b0d44346d00 894c2420 8364242400 90'),
     # Env cube face schedule 0x40AD60: the update divisor per reflection level [0x702AAC] and the face rows
-    # [0x702AC0] are read from a copy at 0x6D3800 / 0x6D3810 (nfsu::envmap, envmap_rate).
+    # [0x702AC0] are read from a copy at 0x6D3800 / 0x6D3810 (nfsu::envmap, car_reflection_interval).
     (0x40af38, 'f7348dac2a7000', 'f7348d00386d00'),
     (0x40af64, '8d04c5c02a7000', '8d04c510386d00'),
 ]

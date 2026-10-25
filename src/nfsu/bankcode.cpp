@@ -5,7 +5,7 @@
 // (banknative.h), and a routine runs translated while its bytes are the ones it was translated from. Other routines
 // are interpreted. The routines of all 106 banks use only the instructions below (integer moves, adds, compares,
 // pushes and calls); anything else traps with its address. Decoded instructions are kept per routine, linked to
-// the instruction that follows, and reused while their bytes are unchanged. shadow_bank=1 runs each translated
+// the instruction that follows, and reused while their bytes are unchanged. shadow_bank=on runs each translated
 // routine both ways, call by call, and compares registers, flags, stores and calls.
 
 #include "audio_mixer.h"
@@ -926,7 +926,7 @@ void runShadow(win32::WinApplication* app, x86::CPU& cpu, const Translation& t, 
         pf::logInfo("shadow_bank: %u runs compared, %u differ", unsigned(s.runs), unsigned(s.differing));
 }
 
-// Bank routines running (perf_log times the outermost one).
+// Bank routines running (timing_log times the outermost one).
 int s_depth = 0;
 
 // The range resolve found for the address dynamic_call is about to run.

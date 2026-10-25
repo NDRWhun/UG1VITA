@@ -36,7 +36,7 @@ public:
     // allocation is tried again.
     typedef bool (*Reclaim)();
 
-    // The kind names the caller in the perf_log block counts.
+    // The kind names the caller in the timing_log block counts.
     MemMap(x86::reg32 size, Placement placement = Low, pf::perf::Alloc kind = pf::perf::Alloc(0));
     ~MemMap();
 

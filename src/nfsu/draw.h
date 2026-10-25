@@ -15,12 +15,12 @@ namespace nfsu { namespace draw
 // Native setup functions of the deferred draw queue's flush, bit-exact with the translated guest code: the same
 // guest memory stores, the same device and effect calls in the same order (d3d9_native.h), x87 chains in double in
 // the guest's order with floats where the guest stores floats, and the registers, flags and x87 state the callers
-// read. Settings: draw_native=1 runs them natively (default 0: the guest code); shadow_draw=1 runs the guest code
+// read. Settings: draw_native=on runs them natively (default off: the guest code); shadow_draw=on runs the guest code
 // with its device and effect calls recorded, then the native code against the recording, and logs the first
 // difference.
 //
 // The draw queue itself (flush.cpp): model submit 0x40c910, packet enqueue 0x40f1e0 and the flush 0x40ed50.
-// flush_native=1 runs them natively (default 0); with shadow_draw=1 each runs as guest code first, recorded, then
+// flush_native=on runs them natively (default off); with shadow_draw=on each runs as guest code first, recorded, then
 // natively against the recording.
 
 // Perf builds: the call counts and time of the setup functions and of the queue since the last call, logged as a
@@ -35,7 +35,7 @@ enum Leaf
     LeafReflection, LeafMaterial, LeafCount
 };
 
-// Runs a setup function as a native caller does: the native body with draw_native=1, else the guest body; counted
+// Runs a setup function as a native caller does: the native body with draw_native=on, else the guest body; counted
 // for the perf line. cpu.esp points at the return address slot.
 void runLeaf(Leaf leaf, win32::WinApplication* app, x86::CPU& cpu);
 

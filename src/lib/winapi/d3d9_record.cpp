@@ -138,7 +138,7 @@ private:
     uint32_t                        m_vertexConstants = render::NoConstants;
     uint32_t                        m_fragmentConstants = render::NoConstants;
     uint32_t                        m_alphaFrames = 0;
-    uint32_t                        m_alphaCounts[AlphaResultCount] = {};   // perf_log: alpha-tested draws
+    uint32_t                        m_alphaCounts[AlphaResultCount] = {};   // timing_log: alpha-tested draws
 };
 
 Resolver s_resolver;
@@ -350,7 +350,7 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
     float test[2] = { 0.0f, 0.0f };
     state.alphaTest = alphaEnabled && alphaTest(rs[D3DRS_ALPHAFUNC], alphaRef, test) ? 1 : 0;
     // A test that discards nothing: the program without it (the draw becomes opaque to the GPU).
-    static const bool s_elide = pf::Config::getBool("alpha_test_elide", true);
+    static const bool s_elide = pf::Config::getBool("skip_unused_alpha_test", true);
     if (state.alphaTest && (s_elide || pf::perf::enabled()))
     {
         const AlphaResult result = alphaTestResult(record, draw, test, own, shared);

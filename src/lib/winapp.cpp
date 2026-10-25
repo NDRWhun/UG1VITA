@@ -416,7 +416,7 @@ static void acquire(Mutex* executionContext, scheduler::Level level, std::atomic
         pf::perf::preemptWait(pf::perf::now() - start);
 }
 
-// perf_log accounting of the execution lock. The holder fields change only with the lock held, the game fields only
+// timing_log accounting of the execution lock. The holder fields change only with the lock held, the game fields only
 // on the game thread.
 static uint32_t s_heldSince = 0;
 static bool     s_gameReleased = false;

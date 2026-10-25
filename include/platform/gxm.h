@@ -41,7 +41,8 @@ public:
     // Everything shown from now on is colour^(1/gamma).
     void setGamma(float gamma);
     // Display rectangle a width x height window is shown in: the whole display for 960x544 or with the setting
-    // stretch=1, else the largest centred rectangle of the window's aspect (4:3 windows are pillarboxed).
+    // fit_4_3=stretch (default), else the largest centred rectangle of the window's aspect (fit_4_3=pillarbox: 4:3
+    // windows are pillarboxed).
     static Rect windowRect(uint32_t width, uint32_t height);
 
     // ---- Direct3D frames and resources: game thread only ----

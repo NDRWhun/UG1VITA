@@ -25,8 +25,8 @@ const int s_layout[2][RoleCount] =
 };
 
 bool s_core3 = false;
-// core3_layout=1 (default): helper and io threads, a job phase worker and a GXM command list worker on core 3;
-// core3_layout=0: a job worker for posted tasks only.
+// core3_tasks=helpers (default): helper and io threads, a job phase worker and a GXM command list worker on core 3;
+// core3_tasks=jobs: a job worker for posted tasks only.
 bool s_core3Full = false;
 
 int probeEntry(SceSize, void*)
@@ -69,15 +69,16 @@ bool probeCore3()
 
 void init()
 {
-    const bool allowed = Config::getBool("core3", true);
+    static const char* const Tasks[] = { "helpers", "jobs" };
+    const bool allowed = Config::getBool("use_core3", true);
     s_core3 = allowed && probeCore3();
-    s_core3Full = s_core3 && Config::getInt("core3_layout", 1) == 1;
+    s_core3Full = s_core3 && Config::getChoice("core3_tasks", Tasks, 2, 0) == 0;
     Thread::setCurrentCpuMask(mask(Main));
     logInfo("cores: %s; game %d, render %d, main %d, audio %d, helpers %d, io %d",
-            s_core3 ? (s_core3Full ? "core 3 available (CapUnlocker), core3_layout=1: helpers, io, phases and"
+            s_core3 ? (s_core3Full ? "core 3 available (CapUnlocker), core3_tasks=helpers: helpers, io, phases and"
                                      " command lists there"
-                                   : "core 3 available (CapUnlocker), core3_layout=0: posted tasks only")
-                    : allowed ? "cores 0-2" : "cores 0-2 (core3=0)",
+                                   : "core 3 available (CapUnlocker), core3_tasks=jobs: posted tasks only")
+                    : allowed ? "cores 0-2" : "cores 0-2 (use_core3=off)",
             core(Game), core(Render), core(Main), core(Audio), core(Helper), core(Io));
 }
 

@@ -935,7 +935,8 @@ void Device::setGamma(float gamma)
 
 Rect Device::windowRect(uint32_t width, uint32_t height)
 {
-    static const bool stretch = Config::getBool("stretch", true);
+    static const char* const Fits[] = { "stretch", "pillarbox" };
+    static const bool stretch = Config::getChoice("fit_4_3", Fits, 2, 0) == 0;
     if (stretch || !width || !height || (width == DisplayWidth && height == DisplayHeight))
         return Rect{ 0, 0, DisplayWidth, DisplayHeight };
     if (width * DisplayHeight > height * DisplayWidth)

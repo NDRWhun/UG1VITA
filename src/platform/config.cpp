@@ -13,10 +13,39 @@ namespace pf
 namespace
 {
 
-const int MaxEntries = 32;
+const int MaxEntries = 64;
 const int MaxKey     = 32;
 const int MaxValue   = 64;
 const int MaxLine    = 256;
+
+// Every setting the game reads; other keys are reported as unknown.
+const char* const Known[] =
+{
+    // Player settings.
+    "widescreen", "hud_widescreen", "menu_widescreen", "button_prompts", "fit_4_3", "frame_rate", "car_reflection_interval", "rear_touch", "front_touch",
+    // Cores, logs and the benchmark.
+    "use_core3", "core3_tasks", "timing_log", "timing_phases", "console_log",
+    "benchmark", "benchmark_exit", "benchmark_seconds", "benchmark_laps", "benchmark_opponents", "benchmark_track",
+    "benchmark_timing_log",
+    // Renderer.
+    "alpha_draw_order", "skip_unused_alpha_test", "matrices_on_render_thread", "texture_cache_mb", "texture_async",
+    "gxm_precomputed", "gxm_lists", "gxm_core2", "cull_swap",
+    // Native versions of guest code and their shadow compares.
+    "bank_native", "shadow_bank", "coll_native", "shadow_coll", "cull_native", "cull_parallel", "shadow_cull",
+    "draw_native", "shadow_draw", "flush_native", "flares_native", "flares_parallel", "shadow_flares",
+    "load_native", "shadow_load", "math_native", "shadow_math", "particles_native", "particles_update",
+    "particles_parallel", "particles_direct", "shadow_particles", "prep_native", "shadow_prep",
+};
+
+bool isKnown(const char* key)
+{
+    for (const char* known : Known)
+    {
+        if (strcmp(known, key) == 0)
+            return true;
+    }
+    return false;
+}
 
 struct Entry
 {
@@ -109,9 +138,11 @@ void Config::load(const char* path)
                      MaxKey - 1, MaxValue - 1);
             continue;
         }
+        const bool known = isKnown(key);
         if (find(key))
         {
-            logError("config line %d: %s repeated, first value kept", number, key);
+            if (known)
+                logError("config line %d: %s repeated, first value kept", number, key);
             continue;
         }
         if (s_count == MaxEntries)
@@ -119,10 +150,14 @@ void Config::load(const char* path)
             logError("config line %d: more than %d entries, %s ignored", number, MaxEntries, key);
             continue;
         }
+        // Unknown keys are kept too, so that a repeat is not reported again; nothing reads them.
         Entry& entry = s_entries[s_count++];
         strcpy(entry.key, key);
         strcpy(entry.value, value);
-        logInfo("config %s=%s", entry.key, entry.value);
+        if (known)
+            logInfo("config %s=%s", entry.key, entry.value);
+        else
+            logError("config: unknown setting '%s'", entry.key);
     }
     fclose(file);
 }
@@ -132,8 +167,8 @@ bool Config::tryGetBool(const char* key, bool* value)
     const char* text = find(key);
     if (!text)
         return false;
-    static const char* const On[] = { "1", "true", "yes", "on" };
-    static const char* const Off[] = { "0", "false", "no", "off" };
+    static const char* const On[] = { "on", "true", "yes", "1" };
+    static const char* const Off[] = { "off", "false", "no", "0" };
     for (int i = 0; i < 4; ++i)
     {
         if (strcasecmp(text, On[i]) == 0 || strcasecmp(text, Off[i]) == 0)
@@ -142,7 +177,7 @@ bool Config::tryGetBool(const char* key, bool* value)
             return true;
         }
     }
-    logError("config %s=%s is not a boolean (1/0, true/false, yes/no, on/off), ignored", key, text);
+    logError("config %s=%s is not a boolean (on/off, true/false, yes/no, 1/0), ignored", key, text);
     return false;
 }
 
@@ -179,6 +214,27 @@ const char* Config::getString(const char* key, const char* defaultValue)
 {
     const char* value = find(key);
     return value ? value : defaultValue;
+}
+
+int Config::getChoice(const char* key, const char* const* names, int count, int defaultIndex)
+{
+    const char* text = find(key);
+    if (!text)
+        return defaultIndex;
+    for (int i = 0; i < count; ++i)
+    {
+        if (strcasecmp(text, names[i]) == 0)
+            return i;
+    }
+    char list[MaxLine] = "";
+    for (int i = 0; i < count; ++i)
+    {
+        if (i)
+            strncat(list, "/", sizeof(list) - strlen(list) - 1);
+        strncat(list, names[i], sizeof(list) - strlen(list) - 1);
+    }
+    logError("config %s=%s is not one of %s, %s used", key, text, list, names[defaultIndex]);
+    return defaultIndex;
 }
 
 }

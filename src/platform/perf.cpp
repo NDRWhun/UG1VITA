@@ -282,7 +282,7 @@ void init(bool enabled)
 {
     g_enabled = enabled;
     s_intervalStart = now();
-    logInfo("perf: timing log %s (perf_log), main thread priority %d affinity 0x%x, clocks arm %d bus %d gpu %d xbar %d MHz",
+    logInfo("perf: timing log %s (timing_log), main thread priority %d affinity 0x%x, clocks arm %d bus %d gpu %d xbar %d MHz",
             enabled ? "on" : "off", sceKernelGetThreadCurrentPriority(),
             sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId()),
             scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),

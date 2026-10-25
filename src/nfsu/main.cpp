@@ -126,7 +126,7 @@ static void setPadBindings()
 // Env cube faces drawn per frame (0x40AD60, patched in generate.py PATCHES to read the copy written here): frame
 // counter [0x7364DC] modulo the divisor of the reflection level [0x700E74] picks one of that level's six rows of six
 // face flags. The game's levels: 1 one face a frame, 2 faces 0 and 4 every frame and one of the others, 3 all six.
-// envmap_rate=n (2..6, default 1: the game's) spreads level 3 over n frames, face f drawn when the counter modulo n
+// car_reflection_interval=n (2..6, default 1: the game's) spreads level 3 over n frames, face f drawn when the counter modulo n
 // is f modulo n.
 static void setEnvmapSchedule()
 {
@@ -135,14 +135,15 @@ static void setEnvmapSchedule()
         guestDword(Divisors + 4 * i) = guestDword(GameDivisors + 4 * i);
     for (x86::reg32 i = 0; i < 18 * 6; ++i)
         guestDword(Rows + 4 * i) = guestDword(GameRows + 4 * i);
-    const int rate = std::min(std::max(pf::Config::getInt("envmap_rate", 1), 1), 6);
+    const int rate = std::min(std::max(pf::Config::getInt("car_reflection_interval", 1), 1), 6);
     if (rate == 1)
         return;
     guestDword(Divisors + 4 * 3) = x86::reg32(rate);
     for (x86::reg32 row = 0; row < 6; ++row)
         for (x86::reg32 face = 0; face < 6; ++face)
             guestDword(Rows + 4 * ((12 + row) * 6 + face)) = row < x86::reg32(rate) && face % rate == row ? 1 : 0;
-    pf::logInfo("envmap: the highest reflection level draws the six cube faces over %d frames (envmap_rate)", rate);
+    pf::logInfo("envmap: the highest reflection level draws the six cube faces over %d frames (car_reflection_interval)",
+                rate);
 }
 
 // Text fields (docs/re/input.md section 6). Every edit of the game's line editor sets its active flag [0x007363A8],
@@ -248,11 +249,12 @@ int main(int, char**)
     x86::mmxSelfTest();
     x86::fpuSelfTest();
     pf::Config::load(dataPath("nfsug1vita.cfg").c_str());
-    pf::logSetConsole(pf::Config::getBool("tty_log", false));
+    pf::logSetConsole(pf::Config::getBool("console_log", false));
     pf::cores::init();
-    // bench=1 logs its summary without the timing log; bench_perf=1 adds the timing log to a benchmark.
-    pf::perf::init(pf::Config::getBool("perf_log", false)
-                   || (pf::Config::getBool("bench", false) && pf::Config::getBool("bench_perf", false)));
+    // benchmark=on logs its summary without the timing log; benchmark_timing_log=on adds the timing log to a
+    // benchmark.
+    pf::perf::init(pf::Config::getBool("timing_log", false)
+                   || (pf::Config::getBool("benchmark", false) && pf::Config::getBool("benchmark_timing_log", false)));
 #ifdef NFSU_PGO_GENERATE
     pf::pgo::start(dataPath(pf::pgo::FileName).c_str());
 #endif
