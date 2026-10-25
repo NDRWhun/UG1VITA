@@ -174,6 +174,27 @@ x86::reg32 joystickButtonCount()
     return s_buttonCount;
 }
 
+static const char* s_buttonNames[s_buttonCount] = {};
+static const char* s_axisNames[AxisCount] = {};
+
+void setObjectNames(const char* const* buttons, x86::reg32 buttonCount, const char* const* axes)
+{
+    for (x86::reg32 i = 0; i < x86::reg32(s_buttonCount); ++i)
+        s_buttonNames[i] = buttons && i < buttonCount ? buttons[i] : nullptr;
+    for (int i = 0; i < AxisCount; ++i)
+        s_axisNames[i] = axes ? axes[i] : nullptr;
+}
+
+const char* buttonName(x86::reg32 button)
+{
+    return button < x86::reg32(s_buttonCount) ? s_buttonNames[button] : nullptr;
+}
+
+const char* axisName(Axis axis)
+{
+    return axis >= 0 && axis < AxisCount ? s_axisNames[axis] : nullptr;
+}
+
 // ---- Pad ----
 
 struct PadButton

@@ -76,6 +76,13 @@ fills and gradients that reach a screen edge continue to the edge of the display
 panels next to a screen edge move to that edge, and menu blocks, text, pictures and movies keep their shape in the
 middle; 2D placed off the 4:3 screen stays hidden. `menu_widescreen=off` keeps the menus centred at 4:3.
 
+Button prompts: `button_prompts=vita` (default) shows the Vita buttons where the game shows PC keys: Cross and
+Circle on the menu bar's Next and Back, Triangle on a screen's extra item (Customize, Performance, Stock, Default
+settings, Decal colour, Delete profile, the tutorials), which Triangle then presses in menus, and Vita button glyphs
+in the title screen's prompt, a loading tip and the controls screen; the Quit item is not shown (the PS button
+closes the game). `button_prompts=pc`
+keeps the game's PC prompts and menu bar. The glyphs are original art shipped in the VPK (`glyphs.bin`).
+
 Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your
 car; a `bench: summary` line gives the fps and frame times from the start signal to the finish (the timing log stays
 off unless `bench_perf=1` or `perf_log=1`). Off by default; the other keys need `bench=1`:
