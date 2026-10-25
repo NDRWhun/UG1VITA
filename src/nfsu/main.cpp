@@ -1,6 +1,7 @@
 #include "bankcode.h"
 #include "bench.h"
 #include "phases.h"
+#include "prompts.h"
 
 #include <lib/file.h>
 #include <lib/gamepad.h>
@@ -184,6 +185,7 @@ static void padPollHook(x86::reg32* buttons, int* pov)
 {
     pollTextField();
     nfsu::bench::poll();
+    nfsu::prompts::poll();
     const x86::reg32 slots = 0x0078DAA8, slotSize = 0x270, slotCount = 6;
     const bool driving = win32::g_guestBase[0x007041C4] == 0;
     const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
@@ -265,6 +267,7 @@ int main(int, char**)
         std::vector<uint8_t>().swap(image);
         setPadBindings();
         setEnvmapSchedule();
+        nfsu::prompts::configure();
         nfsu::bench::configure(app);
         nfsu::phases::configure();
         win32::Gamepad::setPollHook(padPollHook);

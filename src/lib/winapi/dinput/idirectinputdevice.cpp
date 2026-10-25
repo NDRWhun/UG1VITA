@@ -283,7 +283,8 @@ HRESULT IDirectInputDevice::EnumObjects(WinApplication* app, x86::CPU& cpu,
                 continue;
             Object object = { s_axisGuids[axis], DWORD(axis * sizeof(LONG)), DIDFT_ABSAXIS | (DWORD(axis) << 8),
                               DIDOI_ASPECTPOSITION, {} };
-            snprintf(object.name, sizeof(object.name), "%s", names[axis]);
+            const char* name = controls::axisName(controls::Axis(axis));
+            snprintf(object.name, sizeof(object.name), "%s", name ? name : names[axis]);
             objects.push_back(object);
         }
         Object hat = { 0xA36D02F2, DWORD(offsetof(DIJOYSTATE, rgdwPOV)), 0x10, 0, "Hat Switch" };   // DIDFT_POV
@@ -292,7 +293,10 @@ HRESULT IDirectInputDevice::EnumObjects(WinApplication* app, x86::CPU& cpu,
         {
             Object object = { s_buttonGuid, DWORD(offsetof(DIJOYSTATE, rgbButtons) + button),
                               DIDFT_PSHBUTTON | (button << 8), 0, {} };
-            snprintf(object.name, sizeof(object.name), "Button %u", unsigned(button + 1));
+            if (const char* name = controls::buttonName(button))
+                snprintf(object.name, sizeof(object.name), "%s", name);
+            else
+                snprintf(object.name, sizeof(object.name), "Button %u", unsigned(button + 1));
             objects.push_back(object);
         }
     }
@@ -551,7 +555,8 @@ HRESULT IDirectInputDevice::GetObjectInfo(WinApplication* app, x86::CPU& cpu,
             { "X Axis", "Y Axis", "Z Axis", "X Rotation", "Y Rotation", "Z Rotation", "Slider", "Slider" };
         pdidoi->dwOfs = DWORD(axis) * sizeof(LONG);
         pdidoi->dwType = DIDFT_ABSAXIS | (DWORD(axis) << 8);
-        snprintf(pdidoi->tszName, sizeof(pdidoi->tszName), "%s", names[axis]);
+        const char* name = controls::axisName(controls::Axis(axis));
+        snprintf(pdidoi->tszName, sizeof(pdidoi->tszName), "%s", name ? name : names[axis]);
         return DI_OK;
     }
     const int button = findButton(dwObj, dwHow);
@@ -559,7 +564,10 @@ HRESULT IDirectInputDevice::GetObjectInfo(WinApplication* app, x86::CPU& cpu,
     {
         pdidoi->dwOfs = offsetof(DIJOYSTATE, rgbButtons) + DWORD(button);
         pdidoi->dwType = DIDFT_PSHBUTTON | (DWORD(button) << 8);
-        snprintf(pdidoi->tszName, sizeof(pdidoi->tszName), "Button %d", button + 1);
+        if (const char* name = controls::buttonName(x86::reg32(button)))
+            snprintf(pdidoi->tszName, sizeof(pdidoi->tszName), "%s", name);
+        else
+            snprintf(pdidoi->tszName, sizeof(pdidoi->tszName), "Button %d", button + 1);
         return DI_OK;
     }
     return DIERR_OBJECTNOTFOUND;

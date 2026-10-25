@@ -6,6 +6,7 @@
 // x87 slot above the stack it spills at its calls. x87 chains are evaluated in double in the guest's order and
 // rounded to float where the guest stores a dword.
 
+#include "prompts.h"
 #include "retstate.h"
 
 #include <platform/config.h>
@@ -1883,6 +1884,7 @@ void sub_5a8a50(win32::WinApplication* app, x86::CPU& cpu)
 // Texture creation (guest 0x407db0).
 void sub_407db0(win32::WinApplication* app, x86::CPU& cpu)
 {
+    prompts::texture(cpu.eax);
     load::timed(load::EntryTexture, [&]
     {
         const load::Settings& s = settings();

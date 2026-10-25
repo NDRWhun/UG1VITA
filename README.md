@@ -72,6 +72,11 @@ scaled to the display. `hud_anchor=1` (default) puts the race HUD's elements and
 edge on their side at the same scale and stretches full-screen 2D (fades, backgrounds) to the full width during
 races and track loading; menus stay centred. `hud_anchor=0` keeps the whole HUD centred at 4:3.
 
+Button prompts: `button_prompts=vita` (default) shows the Vita buttons where the game shows PC keys: Cross and
+Circle on the menu bar's Next and Back, Vita button glyphs in the title screen's prompt, a loading tip and the
+controls screen; menu bar items without a Vita button are not shown. `button_prompts=pc` keeps the game's PC
+prompts. The glyphs are original art shipped in the VPK (`glyphs.bin`).
+
 Race benchmark: `bench=1` skips the front end and the movies and starts a circuit race in which the AI drives your
 car; a `bench: summary` line gives the fps and frame times from the start signal to the finish (the timing log stays
 off unless `bench_perf=1` or `perf_log=1`). Off by default; the other keys need `bench=1`:

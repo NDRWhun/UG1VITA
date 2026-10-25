@@ -68,6 +68,12 @@ bool axisPresent(Axis axis);
 x86::reg32 presentAxisCount();
 x86::reg32 joystickButtonCount();
 
+// Object names DirectInput reports for the joystick's buttons and axes (GetObjectInfo, EnumObjects). Null entries,
+// and every object before setObjectNames, get the default names. The strings must stay valid.
+void setObjectNames(const char* const* buttons, x86::reg32 buttonCount, const char* const* axes);
+const char* buttonName(x86::reg32 button);  // null for the default
+const char* axisName(Axis axis);            // null for the default
+
 // Product name, DirectInput 7 device type and the product GUID (the EMS adapter's VID/PID GUID).
 extern const char* const JoystickName;
 extern const x86::reg32  JoystickDeviceType;
