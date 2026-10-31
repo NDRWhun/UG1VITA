@@ -345,6 +345,9 @@ void EffectEnd(WinApplication* app, x86::CPU& cpu);
 
 #define D3D_METHOD(cls, fn) { #fn, &win32::d3d9::drained<&win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall> }
 #define D3D_NAMED(name, cls, fn) { name, &win32::d3d9::drained<&win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall> }
+// A method that reads only what its object was created with: no drain.
+#define D3D_FIXED(cls, fn) { #fn, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
+#define D3D_FIXED_NAMED(name, cls, fn) { name, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
 #define D3D_TRAP(fn) { #fn, nullptr }
 
 // Logs a message once per call site.

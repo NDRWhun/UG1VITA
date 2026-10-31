@@ -330,17 +330,17 @@ static_assert(sizeof(s_device) / sizeof(s_device[0]) == 119, "IDirect3DDevice9 h
 
 #define D3D_RESOURCE(cls) D3D_UNKNOWN(cls), D3D_METHOD(cls, GetDevice), D3D_TRAP(SetPrivateData),            \
                           D3D_TRAP(GetPrivateData), D3D_TRAP(FreePrivateData), D3D_METHOD(cls, SetPriority),     \
-                          D3D_METHOD(cls, GetPriority), D3D_METHOD(cls, PreLoad), D3D_METHOD(cls, GetType)
+                          D3D_METHOD(cls, GetPriority), D3D_METHOD(cls, PreLoad), D3D_FIXED(cls, GetType)
 
 const MethodEntry s_texture[] = {
     D3D_RESOURCE(Texture),
     D3D_METHOD(Texture, SetLOD),
     D3D_METHOD(Texture, GetLOD),
-    D3D_METHOD(Texture, GetLevelCount),
+    D3D_FIXED(Texture, GetLevelCount),
     D3D_TRAP(SetAutoGenFilterType),
     D3D_TRAP(GetAutoGenFilterType),
     D3D_TRAP(GenerateMipSubLevels),
-    D3D_METHOD(Texture, GetLevelDesc),
+    D3D_FIXED(Texture, GetLevelDesc),
     D3D_METHOD(Texture, GetSurfaceLevel),
     D3D_METHOD(Texture, LockRect),
     D3D_METHOD(Texture, UnlockRect),
@@ -351,11 +351,11 @@ const MethodEntry s_cubeTexture[] = {
     D3D_RESOURCE(Texture),
     D3D_METHOD(Texture, SetLOD),
     D3D_METHOD(Texture, GetLOD),
-    D3D_METHOD(Texture, GetLevelCount),
+    D3D_FIXED(Texture, GetLevelCount),
     D3D_TRAP(SetAutoGenFilterType),
     D3D_TRAP(GetAutoGenFilterType),
     D3D_TRAP(GenerateMipSubLevels),
-    D3D_METHOD(Texture, GetLevelDesc),
+    D3D_FIXED(Texture, GetLevelDesc),
     D3D_METHOD(Texture, GetCubeMapSurface),
     D3D_NAMED("LockRect", Texture, LockRectCube),
     D3D_NAMED("UnlockRect", Texture, UnlockRectCube),
@@ -365,7 +365,7 @@ const MethodEntry s_cubeTexture[] = {
 const MethodEntry s_surface[] = {
     D3D_RESOURCE(Surface),
     D3D_METHOD(Surface, GetContainer),
-    D3D_METHOD(Surface, GetDesc),
+    D3D_FIXED(Surface, GetDesc),
     D3D_METHOD(Surface, LockRect),
     D3D_METHOD(Surface, UnlockRect),
     D3D_TRAP(GetDC),
@@ -376,14 +376,14 @@ const MethodEntry s_vertexBuffer[] = {
     D3D_RESOURCE(Buffer),
     D3D_METHOD(Buffer, Lock),
     D3D_METHOD(Buffer, Unlock),
-    D3D_NAMED("GetDesc", Buffer, GetVertexDesc),
+    D3D_FIXED_NAMED("GetDesc", Buffer, GetVertexDesc),
 };
 
 const MethodEntry s_indexBuffer[] = {
     D3D_RESOURCE(Buffer),
     D3D_METHOD(Buffer, Lock),
     D3D_METHOD(Buffer, Unlock),
-    D3D_NAMED("GetDesc", Buffer, GetIndexDesc),
+    D3D_FIXED_NAMED("GetDesc", Buffer, GetIndexDesc),
 };
 
 const MethodEntry s_vertexDeclaration[] = {

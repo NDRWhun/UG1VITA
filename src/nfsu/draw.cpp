@@ -164,27 +164,27 @@ struct Saved
 
 // Alpha test (guest 0x410650): render states 15 and 24, or BaseAlphaTestEnable and BaseAlphaRef of the effect.
 // eax, ecx, edx as the guest leaves them.
-void alphaTest(WinApplication* app, x86::CPU& cpu, reg32 enable, reg32 reference)
+void alphaTest(bridge::CallGroup& calls, x86::CPU& cpu, reg32 enable, reg32 reference)
 {
     const reg32 group = rc::ld32(CurrentGroup);
     const reg32 on = enable ? 1 : 0;
     if (group == 0)
-        bridge::setRenderState(app, cpu, rc::ld32(DevicePointer), RsAlphaTestEnable, on);
+        calls.setRenderState(rc::ld32(DevicePointer), RsAlphaTestEnable, on);
     else
-        bridge::effectSetInt(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0xbc), sreg32(on));
+        calls.setInt(rc::ld32(group + 0x18), rc::ld32(group + 0xbc), sreg32(on));
     store(AlphaTestOn, enable);
     reg32 ecx = group, edx;
     if (group == 0)
     {
         const reg32 device = rc::ld32(DevicePointer);
-        cpu.eax = bridge::setRenderState(app, cpu, device, RsAlphaRef, reference);
+        cpu.eax = calls.setRenderState(device, RsAlphaRef, reference);
         edx = rc::ld32(device);
     }
     else
     {
         const reg32 effect = rc::ld32(group + 0x18);
         ecx = rc::ld32(group + 0xc0);
-        cpu.eax = bridge::effectSetInt(app, cpu, effect, ecx, sreg32(reference));
+        cpu.eax = calls.setInt(effect, ecx, sreg32(reference));
         edx = rc::ld32(effect);
     }
     store(AlphaRef, reference);
@@ -194,7 +194,7 @@ void alphaTest(WinApplication* app, x86::CPU& cpu, reg32 enable, reg32 reference
 
 // Blending (guest 0x410550): render states 27, 19, 20, or BaseAlphaBlendEnable, BaseSrcBlend and BaseDestBlend of the
 // effect. eax, ecx, edx as the guest leaves them.
-void blend(WinApplication* app, x86::CPU& cpu, reg32 on, reg32 source, reg32 destination)
+void blend(bridge::CallGroup& calls, x86::CPU& cpu, reg32 on, reg32 source, reg32 destination)
 {
     const reg32 group = rc::ld32(CurrentGroup);
     reg32 ecx, edx = cpu.edx;
@@ -205,14 +205,14 @@ void blend(WinApplication* app, x86::CPU& cpu, reg32 on, reg32 source, reg32 des
         if (group == 0)
         {
             const reg32 device = rc::ld32(DevicePointer);
-            cpu.eax = bridge::setRenderState(app, cpu, device, RsAlphaBlendEnable, 0);
+            cpu.eax = calls.setRenderState(device, RsAlphaBlendEnable, 0);
             ecx = rc::ld32(device);
         }
         else
         {
             const reg32 effect = rc::ld32(group + 0x18);
             ecx = rc::ld32(group + 0xc4);
-            cpu.eax = bridge::effectSetInt(app, cpu, effect, ecx, 0);
+            cpu.eax = calls.setInt(effect, ecx, 0);
             edx = rc::ld32(effect);
         }
         store(BlendOn, 0);
@@ -220,23 +220,23 @@ void blend(WinApplication* app, x86::CPU& cpu, reg32 on, reg32 source, reg32 des
     else
     {
         if (group == 0)
-            bridge::setRenderState(app, cpu, rc::ld32(DevicePointer), RsAlphaBlendEnable, 1);
+            calls.setRenderState(rc::ld32(DevicePointer), RsAlphaBlendEnable, 1);
         else
-            bridge::effectSetInt(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0xc4), 1);
+            calls.setInt(rc::ld32(group + 0x18), rc::ld32(group + 0xc4), 1);
         store(BlendOn, on);
         if (group == 0)
         {
             const reg32 device = rc::ld32(DevicePointer);
-            bridge::setRenderState(app, cpu, device, RsSrcBlend, source);
-            cpu.eax = bridge::setRenderState(app, cpu, rc::ld32(DevicePointer), RsDestBlend, destination);
+            calls.setRenderState(device, RsSrcBlend, source);
+            cpu.eax = calls.setRenderState(rc::ld32(DevicePointer), RsDestBlend, destination);
             ecx = edx = rc::ld32(rc::ld32(DevicePointer));
         }
         else
         {
-            bridge::effectSetInt(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0xc8), sreg32(source));
+            calls.setInt(rc::ld32(group + 0x18), rc::ld32(group + 0xc8), sreg32(source));
             const reg32 effect = rc::ld32(group + 0x18);
             ecx = rc::ld32(group + 0xcc);
-            cpu.eax = bridge::effectSetInt(app, cpu, effect, ecx, sreg32(destination));
+            cpu.eax = calls.setInt(effect, ecx, sreg32(destination));
             edx = rc::ld32(effect);
         }
         store(BlendSource, source);
@@ -248,13 +248,15 @@ void blend(WinApplication* app, x86::CPU& cpu, reg32 on, reg32 source, reg32 des
 
 void alphaTestNative(WinApplication* app, x86::CPU& cpu)
 {
-    alphaTest(app, cpu, cpu.edi, cpu.esi);
+    bridge::CallGroup calls(app, cpu);
+    alphaTest(calls, cpu, cpu.edi, cpu.esi);
     cpu.esp += 4;
 }
 
 void blendNative(WinApplication* app, x86::CPU& cpu)
 {
-    blend(app, cpu, rc::ld32(cpu.esp + 4), cpu.edi, cpu.esi);
+    bridge::CallGroup calls(app, cpu);
+    blend(calls, cpu, rc::ld32(cpu.esp + 4), cpu.edi, cpu.esi);
     cpu.esp += 4;
 }
 
@@ -280,13 +282,14 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
     }
     const reg32 record = rc::ld32(ViewRecords + view * 0x60);
     reg32 edx = record + 0x80;
+    bridge::CallGroup calls(app, cpu);
     if (view != lastView)
     {
         if (rc::ld32(TransformsOn))
         {
             const reg32 device = rc::ld32(DevicePointer);
-            bridge::setTransform(app, cpu, device, 2, guestFloats(record));
-            bridge::setTransform(app, cpu, rc::ld32(DevicePointer), 3, guestFloats(record + 0x40));
+            calls.setTransform(device, 2, guestFloats(record));
+            calls.setTransform(rc::ld32(DevicePointer), 3, guestFloats(record + 0x40));
             edx = rc::ld32(rc::ld32(DevicePointer));
         }
         store(LastView, view);
@@ -305,18 +308,18 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
         const reg32 g = rc::ld32(CurrentGroup);
         if (defer)
         {
-            bridge::effectSetMatrixProduct(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + 0x24), a, b, nullptr);
+            calls.setMatrixProduct(rc::ld32(g + 0x18), rc::ld32(g + 0x24), a, b, nullptr);
         }
         else
         {
             bridge::matrixMultiply(a, b, m);
-            bridge::effectSetMatrix(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + 0x24), m);
+            calls.setMatrix(rc::ld32(g + 0x18), rc::ld32(g + 0x24), m);
         }
     }
     if (rc::ld32(TransformsOn))
     {
         const reg32 device = rc::ld32(DevicePointer);
-        bridge::setTransform(app, cpu, device, 0x100, guestFloats(world));
+        calls.setTransform(device, 0x100, guestFloats(world));
         edx = rc::ld32(device);
     }
     const reg32 on = rc::ld32(EffectMatricesOn);
@@ -330,12 +333,12 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
         ecx = rc::ld32(g + 0x1c);
         if (defer)
         {
-            eax = bridge::effectSetMatrixProduct(app, cpu, effect, ecx, a, b, nullptr);
+            eax = calls.setMatrixProduct(effect, ecx, a, b, nullptr);
         }
         else
         {
             bridge::matrixMultiply(a, b, m);
-            eax = bridge::effectSetMatrix(app, cpu, effect, ecx, m);
+            eax = calls.setMatrix(effect, ecx, m);
         }
         edx = rc::ld32(effect);
     }
@@ -481,13 +484,14 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
         cpu.edx = group;
         return;
     }
+    bridge::CallGroup calls(app, cpu);
     if (group != 0)
-        bridge::effectSetTexture(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0x40), texture);
+        calls.setEffectTexture(rc::ld32(group + 0x18), rc::ld32(group + 0x40), texture);
     else
-        bridge::setTexture(app, cpu, rc::ld32(DevicePointer), 0, texture);
+        calls.setTexture(rc::ld32(DevicePointer), 0, texture);
 
     const bool alpha = rc::ld8(model + 0x55) == 1;
-    alphaTest(app, cpu, alpha ? 1 : 0, alpha ? 0xaa : 0);
+    alphaTest(calls, cpu, alpha ? 1 : 0, alpha ? 0xaa : 0);
     reg32 edx = cpu.edx;
     const sreg8 mode = sreg8(rc::ld8(model + 0x56));
     if (mode == 0)
@@ -497,19 +501,19 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
         store(BlendDestination, 0xffffffffu);
         if (g == 0)
         {
-            bridge::setRenderState(app, cpu, rc::ld32(DevicePointer), RsAlphaBlendEnable, 0);
+            calls.setRenderState(rc::ld32(DevicePointer), RsAlphaBlendEnable, 0);
         }
         else
         {
             const reg32 effect = rc::ld32(g + 0x18);
-            bridge::effectSetInt(app, cpu, effect, rc::ld32(g + 0xc4), 0);
+            calls.setInt(effect, rc::ld32(g + 0xc4), 0);
             edx = rc::ld32(effect);
         }
         store(BlendOn, 0);
     }
     else
     {
-        blend(app, cpu, 1, 5, mode == 2 ? 2 : 6);
+        blend(calls, cpu, 1, 5, mode == 2 ? 2 : 6);
         edx = cpu.edx;
     }
 
@@ -517,21 +521,21 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
     if (mode == 0)
     {
         if (kind5)
-            bridge::setRenderState(app, cpu, rc::ld32(DevicePointer), RsCullMode, 1);
+            calls.setRenderState(rc::ld32(DevicePointer), RsCullMode, 1);
         const reg32 device = rc::ld32(DevicePointer);
-        bridge::setRenderState(app, cpu, device, RsZWriteEnable, 1);
+        calls.setRenderState(device, RsZWriteEnable, 1);
         edx = rc::ld32(device);
     }
     else if (kind5)
     {
-        bridge::setRenderState(app, cpu, rc::ld32(DevicePointer), RsCullMode, 2);
+        calls.setRenderState(rc::ld32(DevicePointer), RsCullMode, 2);
         const reg32 device = rc::ld32(DevicePointer);
-        bridge::setRenderState(app, cpu, device, RsZWriteEnable, 1);
+        calls.setRenderState(device, RsZWriteEnable, 1);
         edx = rc::ld32(device);
     }
     else
     {
-        bridge::setRenderState(app, cpu, rc::ld32(DevicePointer), RsZWriteEnable, 0);
+        calls.setRenderState(rc::ld32(DevicePointer), RsZWriteEnable, 0);
     }
 
     const reg32 g = rc::ld32(CurrentGroup);
@@ -540,6 +544,7 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
         cpu.edx = edx;
         return;
     }
+    calls.queue();
     reg32 u = 0, v = 0;
     const reg32 kind = rc::ld32(g);
     const reg8 offset = rc::ld8(model + 0x52);
@@ -635,11 +640,10 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
     matrix[9] = v;
     const reg32 vector[4] = { u, v, 0, 0 };
     const reg32 g2 = rc::ld32(CurrentGroup);
-    bridge::effectSetMatrix(app, cpu, rc::ld32(g2 + 0x18), rc::ld32(g2 + 0xd4),
-                            reinterpret_cast<const float*>(matrix));
+    calls.setMatrix(rc::ld32(g2 + 0x18), rc::ld32(g2 + 0xd4), reinterpret_cast<const float*>(matrix));
     const reg32 g3 = rc::ld32(CurrentGroup);
     const reg32 effect = rc::ld32(g3 + 0x18);
-    bridge::effectSetVector(app, cpu, effect, rc::ld32(g3 + 0xd0), reinterpret_cast<const float*>(vector));
+    calls.setVector(effect, rc::ld32(g3 + 0xd0), reinterpret_cast<const float*>(vector));
     cpu.edx = rc::ld32(effect);
     saved.restore(cpu);
     cpu.esp = entry + 4;
@@ -737,10 +741,9 @@ void lightsNative(WinApplication* app, x86::CPU& cpu)
     else
     {
         const reg32 effect = rc::ld32(group + 0x18);
-        bridge::EffectCalls calls(app, cpu, effect);
-        calls.setVectorArray(rc::ld32(group + 0x48), guestFloats(light + 0x120), 10);
-        calls.setVector(rc::ld32(group + 0x3c), guestFloats(light + 0xc0));
-        cpu.eax = calls.run();
+        bridge::CallGroup calls(app, cpu);
+        calls.setVectorArray(effect, rc::ld32(group + 0x48), guestFloats(light + 0x120), 10);
+        cpu.eax = calls.setVector(effect, rc::ld32(group + 0x3c), guestFloats(light + 0xc0));
         cpu.edx = rc::ld32(effect);
     }
     saved.restore(cpu);
@@ -769,17 +772,18 @@ void reflectionNative(WinApplication* app, x86::CPU& cpu)
     loadMatrix(world, a);
     loadMatrix(viewProjection, b);
     const reg32 group = rc::ld32(CurrentGroup);
+    bridge::CallGroup calls(app, cpu);
     if (rc::ld32(group + 0xc) == 0)
     {
         if (settings().defer)
         {
-            bridge::effectSetMatrixProduct(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0x38), a, b, bias);
+            calls.setMatrixProduct(rc::ld32(group + 0x18), rc::ld32(group + 0x38), a, b, bias);
         }
         else
         {
             bridge::matrixMultiply(a, b, m);
             bridge::matrixMultiply(m, bias, m);
-            bridge::effectSetMatrix(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0x38), m);
+            calls.setMatrix(rc::ld32(group + 0x18), rc::ld32(group + 0x38), m);
         }
     }
     else
@@ -801,7 +805,7 @@ void reflectionNative(WinApplication* app, x86::CPU& cpu)
         bridge::matrixMultiply(b, bias, p);
         bridge::matrixMultiply(r, p, p);
         const reg32 g = rc::ld32(CurrentGroup);
-        bridge::effectSetMatrix(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + 0x38), p);
+        calls.setMatrix(rc::ld32(g + 0x18), rc::ld32(g + 0x38), p);
         const double k = ld(0x6ccc34);
         float t[16];
         memset(t, 0, sizeof(t));
@@ -813,12 +817,12 @@ void reflectionNative(WinApplication* app, x86::CPU& cpu)
         t[12] = float(double(p[15]) * k + ld(Half));
         t[15] = asFloat(one);
         const reg32 g2 = rc::ld32(CurrentGroup);
-        bridge::effectSetMatrix(app, cpu, rc::ld32(g2 + 0x18), rc::ld32(g2 + 0xb8), t);
+        calls.setMatrix(rc::ld32(g2 + 0x18), rc::ld32(g2 + 0xb8), t);
     }
     const reg32 vector[4] = { rc::ld32(0x7010ac), rc::ld32(0x7010b0), rc::ld32(0x7010b4), 0 };
     const reg32 g = rc::ld32(CurrentGroup);
     const reg32 effect = rc::ld32(g + 0x18);
-    cpu.eax = bridge::effectSetVector(app, cpu, effect, rc::ld32(g + 0x70), reinterpret_cast<const float*>(vector));
+    cpu.eax = calls.setVector(effect, rc::ld32(g + 0x70), reinterpret_cast<const float*>(vector));
     cpu.edx = rc::ld32(effect);
     saved.restore(cpu);
     cpu.esp = entry + 4;
@@ -916,16 +920,15 @@ void materialNative(WinApplication* app, x86::CPU& cpu)
     {
         const reg32 g = rc::ld32(CurrentGroup);
         const reg32 effect = rc::ld32(g + 0x18);
-        bridge::EffectCalls calls(app, cpu, effect);
-        calls.setVector(rc::ld32(g + 0x50), d0);
-        calls.setVector(rc::ld32(g + 0x54), d1);
-        calls.setVector(rc::ld32(g + 0x58), d2);
-        calls.setVector(rc::ld32(g + 0x5c), d3);
-        calls.setVector(rc::ld32(g + 0x64), d4);
-        calls.setVector(rc::ld32(g + 0x68), d5);
-        calls.setFloat(rc::ld32(g + 0x60), float(ld(0x7070d4) * m(0x58)));
-        calls.setFloat(rc::ld32(g + 0x6c), float(m(0x7c)));
-        cpu.eax = calls.run();
+        bridge::CallGroup calls(app, cpu);
+        calls.setVector(effect, rc::ld32(g + 0x50), d0);
+        calls.setVector(effect, rc::ld32(g + 0x54), d1);
+        calls.setVector(effect, rc::ld32(g + 0x58), d2);
+        calls.setVector(effect, rc::ld32(g + 0x5c), d3);
+        calls.setVector(effect, rc::ld32(g + 0x64), d4);
+        calls.setVector(effect, rc::ld32(g + 0x68), d5);
+        calls.setFloat(effect, rc::ld32(g + 0x60), float(ld(0x7070d4) * m(0x58)));
+        cpu.eax = calls.setFloat(effect, rc::ld32(g + 0x6c), float(m(0x7c)));
         cpu.edx = rc::ld32(effect);
     }
     saved.restore(cpu);

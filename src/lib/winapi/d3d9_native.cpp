@@ -266,7 +266,7 @@ enum : uint8_t
     OpDrawFrameVertices,    // device, type, minimum index, vertices, start index, count, bytes, data
     OpPresent,              // device, source and destination rectangle flags
     OpPassDraw,             // effect, pass, then the DrawIndexedPrimitive words
-    OpEffectCalls,          // effect, then EffectCalls entries
+    OpCalls,                // CallGroup entries
     OpFpscr,                // the FPSCR the following calls run with
     OpWrap,                 // the next record is at the start of the ring
     OpCount
@@ -306,7 +306,7 @@ const char* opName(uint32_t op)
     case OpDrawFrameVertices:    return "DrawIndexedPrimitive (frame vertices)";
     case OpPresent:              return "Present";
     case OpPassDraw:             return "Effect::Pass + DrawIndexedPrimitive";
-    case OpEffectCalls:          return "effect setters";
+    case OpCalls:                return "call group";
     default:                     return methodName(uint8_t(op));
     }
 }
@@ -772,37 +772,67 @@ uint32_t runRecord(const uint32_t* p)
         h = D3D_OK;
         break;
     }
-    case OpEffectCalls:
+    case OpCalls:
     {
-        const uint32_t* e = w + 1;
+        const uint32_t* e = w;
         const uint32_t* end = w + length - 1;
         while (e < end)
         {
-            const uint32_t kind = e[0] & 0xff, count = e[0] >> 8;
-            const float* data = reinterpret_cast<const float*>(e + 2);
+            const uint32_t kind = e[0] & 0xff, words = e[0] >> 8;
+            const reg32 target = e[1], index = e[2];
+            const uint32_t* data = e + 3;
+            const float* floats = reinterpret_cast<const float*>(data);
             HRESULT r;
-            uint32_t method, floats;
+            uint32_t method;
             switch (kind)
             {
-            case EffectCalls::KindVector:
-                r = effect::setVector(app, cpu, w[0], e[1], data);
-                method = MethodEffectSetVector;
-                floats = 4;
+            case CallGroup::KindInt:
+                r = effect::setInt(app, cpu, target, index, x86::sreg32(data[0]));
+                method = MethodEffectSetInt;
                 break;
-            case EffectCalls::KindFloat:
-                r = effect::setFloat(app, cpu, w[0], e[1], data[0]);
+            case CallGroup::KindFloat:
+                r = effect::setFloat(app, cpu, target, index, floats[0]);
                 method = MethodEffectSetFloat;
-                floats = 1;
+                break;
+            case CallGroup::KindVector:
+                r = effect::setVector(app, cpu, target, index, floats);
+                method = MethodEffectSetVector;
+                break;
+            case CallGroup::KindVectorArray:
+                r = effect::setVectorArray(app, cpu, target, index, floats, words / 4);
+                method = MethodEffectSetVectorArray;
+                break;
+            case CallGroup::KindMatrix:
+                r = effect::setMatrix(app, cpu, target, index, floats);
+                method = MethodEffectSetMatrix;
+                break;
+            case CallGroup::KindProduct:
+            {
+                const float* matrices[3] = { floats + 1, floats + 17, floats + 33 };
+                r = effect::setProduct(target, index, matrices, (words - 1) / 16, data[0]);
+                method = OpSetMatrixProduct;
+                break;
+            }
+            case CallGroup::KindEffectTexture:
+                r = effect::setTexture(app, cpu, target, index, data[0]);
+                method = MethodEffectSetTexture;
+                break;
+            case CallGroup::KindRenderState:
+                r = dev2(target)->SetRenderState(app, cpu, index, data[0]);
+                method = MethodSetRenderState;
+                break;
+            case CallGroup::KindDeviceTexture:
+                r = dev2(target)->SetTexture(app, cpu, index, lookup(data[0]));
+                method = MethodSetTexture;
                 break;
             default:
-                r = effect::setVectorArray(app, cpu, w[0], e[1], data, count);
-                method = MethodEffectSetVectorArray;
-                floats = count * 4;
+                r = dev2(target)->SetTransform(app, cpu, index, reinterpret_cast<const D3DMATRIX*>(data));
+                method = MethodSetTransform;
                 break;
             }
             if (__builtin_expect(r != D3D_OK, 0))
-                noteResult(method, e, 2 + floats, r, NotReturned);
-            e += 2 + floats;
+                noteResult(method, e + 1, 2 + words, r, NotReturned);
+            e += 3 + words;
         }
         break;
     }
@@ -976,7 +1006,7 @@ __attribute__((noinline)) uint32_t* putSlow(uint32_t op, uint32_t words)
     uint32_t* p = d.ring + at;
     p[0] = op | (words + 1) << 8;
     d.head += need;
-    ++d.stats.calls;
+    ++d.stats.records[op];
     g_deferPending = true;
     d.last = p + 1;
     d.lastWords = words;
@@ -995,7 +1025,7 @@ inline uint32_t* put(uint32_t op, uint32_t words)
     uint32_t* p = d.ring + at;
     p[0] = op | (words + 1) << 8;
     d.head += need;
-    ++d.stats.calls;
+    ++d.stats.records[op];
     g_deferPending = true;
     d.last = p + 1;
     d.lastWords = words;
@@ -1223,6 +1253,9 @@ DeferStats takeDeferStats()
     DeferStats s = d.stats;
     s.words = d.head - d.statsHead;
     d.statsHead = d.head;
+    s.calls = 0;
+    for (uint32_t i = 0; i < DeferOpCount; ++i)
+        s.calls += s.records[i];
     s.runUs = d.runUs.exchange(0, std::memory_order_relaxed);
     s.mismatches = d.mismatches.exchange(0, std::memory_order_relaxed);
     s.passes = d.passes.exchange(0, std::memory_order_relaxed);
@@ -1654,6 +1687,7 @@ HRESULT passDrawIndexed(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT p
     if (s_defer.inWindow && deferringDraw(cpu, guest))
     {
         uint32_t* w = put(OpPassDraw, 9);
+        s_defer.stats.compactCalls += 2;
         w[0] = effect;
         w[1] = pass;
         w[2] = guest;
@@ -1671,69 +1705,85 @@ HRESULT passDrawIndexed(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT p
     return drawIndexedPrimitive(app, cpu, guest, type, baseVertex, minIndex, vertices, startIndex, count);
 }
 
-// ---- EffectCalls ----
+// ---- CallGroup ----
 
-EffectCalls::EffectCalls(WinApplication* app, x86::CPU& cpu, reg32 effect)
-    :   m_app(app), m_cpu(cpu), m_effect(effect), m_queued(s_defer.inWindow && deferring(cpu))
+CallGroup::CallGroup(WinApplication* app, x86::CPU& cpu)
+    :   m_app(app), m_cpu(cpu), m_queued(s_defer.inWindow && deferring(cpu)), m_bindings(s_defer.boundOnly == 0),
+        m_device(s_defer.deviceGuest), m_fpscr(s_defer.fpscr)
 {
 }
 
-void EffectCalls::queueEntries()
+void CallGroup::queue()
 {
     if (!m_size)
         return;
-    uint32_t* w = put(OpEffectCalls, 1 + m_size);
-    w[0] = m_effect;
-    copyWords(w + 1, m_words, m_size);
-    m_last = queued();
+    uint32_t* w = put(OpCalls, m_size);
+    copyWords(w, m_words, m_size);
+    queued();
+    s_defer.stats.compactCalls += m_count;
     m_size = 0;
+    m_count = 0;
 }
 
-uint32_t* EffectCalls::entry(Kind kind, reg32 handle, uint32_t count, uint32_t floats)
+HRESULT CallGroup::effectSetIntAtOnce(reg32 effect, reg32 handle, x86::sreg32 value)
 {
-    if (!m_queued || handle >= 0x10000 || 2 + floats > MaxWords)
-    {
-        queueEntries();
-        return nullptr;
-    }
-    if (m_size + 2 + floats > MaxWords)
-        queueEntries();
-    uint32_t* e = m_words + m_size;
-    e[0] = kind | count << 8;
-    e[1] = handle;
-    m_size += 2 + floats;
-    return e + 2;
+    queue();
+    return effectSetInt(m_app, m_cpu, effect, handle, value);
 }
 
-void EffectCalls::setVector(reg32 handle, const float* vector)
+HRESULT CallGroup::effectSetFloatAtOnce(reg32 effect, reg32 handle, float value)
 {
-    if (uint32_t* e = vector ? entry(KindVector, handle, 1, 4) : (queueEntries(), nullptr))
-        copyWords(e, vector, 4);
-    else
-        m_last = effectSetVector(m_app, m_cpu, m_effect, handle, vector);
+    queue();
+    return effectSetFloat(m_app, m_cpu, effect, handle, value);
 }
 
-void EffectCalls::setFloat(reg32 handle, float value)
+HRESULT CallGroup::effectSetVectorAtOnce(reg32 effect, reg32 handle, const float* vector)
 {
-    if (uint32_t* e = entry(KindFloat, handle, 1, 1))
-        e[0] = bits(value);
-    else
-        m_last = effectSetFloat(m_app, m_cpu, m_effect, handle, value);
+    queue();
+    return effectSetVector(m_app, m_cpu, effect, handle, vector);
 }
 
-void EffectCalls::setVectorArray(reg32 handle, const float* vectors, UINT count)
+HRESULT CallGroup::effectSetVectorArrayAtOnce(reg32 effect, reg32 handle, const float* vectors, UINT count)
 {
-    if (uint32_t* e = vectors && count <= MaxArrayFloats / 4 ? entry(KindVectorArray, handle, count, count * 4)
-                                                             : (queueEntries(), nullptr))
-        copyWords(e, vectors, count * 4);
-    else
-        m_last = effectSetVectorArray(m_app, m_cpu, m_effect, handle, vectors, count);
+    queue();
+    return effectSetVectorArray(m_app, m_cpu, effect, handle, vectors, count);
 }
 
-HRESULT EffectCalls::run()
+HRESULT CallGroup::effectSetMatrixAtOnce(reg32 effect, reg32 handle, const float* matrix)
 {
-    queueEntries();
-    return m_last;
+    queue();
+    return effectSetMatrix(m_app, m_cpu, effect, handle, matrix);
+}
+
+HRESULT CallGroup::effectSetMatrixProductAtOnce(reg32 effect, reg32 handle, const float* a, const float* b,
+                                                const float* c)
+{
+    queue();
+    return effectSetMatrixProduct(m_app, m_cpu, effect, handle, a, b, c);
+}
+
+HRESULT CallGroup::effectSetTextureAtOnce(reg32 effect, reg32 handle, reg32 texture)
+{
+    queue();
+    return effectSetTexture(m_app, m_cpu, effect, handle, texture);
+}
+
+HRESULT CallGroup::setRenderStateAtOnce(reg32 device, DWORD state, DWORD value)
+{
+    queue();
+    return bridge::setRenderState(m_app, m_cpu, device, state, value);
+}
+
+HRESULT CallGroup::setTextureAtOnce(reg32 device, DWORD stage, reg32 texture)
+{
+    queue();
+    return bridge::setTexture(m_app, m_cpu, device, stage, texture);
+}
+
+HRESULT CallGroup::setTransformAtOnce(reg32 device, DWORD state, const float* matrix)
+{
+    queue();
+    return bridge::setTransform(m_app, m_cpu, device, state, matrix);
 }
 
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage, reg32 texture)

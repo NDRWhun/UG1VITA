@@ -18,6 +18,7 @@
 #include <x86.h>
 #include <winapi/types.h>
 
+#include <cstring>
 #include <vector>
 
 namespace win32
@@ -71,33 +72,161 @@ HRESULT present(WinApplication* app, x86::CPU& cpu, reg32 device, const void* so
 HRESULT passDrawIndexed(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass, reg32 device, DWORD type,
                         LONG baseVertex, UINT minIndex, UINT vertices, UINT startIndex, UINT count);
 
-// Effect setter calls on one effect in order: inside a window one queued record, else the calls one by one. run()
-// returns the last call's result.
-class EffectCalls
+// Device and effect calls in order: inside a window collected and queued as one record (queue(), or when a call has
+// to be made at once), returning D3D_OK; else made at once, returning their results. Calls made another way while a
+// group has collected calls must follow a queue().
+class CallGroup
 {
+    static const HRESULT D3D_OK = 0;
+
 public:
-    EffectCalls(WinApplication* app, x86::CPU& cpu, reg32 effect);
+    CallGroup(WinApplication* app, x86::CPU& cpu);
+    ~CallGroup() { queue(); }
 
-    void setVector(reg32 handle, const float* vector);
-    void setFloat(reg32 handle, float value);
-    void setVectorArray(reg32 handle, const float* vectors, UINT count);
-    HRESULT run();
+    HRESULT setInt(reg32 effect, reg32 handle, x86::sreg32 value)
+    {
+        if (uint32_t* e = effectEntry(KindInt, effect, handle, 1))
+        {
+            e[0] = reg32(value);
+            return D3D_OK;
+        }
+        return effectSetIntAtOnce(effect, handle, value);
+    }
+    HRESULT setFloat(reg32 effect, reg32 handle, float value)
+    {
+        if (uint32_t* e = effectEntry(KindFloat, effect, handle, 1))
+        {
+            memcpy(e, &value, 4);
+            return D3D_OK;
+        }
+        return effectSetFloatAtOnce(effect, handle, value);
+    }
+    HRESULT setVector(reg32 effect, reg32 handle, const float* vector)
+    {
+        if (uint32_t* e = vector ? effectEntry(KindVector, effect, handle, 4) : nullptr)
+        {
+            memcpy(e, vector, 16);
+            return D3D_OK;
+        }
+        return effectSetVectorAtOnce(effect, handle, vector);
+    }
+    HRESULT setVectorArray(reg32 effect, reg32 handle, const float* vectors, UINT count)
+    {
+        if (uint32_t* e = vectors && count <= 64 ? effectEntry(KindVectorArray, effect, handle, count * 4) : nullptr)
+        {
+            memcpy(e, vectors, count * 16);
+            return D3D_OK;
+        }
+        return effectSetVectorArrayAtOnce(effect, handle, vectors, count);
+    }
+    HRESULT setMatrix(reg32 effect, reg32 handle, const float* matrix)
+    {
+        if (uint32_t* e = matrix ? effectEntry(KindMatrix, effect, handle, 16) : nullptr)
+        {
+            memcpy(e, matrix, 64);
+            return D3D_OK;
+        }
+        return effectSetMatrixAtOnce(effect, handle, matrix);
+    }
+    // effectSetMatrixProduct.
+    HRESULT setMatrixProduct(reg32 effect, reg32 handle, const float* a, const float* b, const float* c)
+    {
+        if (uint32_t* e = effectEntry(KindProduct, effect, handle, c ? 49 : 33))
+        {
+            e[0] = m_fpscr;
+            memcpy(e + 1, a, 64);
+            memcpy(e + 17, b, 64);
+            if (c)
+                memcpy(e + 33, c, 64);
+            return D3D_OK;
+        }
+        return effectSetMatrixProductAtOnce(effect, handle, a, b, c);
+    }
+    HRESULT setEffectTexture(reg32 effect, reg32 handle, reg32 texture)
+    {
+        if (uint32_t* e = m_bindings ? effectEntry(KindEffectTexture, effect, handle, 1) : nullptr)
+        {
+            e[0] = texture;
+            return D3D_OK;
+        }
+        return effectSetTextureAtOnce(effect, handle, texture);
+    }
+    HRESULT setRenderState(reg32 device, DWORD state, DWORD value)
+    {
+        if (uint32_t* e = device == m_device ? entry(KindRenderState, device, state, 1) : nullptr)
+        {
+            e[0] = value;
+            return D3D_OK;
+        }
+        return setRenderStateAtOnce(device, state, value);
+    }
+    HRESULT setTexture(reg32 device, DWORD stage, reg32 texture)
+    {
+        if (uint32_t* e = device == m_device && m_bindings ? entry(KindDeviceTexture, device, stage, 1) : nullptr)
+        {
+            e[0] = texture;
+            return D3D_OK;
+        }
+        return setTextureAtOnce(device, stage, texture);
+    }
+    HRESULT setTransform(reg32 device, DWORD state, const float* matrix)
+    {
+        if (uint32_t* e = device == m_device && matrix ? entry(KindTransform, device, state, 16) : nullptr)
+        {
+            memcpy(e, matrix, 64);
+            return D3D_OK;
+        }
+        return setTransformAtOnce(device, state, matrix);
+    }
+    // Queues the collected calls as one record.
+    void queue();
 
-    enum Kind : uint32_t { KindVector, KindFloat, KindVectorArray };
-    enum { MaxWords = 512 };
+    // Entries: kind | data words << 8, the effect or device, the handle, state or stage, the data.
+    enum Kind : uint32_t
+    {
+        KindInt, KindFloat, KindVector, KindVectorArray, KindMatrix, KindProduct, KindEffectTexture, KindRenderState,
+        KindDeviceTexture, KindTransform
+    };
+    enum { MaxWords = 1024 };
 
 private:
-    // Entries: kind | count << 8, handle, the floats (count vectors, or one float); null when the call is made at
-    // once (the entries before it are queued first).
-    uint32_t* entry(Kind kind, reg32 handle, uint32_t count, uint32_t floats);
-    void queueEntries();
+    uint32_t* entry(Kind kind, reg32 target, reg32 index, uint32_t words)
+    {
+        if (__builtin_expect(!m_queued, 0))
+            return nullptr;
+        if (__builtin_expect(m_size + 3 + words > MaxWords, 0))
+            queue();
+        uint32_t* e = m_words + m_size;
+        e[0] = kind | words << 8;
+        e[1] = target;
+        e[2] = index;
+        m_size += 3 + words;
+        ++m_count;
+        return e + 3;
+    }
+    uint32_t* effectEntry(Kind kind, reg32 effect, reg32 handle, uint32_t words)
+    {
+        return handle < 0x10000 ? entry(kind, effect, handle, words) : nullptr;
+    }
+    HRESULT effectSetIntAtOnce(reg32 effect, reg32 handle, x86::sreg32 value);
+    HRESULT effectSetFloatAtOnce(reg32 effect, reg32 handle, float value);
+    HRESULT effectSetVectorAtOnce(reg32 effect, reg32 handle, const float* vector);
+    HRESULT effectSetVectorArrayAtOnce(reg32 effect, reg32 handle, const float* vectors, UINT count);
+    HRESULT effectSetMatrixAtOnce(reg32 effect, reg32 handle, const float* matrix);
+    HRESULT effectSetMatrixProductAtOnce(reg32 effect, reg32 handle, const float* a, const float* b, const float* c);
+    HRESULT effectSetTextureAtOnce(reg32 effect, reg32 handle, reg32 texture);
+    HRESULT setRenderStateAtOnce(reg32 device, DWORD state, DWORD value);
+    HRESULT setTextureAtOnce(reg32 device, DWORD stage, reg32 texture);
+    HRESULT setTransformAtOnce(reg32 device, DWORD state, const float* matrix);
 
     WinApplication* m_app;
     x86::CPU& m_cpu;
-    reg32 m_effect;
-    bool m_queued;
-    HRESULT m_last = 0;
+    bool m_queued;          // inside a window of this CPU
+    bool m_bindings;        // calls that change bindings may be collected
+    reg32 m_device;         // the window's device
+    uint32_t m_fpscr;
     uint32_t m_size = 0;
+    uint32_t m_count = 0;   // entries
     uint32_t m_words[MaxWords];
 };
 
@@ -237,6 +366,8 @@ struct DeferStats
     HRESULT errorCodes[DeferOpCount];           // the last such result
     struct Site { reg32 address; uint32_t count, us; };
     Site sites[DeferSiteCount];                 // drains that waited, by guest method (count 0: unused)
+    uint32_t records[DeferOpCount];             // queued records per operation
+    uint32_t compactCalls;                      // calls in the records of several calls (effect setters, pass draws)
 };
 DeferStats takeDeferStats();
 // Name of a queue operation (DeferStats::errors index) and of a drain site.
