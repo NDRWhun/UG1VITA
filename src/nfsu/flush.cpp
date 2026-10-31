@@ -1176,7 +1176,17 @@ void logDeferral(unsigned frames)
                                double(d.sites[i].us) / 1000.0 / frames);
     }
     pf::logInfo("flush_async: drains that waited, by method:%s", siteAt ? sites : " none");
-    pf::logInfo("flush_async: %u flushes/frame, %u queued calls/frame (%u KiB), %u ran at once; queue run %.2f ms/frame;"
+    char records[768] = {};
+    int recordAt = 0;
+    for (uint32_t op = 0; op < bridge::DeferOpCount && recordAt < int(sizeof(records)); ++op)
+    {
+        if (d.records[op])
+            recordAt += snprintf(records + recordAt, sizeof(records) - recordAt, " %s %u,", bridge::deferOpName(op),
+                                 d.records[op] / frames);
+    }
+    pf::logInfo("flush_async: records/frame by kind:%s calls in records of several %u/frame", records,
+                d.compactCalls / frames);
+    pf::logInfo("flush_async: %u flushes/frame, %u queued records/frame (%u KiB), %u ran at once; queue run %.2f ms/frame;"
                 " drains that waited %u/frame (%u inside a flush), wait %.2f ms/frame; in these frames: results that"
                 " differ from the returned ones %u, Begin pass counts that differ %u, late deletes %u; results not"
                 " D3D_OK by method:%s", d.windows / frames, d.calls / frames, d.words / frames / 256,
