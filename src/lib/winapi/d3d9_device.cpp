@@ -361,6 +361,15 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     render::Scene* s = scene();
     if (!s)
         return D3D_OK;
+    // A back buffer wider than 4:3 that the frame has not cleared whole is cleared black before its first draw: the
+    // game's 2D-only frames (movies, loading) cover the 4:3 part only, and the back buffer's contents are undefined
+    // after Present (swap effect discard).
+    if (!s->target.color && m_backBufferFilled != f->index)
+    {
+        m_backBufferFilled = f->index;
+        if (s->width * 3 > s->height * 4 && !clearRect(f, s, 0, 0, s->width, s->height, D3DCLEAR_TARGET, 0xff000000, 1.0f))
+            return D3D_OK;
+    }
     if (f->drawCount == f->drawCapacity)
     {
         pf::logError("d3d9: frame %u: draw limit reached, draws dropped", f->index);
@@ -920,50 +929,60 @@ HRESULT Device::Clear(WinApplication* app, x86::CPU& cpu, DWORD count, const D3D
         }
         if (!(what & (D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER)))
             continue;
-        if (f->drawCount == f->drawCapacity)
-        {
-            m_frameFull = true;
+        if (!s->target.color && (what & D3DCLEAR_TARGET) && x0 == 0 && y0 == 0 && x1 == s->width && y1 == s->height)
+            m_backBufferFilled = f->index;
+        if (!clearRect(f, s, x0, y0, x1, y1, what, argb, z))
             return D3D_OK;
-        }
-        render::DrawCall& d = f->draws[f->drawCount];
-        memset(&d, 0, sizeof(d));
-        render::VertexLayout layout;
-        memset(&layout, 0, sizeof(layout));
-        layout.stride = 12;
-        layout.count = 1;
-        layout.elements[0] = render::VertexElement{ render::UsagePosition, render::TypeFloat3, 0 };
-        d.state.layout = render::registerLayout(layout);
-        d.state.vertexProgram = render::VpClear;
-        d.state.fragmentProgram = render::FpClear;
-        d.state.primitive = render::PrimitiveFan;
-        d.state.colorMask = (what & D3DCLEAR_TARGET) ? 0xf : 0;
-        d.state.depthEnable = d.state.depthWrite = (what & D3DCLEAR_ZBUFFER) ? 1 : 0;
-        d.state.depthFunc = 8;
-        d.state.cullMode = 1;
-        float* v = static_cast<float*>(render::allocateVertices(*f, 48));
-        float* c = render::allocateConstants(*f, sizeof(render::ClearFragmentConstants) / 4, &d.fragmentConstants);
-        if (!v || !c)
-        {
-            m_frameFull = true;
-            return D3D_OK;
-        }
-        // Pixel edges (centres at integers) in clip space of the whole target.
-        const float sx = 2.0f / s->width, sy = 2.0f / s->height;
-        const float l = (float(x0) - 0.5f) * sx - 1.0f, r = (float(x1) - 0.5f) * sx - 1.0f;
-        const float t = 1.0f - (float(y0) - 0.5f) * sy, b = 1.0f - (float(y1) - 0.5f) * sy;
-        const float quad[12] = { l, t, z, r, t, z, r, b, z, l, b, z };
-        memcpy(v, quad, sizeof(quad));
-        memset(c, 0, sizeof(render::ClearFragmentConstants));
-        color(argb, reinterpret_cast<render::ClearFragmentConstants*>(c)->color);
-        d.vertices = v;
-        d.count = 4;
-        d.vertexCount = 4;
-        d.vertexConstants = render::NoConstants;
-        d.viewport = viewportIndex(*f, render::Viewport{ 0, 0, float(s->width), float(s->height), 0.0f, 1.0f });
-        ++f->drawCount;
-        s->drawCount = f->drawCount - s->firstDraw;
     }
     return D3D_OK;
+}
+
+bool Device::clearRect(render::Frame* f, render::Scene* s, LONG x0, LONG y0, LONG x1, LONG y1, DWORD what, DWORD argb,
+                       float z)
+{
+    if (f->drawCount == f->drawCapacity)
+    {
+        m_frameFull = true;
+        return false;
+    }
+    render::DrawCall& d = f->draws[f->drawCount];
+    memset(&d, 0, sizeof(d));
+    render::VertexLayout layout;
+    memset(&layout, 0, sizeof(layout));
+    layout.stride = 12;
+    layout.count = 1;
+    layout.elements[0] = render::VertexElement{ render::UsagePosition, render::TypeFloat3, 0 };
+    d.state.layout = render::registerLayout(layout);
+    d.state.vertexProgram = render::VpClear;
+    d.state.fragmentProgram = render::FpClear;
+    d.state.primitive = render::PrimitiveFan;
+    d.state.colorMask = (what & D3DCLEAR_TARGET) ? 0xf : 0;
+    d.state.depthEnable = d.state.depthWrite = (what & D3DCLEAR_ZBUFFER) ? 1 : 0;
+    d.state.depthFunc = 8;
+    d.state.cullMode = 1;
+    float* v = static_cast<float*>(render::allocateVertices(*f, 48));
+    float* c = render::allocateConstants(*f, sizeof(render::ClearFragmentConstants) / 4, &d.fragmentConstants);
+    if (!v || !c)
+    {
+        m_frameFull = true;
+        return false;
+    }
+    // Pixel edges (centres at integers) in clip space of the whole target.
+    const float sx = 2.0f / s->width, sy = 2.0f / s->height;
+    const float l = (float(x0) - 0.5f) * sx - 1.0f, r = (float(x1) - 0.5f) * sx - 1.0f;
+    const float t = 1.0f - (float(y0) - 0.5f) * sy, b = 1.0f - (float(y1) - 0.5f) * sy;
+    const float quad[12] = { l, t, z, r, t, z, r, b, z, l, b, z };
+    memcpy(v, quad, sizeof(quad));
+    memset(c, 0, sizeof(render::ClearFragmentConstants));
+    color(argb, reinterpret_cast<render::ClearFragmentConstants*>(c)->color);
+    d.vertices = v;
+    d.count = 4;
+    d.vertexCount = 4;
+    d.vertexConstants = render::NoConstants;
+    d.viewport = viewportIndex(*f, render::Viewport{ 0, 0, float(s->width), float(s->height), 0.0f, 1.0f });
+    ++f->drawCount;
+    s->drawCount = f->drawCount - s->firstDraw;
+    return true;
 }
 
 HRESULT Device::SetTransform(WinApplication* app, x86::CPU& cpu, DWORD state, const D3DMATRIX* matrix)

@@ -265,17 +265,23 @@ const Element* findElement(x86::reg32 object)
     return found != s_elements.end() && found->object == object ? &*found : nullptr;
 }
 
-// Menu layout (menu_widescreen). In the 640x480 space, per package flush:
-// - clusters: the drawn objects that are on the 640x480 screen, are no movie and do not reach both screen edges
-//   (x <= 8 and >= 632), joined when their boxes are less than 24 apart horizontally and 12 vertically, and the
-//   objects of one top-level group no wider than 320. A cluster left of x = 320 goes to the left screen edge at the
-//   4:3 scale when it starts at x <= 56, with a linear blend to centred at x = 88; a cluster right of x = 320 goes to
-//   the right edge from x >= 584 (centred at 552).
-// - fills (images whose texture is magnified at least 4 times across, or untextured): an end at x <= 8 or >= 632
-//   reaches the screen edge (blend to unchanged at 16 / 624), at the stretch of the full width.
-// - objects wholly left of x = 0 or right of x = 640 stay off the screen; movies stay centred.
-// PC_menubar.fng goes to the left edge as a whole; PreRaceStats.fng keeps its objects in place (fills still reach the
-// edges), its bet markers belong to the racer boxes.
+// Menu layout (menu_widescreen), in the 640x480 space, per package flush, from the polygons of the frame before:
+// - bands: an extent wholly left of x = 320 that starts at x <= 80 goes to the left screen edge at the 4:3 scale
+//   (weight -1), with a linear blend to centred (0) at x = 112; wholly right of x = 320 and ending at x >= 560 it goes
+//   to the right edge (+1), centred at 528. Other extents stay centred.
+// - fills: images (types 1, 9) without texture or whose texture is magnified at least 4 times across or down. A fill
+//   at least 160 wide or across x = 320 that is no box (below) is stretched: each of its ends moves with the object
+//   it touches there (the nearest within 4, overlapping it vertically), else by the band of the end; a fill at least
+//   320 wide with an end in a band reaches the edge of the display there.
+// - clusters: the other drawn objects on the 640x480 screen (no movies, nothing reaching both edges at x <= 8 and
+//   >= 632, no fill taller than 48 unless a box, no picture 320 or wider), joined when their boxes are less than 24
+//   apart horizontally and 12 vertically, and the objects of a top-level group whose drawn objects span at most 320.
+//   A box (a fill 160 to 560 wide and at least 64 tall, within x 24..616) is a cluster member, and the objects
+//   outside the clusters that touch a box, directly or through each other, go with its cluster. A cluster takes the
+//   band weight of its extent, any other object that of its own.
+// - objects wholly left of x = 0 or right of x = 640 stay off the screen; movies stay centred at 4:3.
+// PC_menubar.fng goes to the left edge as a whole; PreRaceStats.fng keeps its objects in place (its fills still reach
+// the display edges), its bet markers belong to the racer boxes.
 struct Box
 {
     Span x;
@@ -301,7 +307,7 @@ Box renderBox(x86::reg32 renderObject)
 }
 
 const x86::reg32 FEObjectType = 0x18, FEObjectData = 0x2c;
-const x86::reg32 TypeImage = 1, TypeMovie = 7, TypeColoredImage = 9;
+const x86::reg32 TypeImage = 1, TypeString = 2, TypeMovie = 7, TypeColoredImage = 9;
 
 float rampDown(float x, float full, float none)
 {
@@ -313,17 +319,31 @@ float rampUp(float x, float none, float full)
     return 1.0f - rampDown(x, none, full);
 }
 
+const float BandLeft = 80.0f, BandRight = 560.0f, BandBlend = 32.0f;
+
+// Weight of an extent: -1 at the left screen edge, 0 centred, 1 at the right screen edge.
+float bandWeight(float x0, float x1)
+{
+    if (x1 <= 320.0f)
+        return -rampDown(x0, BandLeft, BandLeft + BandBlend);
+    if (x0 >= 320.0f)
+        return rampUp(x1, BandRight - BandBlend, BandRight);
+    return 0.0f;
+}
+
 struct MenuElement
 {
     x86::reg32 object;      // FEObject
     x86::reg32 unit;        // its top-level group, or the object itself
     Box box;
-    bool member;            // takes part in the clusters
+    bool onScreen;          // drawn before, on the 640x480 screen, no movie
+    bool fill, box2D, stretch, member;
     size_t cluster;         // union-find parent while the clusters are built
-    float left, right;      // weight of the left / right screen edge placement
+    float weight;           // placement of a translated object
+    float endLeft, endRight;    // weights of the ends of a stretched fill
 };
 std::vector<MenuElement> s_menu;    // by object while a menu flush runs
-bool s_menuFlush = false;
+bool s_menuFlush = false, s_menuAllLeft = false, s_menuFixed = false;
 
 size_t clusterOf(size_t i)
 {
@@ -339,12 +359,65 @@ void joinClusters(size_t a, size_t b)
         s_menu[std::max(a, b)].cluster = std::min(a, b);
 }
 
-// Builds the clusters of the render list (the objects placeElements reads) and their edge weights.
+// An image whose texture is magnified at least 4 times across or down (u, v at +0x44, +0x48 and +0x4C, +0x50 of its
+// data, texture width and height at +0x44 and +0x46 of the TextureInfo at +0x14 of the render object), or an
+// untextured one: a plain fill or gradient.
+bool isFill(x86::reg32 renderObject, x86::reg32 object, const Box& box)
+{
+    const x86::reg32 type = rc::ld32(object + FEObjectType);
+    if (type != TypeImage && type != TypeColoredImage)
+        return false;
+    const x86::reg32 texture = rc::ld32(renderObject + 0x14);
+    if (!texture)
+        return true;
+    const x86::reg32 data = rc::ld32(object + FEObjectData);
+    float u = 1.0f, v = 1.0f;
+    if (data)
+    {
+        u = std::fabs(rc::ldf32(data + 0x4c) - rc::ldf32(data + 0x44));
+        v = std::fabs(rc::ldf32(data + 0x50) - rc::ldf32(data + 0x48));
+    }
+    const float texelsX = float(rc::ld16(texture + 0x44)) * (std::isfinite(u) ? u : 1.0f);
+    const float texelsY = float(rc::ld16(texture + 0x46)) * (std::isfinite(v) ? v : 1.0f);
+    return (texelsX > 0.0f && box.x.x1 - box.x.x0 >= 4.0f * texelsX) ||
+           (texelsY > 0.0f && box.y1 - box.y0 >= 4.0f * texelsY);
+}
+
+bool isStretched(const Box& box, bool fill, bool box2D)
+{
+    return fill && !box2D && (box.x.x1 - box.x.x0 >= 160.0f || (box.x.x0 < 320.0f && box.x.x1 > 320.0f));
+}
+
+bool touches(const Box& a, const Box& b)
+{
+    return a.x.x0 - 4.0f <= b.x.x1 && b.x.x0 <= a.x.x1 + 4.0f && a.y0 < b.y1 && b.y0 < a.y1;
+}
+
+// Weight of the end x of a stretched fill: that of the object it touches there, else that of the band.
+float endWeight(const MenuElement& fill, float x, float band)
+{
+    float best = band, distance = HUGE_VALF, strength = -1.0f;
+    for (const MenuElement& other : s_menu)
+    {
+        if (!other.onScreen || other.stretch || &other == &fill)
+            continue;
+        const Box& o = other.box;
+        if (x < o.x.x0 - 4.0f || x > o.x.x1 + 4.0f || !(o.y0 < fill.box.y1 && fill.box.y0 < o.y1))
+            continue;
+        const float d = x >= o.x.x0 && x <= o.x.x1 ? 0.0f : std::min(std::fabs(o.x.x0 - x), std::fabs(o.x.x1 - x));
+        if (d < distance || (d == distance && std::fabs(other.weight) > strength))
+            best = other.weight, distance = d, strength = std::fabs(other.weight);
+    }
+    return best;
+}
+
+// Builds the clusters of the render list (the objects placeElements reads) and the placement of every object.
 void placeMenuElements(x86::reg32 render, x86::reg32 package)
 {
     static const char* const leftPackages[] = {"PC_menubar.fng"};
     static const char* const fixedPackages[] = {"PreRaceStats.fng"};
     const bool allLeft = packageNamed(package, leftPackages), fixed = packageNamed(package, fixedPackages);
+    s_menuAllLeft = allLeft, s_menuFixed = fixed;
 
     s_renders.clear();
     const x86::reg32 renders = render + 0x10;
@@ -361,21 +434,37 @@ void placeMenuElements(x86::reg32 render, x86::reg32 package)
         for (int n = 0; entry != list && entry != 0 && n < 65536; entry = rc::ld32(entry), ++n)
         {
             const x86::reg32 object = rc::ld32(entry + 8);
-            MenuElement element = {object, topGroup(render, object), Box(), false, 0, allLeft ? 1.0f : 0.0f, 0.0f};
+            MenuElement element = {object, topGroup(render, object), Box(), false, false, false, false, false,
+                                   s_menu.size(), allLeft ? -1.0f : 0.0f, 0.0f, 0.0f};
             const auto found = std::lower_bound(s_renders.begin(), s_renders.end(),
                                                 std::make_pair(object, x86::reg32(0)));
             if (found != s_renders.end() && found->first == object)
                 element.box = renderBox(found->second);
-            const Span& x = element.box.x;
-            element.member = !allLeft && !fixed && !x.empty() && rc::ld32(object + FEObjectType) != TypeMovie &&
-                             x.x1 > 0.0f && x.x0 < 640.0f && element.box.y1 > 0.0f && element.box.y0 < 480.0f &&
-                             !(x.x0 <= 8.0f && x.x1 >= 632.0f);
-            element.cluster = s_menu.size();
+            const Box& b = element.box;
+            const float width = b.x.x1 - b.x.x0, height = b.y1 - b.y0;
+            element.onScreen = !b.x.empty() && rc::ld32(object + FEObjectType) != TypeMovie && b.x.x1 > 0.0f &&
+                               b.x.x0 < 640.0f;
+            if (element.onScreen && !allLeft)
+            {
+                element.fill = isFill(found->second, object, b);
+                element.box2D = element.fill && width >= 160.0f && width < 560.0f && height >= 64.0f &&
+                                b.x.x0 >= 24.0f && b.x.x1 <= 616.0f;
+                element.stretch = isStretched(b, element.fill, element.box2D);
+                element.member = !fixed && b.y1 > 0.0f && b.y0 < 480.0f && !(b.x.x0 <= 8.0f && b.x.x1 >= 632.0f) &&
+                                 !element.stretch && !(element.fill && !element.box2D && height > 48.0f) &&
+                                 !(rc::ld32(object + FEObjectType) != TypeString && !element.box2D && width >= 320.0f);
+            }
             s_menu.push_back(element);
         }
     }
+    if (allLeft)
+    {
+        std::sort(s_menu.begin(), s_menu.end(),
+                  [](const MenuElement& a, const MenuElement& b) { return a.object < b.object; });
+        return;
+    }
 
-    // Objects of a top-level group no wider than 320.
+    // Objects of a top-level group whose drawn objects span at most 320.
     std::vector<size_t> order(s_menu.size());
     for (size_t i = 0; i < order.size(); ++i)
         order[i] = i;
@@ -384,7 +473,7 @@ void placeMenuElements(x86::reg32 render, x86::reg32 package)
     {
         Span unit;
         for (last = first; last < order.size() && s_menu[order[last]].unit == s_menu[order[first]].unit; ++last)
-            if (s_menu[order[last]].member)
+            if (s_menu[order[last]].onScreen)
                 unit.add(s_menu[order[last]].box.x);
         if (unit.empty() || unit.x1 - unit.x0 > 320.0f)
             continue;
@@ -416,16 +505,55 @@ void placeMenuElements(x86::reg32 render, x86::reg32 package)
         }
     }
 
-    // Cluster extents, then the edge weights of their objects.
+    // Cluster extents.
     std::vector<Span> extents(s_menu.size());
     for (size_t i : order)
         extents[clusterOf(i)].add(s_menu[i].box.x);
+
+    // Objects outside the clusters that touch a box, directly or through each other, go with the box's cluster.
+    const size_t None = s_menu.size();
+    std::vector<size_t> attached(s_menu.size(), None);
     for (size_t i : order)
+        if (s_menu[i].box2D)
+            attached[i] = clusterOf(i);
+    for (int pass = 0; pass < 4; ++pass)
     {
-        const Span& extent = extents[clusterOf(i)];
+        bool changed = false;
+        for (size_t i = 0; i < s_menu.size(); ++i)
+        {
+            const MenuElement& element = s_menu[i];
+            if (attached[i] != None || element.member || element.stretch || !element.onScreen)
+                continue;
+            for (size_t j = 0; j < s_menu.size(); ++j)
+                if (attached[j] != None && touches(s_menu[j].box, element.box))
+                {
+                    attached[i] = attached[j];
+                    changed = true;
+                    break;
+                }
+        }
+        if (!changed)
+            break;
+    }
+
+    // Weights of the translated objects, then the ends of the stretched fills.
+    for (size_t i = 0; i < s_menu.size(); ++i)
+    {
         MenuElement& element = s_menu[i];
-        element.left = extent.x1 <= 320.0f ? rampDown(extent.x0, 56.0f, 88.0f) : 0.0f;
-        element.right = extent.x0 >= 320.0f ? rampUp(extent.x1, 552.0f, 584.0f) : 0.0f;
+        if (fixed || element.stretch || element.box.x.empty())
+            continue;
+        const Span& extent = element.member         ? extents[clusterOf(i)]
+                             : attached[i] != None ? extents[attached[i]]
+                                                   : element.box.x;
+        element.weight = bandWeight(extent.x0, extent.x1);
+    }
+    for (MenuElement& element : s_menu)
+    {
+        if (!element.stretch || fixed)
+            continue;
+        const Span& x = element.box.x;
+        element.endLeft = endWeight(element, x.x0, -rampDown(x.x0, BandLeft, BandLeft + BandBlend));
+        element.endRight = endWeight(element, x.x1, rampUp(x.x1, BandRight - BandBlend, BandRight));
     }
 
     std::sort(s_menu.begin(), s_menu.end(),
@@ -439,27 +567,12 @@ const MenuElement* findMenuElement(x86::reg32 object)
     return found != s_menu.end() && found->object == object ? &*found : nullptr;
 }
 
-// An image whose texture is magnified at least 4 times across (u at +0x44 and +0x4C of its data, texture width at
-// +0x44 of the TextureInfo at +0x14 of the render object), or an untextured one: a plain fill or gradient.
-bool isFill(x86::reg32 renderObject, x86::reg32 object, const Span& x)
-{
-    const x86::reg32 type = rc::ld32(object + FEObjectType);
-    if (type != TypeImage && type != TypeColoredImage)
-        return false;
-    const x86::reg32 texture = rc::ld32(renderObject + 0x14);
-    if (!texture)
-        return true;
-    const x86::reg32 data = rc::ld32(object + FEObjectData);
-    const float u = data ? std::fabs(rc::ldf32(data + 0x4c) - rc::ldf32(data + 0x44)) : 1.0f;
-    const float texels = float(rc::ld16(texture + 0x44)) * (std::isfinite(u) ? u : 1.0f);
-    return texels > 0.0f && x.x1 - x.x0 >= 4.0f * texels;
-}
-
 // Sets the mapping of an FE render object of a menu flush; false keeps the centred one.
 bool menuPlace(x86::reg32 renderObject)
 {
     const x86::reg32 object = rc::ld32(renderObject + 8);
-    const Span x = renderSpan(renderObject);
+    const Box box = renderBox(renderObject);
+    const Span& x = box.x;
     if (x.empty() || rc::ld32(object + FEObjectType) == TypeMovie)
         return false;
     if (x.x1 <= 0.0f || x.x0 >= 640.0f)
@@ -467,23 +580,46 @@ bool menuPlace(x86::reg32 renderObject)
         setMapping(0.0, 4.0);
         return true;
     }
-    const double k = s_hudWidth;
+    // An object first drawn this frame is placed by its own extent.
     const MenuElement* element = findMenuElement(object);
-    const double left = element ? element->left : 0.0, right = element ? element->right : 0.0;
-    const double scale = k / 320.0, offset = k + (1.0 - k) * (left - right);
-    const float extendLeft = rampDown(x.x0, 8.0f, 16.0f), extendRight = rampUp(x.x1, 624.0f, 632.0f);
-    if ((extendLeft > 0.0f || extendRight > 0.0f) && x.x1 - x.x0 > 0.5f && isFill(renderObject, object, x))
+    const bool known = element && !element->box.x.empty();
+    bool stretch;
+    float weight = 0.0f, endLeft = 0.0f, endRight = 0.0f;
+    if (s_menuAllLeft)
+        stretch = false, weight = -1.0f;
+    else if (known)
+        stretch = element->stretch, weight = element->weight, endLeft = element->endLeft, endRight = element->endRight;
+    else
     {
-        double x0 = x.x0 * scale - offset, x1 = x.x1 * scale - offset;
-        x0 += extendLeft * (std::min(x.x0 / 320.0 - 1.0, x0) - x0);
-        x1 += extendRight * (std::max(x.x1 / 320.0 - 1.0, x1) - x1);
+        stretch = isStretched(box, isFill(renderObject, object, box), false);
+        if (!s_menuFixed)
+        {
+            weight = bandWeight(x.x0, x.x1);
+            endLeft = -rampDown(x.x0, BandLeft, BandLeft + BandBlend);
+            endRight = rampUp(x.x1, BandRight - BandBlend, BandRight);
+        }
+    }
+    const double k = s_hudWidth, b = 1.0 - k, scale = k / 320.0;
+    if (stretch && x.x1 - x.x0 > 0.5f)
+    {
+        double x0 = x.x0 * scale - k + endLeft * b, x1 = x.x1 * scale - k + endRight * b;
+        if (x.x1 - x.x0 >= 320.0f && !s_menuFixed)
+        {
+            x0 += rampDown(x.x0, BandLeft, BandLeft + BandBlend) * (std::min(x0, -1.0) - x0);
+            x1 += rampUp(x.x1, BandRight - BandBlend, BandRight) * (std::max(x1, 1.0) - x1);
+        }
+        else if (x.x1 - x.x0 >= 320.0f)
+        {
+            x0 += rampDown(x.x0, 8.0f, 16.0f) * (std::min(x0, -1.0) - x0);
+            x1 += rampUp(x.x1, 624.0f, 632.0f) * (std::max(x1, 1.0) - x1);
+        }
         const double fillScale = (x1 - x0) / (x.x1 - x.x0);
         setMapping(fillScale, x.x0 * fillScale - x0);
         return true;
     }
-    if (left == 0.0 && right == 0.0)
+    if (weight == 0.0f)
         return false;
-    setMapping(scale, offset);
+    setMapping(scale, k - weight * b);
     return true;
 }
 
@@ -639,6 +775,22 @@ void sub_58e810(win32::WinApplication* app, x86::CPU& cpu)
     setPlace(place);
     sub_58e810_guest(app, cpu);
     setPlace(Place::Centre);
+}
+
+// FE mouse pointer (x, y in the arguments, cdecl), drawn after the FE packages. The Vita has no pointer, so nothing is
+// drawn; the pointer state the guest keeps is kept: [0x7357A8] = moved since the last call (read by the main menu),
+// [0x746110] = time of the last move ([0x73AD3C]), [0x7357A0] / [0x7357A4] = the position.
+void sub_4f3030(win32::WinApplication*, x86::CPU& cpu)
+{
+    const x86::reg32 LastX = 0x7357a0, LastY = 0x7357a4, Moved = 0x7357a8, MoveTime = 0x746110, Now = 0x73ad3c;
+    const x86::reg32 x = argument(cpu, 0), y = argument(cpu, 1);
+    const bool moved = x != rc::ld32(LastX) || y != rc::ld32(LastY);
+    rc::st8(Moved, moved ? 1 : 0);
+    if (moved)
+        rc::st32(MoveTime, rc::ld32(Now));
+    rc::st32(LastX, x);
+    rc::st32(LastY, y);
+    cpu.esp += 4;
 }
 
 // D3DX: the port's effect layer and matrix helpers (src/lib/winapi/d3dx9), stdcall like the guest's.

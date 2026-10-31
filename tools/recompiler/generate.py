@@ -57,6 +57,7 @@ NATIVE_OVERRIDES = [
     0x4f5730,   # end of an FE package's rendering: places the HUD packages' objects before the render list is drawn
     0x514b90,   # FE render object draw: its polygons at the object's place (centred, screen edge or full width)
     0x58e810,   # track map draw: the whole map at its place
+    0x4f3030,   # FE mouse pointer draw: keeps the pointer state, draws nothing (no pointer on the Vita)
     # D3DX (include/winapi/d3dx9.h): effects without the guest HLSL compiler; the math entries are jumps through
     # the PSGP dispatch table.
     0x5af9e5,   # D3DXCreateEffectPool
