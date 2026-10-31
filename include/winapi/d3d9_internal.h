@@ -925,9 +925,6 @@ private:
     render::Frame* frame(WinApplication* app, x86::CPU& cpu);
     render::Scene* scene();
     uint16_t viewportIndex(render::Frame& frame, const render::Viewport& viewport);
-    // Appends a clear of a rectangle of the scene's target; false when the frame is full.
-    bool clearRect(render::Frame* f, render::Scene* s, LONG x0, LONG y0, LONG x1, LONG y1, DWORD what, DWORD argb,
-                   float z);
     // Records a state change for the render thread (header and one value word).
     void record(uint32_t header, DWORD value);
     void recordWords(uint32_t header, const void* payload, uint32_t words);
@@ -957,7 +954,6 @@ private:
     bool                    m_sceneOpen = false;    // m_frame's last scene is the current target
     uint32_t                m_vblanks;
     bool                    m_frameFull = false;
-    uint32_t                m_backBufferFilled = ~0u;   // last frame whose back buffer got a whole colour clear
     Stream*                 m_stream = nullptr;
     bool                    m_stateDirty = true;    // changed while no frame recorded: sent whole before a draw
 };

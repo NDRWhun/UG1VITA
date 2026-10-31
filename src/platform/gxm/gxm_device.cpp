@@ -732,6 +732,23 @@ void Device::Impl::blitPrograms()
     sceGxmSetUniformDataF(uniforms, blitGammaParam, 0, 1, &invGamma);
 }
 
+// A frame with a scene that clears or tests depth (3D).
+static bool usesDepth(const render::Frame& frame)
+{
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const render::Scene& scene = frame.scenes[i];
+        if (!scene.target.depth)
+            continue;
+        if (scene.depthCleared)
+            return true;
+        for (uint32_t n = 0; n < scene.drawCount; ++n)
+            if (frame.draws[scene.firstDraw + n].state.depthEnable)
+                return true;
+    }
+    return false;
+}
+
 // A Direct3D frame: its scenes, then (for a back buffer drawn offscreen, or when nothing drew the back buffer) a scene
 // that shows the offscreen back buffer in its window rectangle or black.
 void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
@@ -740,6 +757,29 @@ void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
     // A stretched back buffer without gamma can be drawn to the display directly.
     const Rect box = Device::windowRect(frame.width, frame.height);
     const bool stretched = box.x0 == 0 && box.y0 == 0 && box.x1 == DisplayWidth && box.y1 == DisplayHeight;
+    // A frame at the display's size is drawn into the display buffer, which keeps what an earlier frame left. The
+    // game's frames without depth (movies, loading and other 2D-only screens) cover the 4:3 part only: the display
+    // buffer is cleared black first.
+    if (frame.width == DisplayWidth && frame.height == DisplayHeight && !usesDepth(frame))
+    {
+        sceGxmBeginScene(context, 0, displayTarget, nullptr, nullptr, displaySync[backBuffer], &displaySurface[backBuffer],
+                         nullptr);
+        sceGxmSetViewportEnable(context, SCE_GXM_VIEWPORT_ENABLED);
+        sceGxmSetViewport(context, 0.5f * DisplayWidth, 0.5f * DisplayWidth, 0.5f * DisplayHeight, -0.5f * DisplayHeight,
+                          0.0f, 1.0f);
+        sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_NONE, 0, 0, DisplayWidth - 1, DisplayHeight - 1);
+        sceGxmSetCullMode(context, SCE_GXM_CULL_NONE);
+        sceGxmSetFrontDepthFunc(context, SCE_GXM_DEPTH_FUNC_ALWAYS);
+        sceGxmSetFrontDepthWriteEnable(context, SCE_GXM_DEPTH_WRITE_DISABLED);
+        static const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        sceGxmSetVertexProgram(context, clearV);
+        sceGxmSetFragmentProgram(context, clearF);
+        void* uniforms = nullptr;
+        sceGxmReserveFragmentDefaultUniformBuffer(context, &uniforms);
+        sceGxmSetUniformDataF(uniforms, clearColorParam, 0, 4, black);
+        drawQuad(Rect{ 0, 0, DisplayWidth, DisplayHeight }, 0, 0, 0, 0, nullptr, false);
+        sceGxmEndScene(context, nullptr, nullptr);
+    }
     frames.drawFrame(frame, &displaySurface[backBuffer], displaySync[backBuffer], stretched && gammaBits.load() == 0x3f800000);
     if (frames.presentScene(frame))
     {
