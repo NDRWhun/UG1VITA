@@ -18,6 +18,7 @@
 #include <recomp.h>
 #include <utility>
 #include <vector>
+#include <winapi/d3d9_native.h>
 #include <winapi/d3dx9.h>
 
 namespace nfsu
@@ -692,6 +693,43 @@ void sub_4086b0(win32::WinApplication* app, x86::CPU& cpu)
                 widescreen ? " (widescreen)" : "", k);
 }
 
+// debug_frame_dump=on: a frame's FE objects in the log, with their package, type, texture name (TextureInfo+0xC),
+// extent and the mapping they are drawn with.
+static x86::reg32 s_dumpPackage = 0;
+
+static const char* guestText(x86::reg32 address, char* out, size_t size)
+{
+    size_t i = 0;
+    for (; address && i + 1 < size; ++i)
+    {
+        const char c = char(rc::ld8(address + x86::reg32(i)));
+        if (!c)
+            break;
+        out[i] = c >= 32 && c < 127 ? c : '?';
+    }
+    out[i] = 0;
+    return out;
+}
+
+static void drawObject(win32::WinApplication* app, x86::CPU& cpu)
+{
+    if (win32::d3d9::bridge::dumpingFrame())
+    {
+        const x86::reg32 renderObject = argument(cpu, 0), object = rc::ld32(renderObject + 8);
+        const x86::reg32 texture = rc::ld32(renderObject + 0x14);
+        const Box box = renderBox(renderObject);
+        const double scale = rc::ldf32(HudScale), offset = rc::ldf32(HudOffset);
+        char package[40], name[25];
+        pf::logInfo("dump: FE %s type %u texture %s %ux%u, x %.1f..%.1f y %.1f..%.1f, scale %.6f offset %.4f, "
+                    "px %.0f..%.0f", guestText(s_dumpPackage ? rc::ld32(s_dumpPackage + 0xc) : 0, package, sizeof(package)),
+                    unsigned(rc::ld32(object + FEObjectType)), guestText(texture ? texture + 0xc : 0, name, sizeof(name)),
+                    texture ? unsigned(rc::ld16(texture + 0x44)) : 0u, texture ? unsigned(rc::ld16(texture + 0x46)) : 0u,
+                    box.x.x0, box.x.x1, box.y0, box.y1, scale, offset, (box.x.x0 * scale - offset + 1.0) * 480.0,
+                    (box.x.x1 * scale - offset + 1.0) * 480.0);
+    }
+    sub_514b90_guest(app, cpu);
+}
+
 // End of an FE package's rendering (cFEng, ecx; the package in the argument): the guest draws the package's render
 // list (0x4F2EB0). In a HUD package the objects are placed first (placeElements), in the other packages the menu
 // layout is built first (placeMenuElements), and FE render objects are drawn at their place (sub_514b90).
@@ -699,6 +737,7 @@ void sub_4f5730(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::FrontEnd);
     const x86::reg32 package = argument(cpu, 0);
+    s_dumpPackage = package;
     const bool hud = isHudPackage(package);
     s_anchorFlush = hud && anchoring();
     s_menuFlush = !hud && menuWidescreen();
@@ -719,16 +758,16 @@ void sub_514b90(win32::WinApplication* app, x86::CPU& cpu)
     {
         if (!menuPlace(argument(cpu, 0)))
         {
-            sub_514b90_guest(app, cpu);
+            drawObject(app, cpu);
             return;
         }
-        sub_514b90_guest(app, cpu);
+        drawObject(app, cpu);
         setPlace(Place::Centre);
         return;
     }
     if (!anchoring())
     {
-        sub_514b90_guest(app, cpu);
+        drawObject(app, cpu);
         return;
     }
     const x86::reg32 renderObject = argument(cpu, 0);
@@ -746,11 +785,11 @@ void sub_514b90(win32::WinApplication* app, x86::CPU& cpu)
     }
     if (place == Place::Centre)
     {
-        sub_514b90_guest(app, cpu);
+        drawObject(app, cpu);
         return;
     }
     setPlace(place);
-    sub_514b90_guest(app, cpu);
+    drawObject(app, cpu);
     setPlace(Place::Centre);
 }
 

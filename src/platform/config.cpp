@@ -29,7 +29,7 @@ const char* const Known[] =
     "benchmark_timing_log",
     // Renderer.
     "alpha_draw_order", "skip_unused_alpha_test", "matrices_on_render_thread", "texture_cache_mb", "texture_async",
-    "gxm_precomputed", "gxm_lists", "gxm_core2", "cull_swap",
+    "gxm_precomputed", "gxm_lists", "gxm_core2", "cull_swap", "debug_frame_dump",
     // Native versions of guest code and their shadow compares.
     "bank_native", "shadow_bank", "coll_native", "shadow_coll", "cull_native", "cull_parallel", "shadow_cull",
     "draw_native", "shadow_draw", "flush_native", "flush_async", "flush_async_core", "flush_async_priority",

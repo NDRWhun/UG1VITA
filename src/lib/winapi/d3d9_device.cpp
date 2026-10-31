@@ -7,6 +7,9 @@
 #include <platform/log.h>
 #include <platform/perf.h>
 #include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstring>
 
 namespace win32 { namespace d3d9
 {
@@ -38,6 +41,19 @@ enum : DWORD
 };
 
 const D3DMATRIX s_identity = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
+
+// debug_frame_dump=on (development): one frame in 150, 40 frames in all, is written to the log call by call.
+std::atomic<bool> s_dumping{false};
+
+bool dumpThisFrame(uint32_t index)
+{
+    static const bool on = pf::Config::getBool("debug_frame_dump", false);
+    static uint32_t dumped = 0;
+    if (!on || dumped >= 40 || index % 150 != 1)
+        return false;
+    ++dumped;
+    return true;
+}
 
 // Perf builds: game thread time spent in the Draw* methods, logged every 300 frames. One draw in DrawSampleMask + 1
 // is timed; the time per draw is the mean of the timed ones.
@@ -248,8 +264,22 @@ render::Frame* Device::frame(WinApplication* app, x86::CPU& cpu)
         m_sceneOpen = false;
         m_frameFull = false;
         m_stream = &frameStream(m_frame->index);
+        s_dumping = dumpThisFrame(m_frame->index);
+        if (s_dumping)
+            pf::logInfo("dump: frame %u, back buffer %ux%u", m_frame->index, unsigned(m_params.BackBufferWidth),
+                        unsigned(m_params.BackBufferHeight));
     }
     return m_frame;
+}
+
+namespace bridge
+{
+
+bool dumpingFrame()
+{
+    return s_dumping;
+}
+
 }
 
 // Hands the recorded frame to the device.
@@ -380,6 +410,22 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     d.count = inputs;
     d.vertexCount = count;
     const D3DVIEWPORT9& vp = m_state.viewport;
+    if (s_dumping)
+    {
+        const Object* t = m_state.textures[0];
+        const Texture* texture = t && t->kind() == KindTexture ? static_cast<const Texture*>(t) : nullptr;
+        const DWORD* rs = m_state.renderStates;
+        pf::logInfo("dump: draw %u to %s %ux%u, viewport %lu,%lu %lux%lu, type %lu, %u vertices, positionT %d, "
+                    "texture %ux%u%s, blend %lu (%lu, %lu), alpha test %lu, z %lu/%lu, fvf %lx, effect %d",
+                    f->drawCount, s->target.color ? "texture" : "back buffer", unsigned(s->width),
+                    unsigned(s->height), (unsigned long)vp.X, (unsigned long)vp.Y, (unsigned long)vp.Width,
+                    (unsigned long)vp.Height, (unsigned long)type, count, int(positionT),
+                    texture ? unsigned(texture->desc().width) : 0u, texture ? unsigned(texture->desc().height) : 0u,
+                    texture && texture->desc().linear ? " (movie)" : "", (unsigned long)rs[D3DRS_ALPHABLENDENABLE],
+                    (unsigned long)rs[D3DRS_SRCBLEND], (unsigned long)rs[D3DRS_DESTBLEND],
+                    (unsigned long)rs[D3DRS_ALPHATESTENABLE], (unsigned long)rs[D3DRS_ZENABLE],
+                    (unsigned long)rs[D3DRS_ZWRITEENABLE], (unsigned long)m_state.fvf, int(m_effectPass != nullptr));
+    }
     d.viewport = viewportIndex(*f, render::Viewport{ float(vp.X), float(vp.Y), float(vp.Width), float(vp.Height),
                                                      vp.MinZ, vp.MaxZ });
 
@@ -567,6 +613,10 @@ HRESULT Device::Present(WinApplication* app, x86::CPU& cpu, const RECT* source, 
         D3D_LOG_ONCE("d3d9: Present rectangles ignored");
     // A frame without draws still shows (black), so the pacing stays the same.
     frame(app, cpu);
+    if (s_dumping)
+        pf::logInfo("dump: present frame %u, %u draws, %u scenes", m_frame->index, m_frame->drawCount,
+                    m_frame->sceneCount);
+    s_dumping = false;
     submit();
     m_sceneOpen = false;
     drawFrameDone();
@@ -897,6 +947,11 @@ HRESULT Device::Clear(WinApplication* app, x86::CPU& cpu, DWORD count, const D3D
     const D3DVIEWPORT9& vp = m_state.viewport;
     const LONG vx0 = LONG(vp.X), vy0 = LONG(vp.Y);
     const LONG vx1 = std::min<LONG>(vx0 + LONG(vp.Width), s->width), vy1 = std::min<LONG>(vy0 + LONG(vp.Height), s->height);
+    if (s_dumping)
+        pf::logInfo("dump: clear target %s %ux%u, viewport %ld,%ld-%ld,%ld, %u rects, flags %lx, colour %08lx",
+                    s->target.color ? "texture" : "back buffer", unsigned(s->width), unsigned(s->height), long(vx0),
+                    long(vy0), long(vx1), long(vy1), unsigned(rects ? count : 0), (unsigned long)flags,
+                    (unsigned long)argb);
     const uint32_t rectCount = rects && count ? count : 1;
     for (uint32_t i = 0; i < rectCount; ++i)
     {
@@ -1340,6 +1395,27 @@ HRESULT Device::DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, 
         return D3D_OK;
     }
     memcpy(copy, data, size_t(vertices) * stride);
+    if (s_dumping)
+    {
+        // x, y: the first two floats of each vertex; diffuse after the position (and normal) of an FVF.
+        float x0 = HUGE_VALF, x1 = -HUGE_VALF, y0 = HUGE_VALF, y1 = -HUGE_VALF;
+        for (uint32_t i = 0; i < vertices; ++i)
+        {
+            const float* v = reinterpret_cast<const float*>(static_cast<const uint8_t*>(copy) + size_t(i) * stride);
+            x0 = std::min(x0, v[0]), x1 = std::max(x1, v[0]), y0 = std::min(y0, v[1]), y1 = std::max(y1, v[1]);
+        }
+        const DWORD fvf = m_state.declaration ? 0 : m_state.fvf;
+        uint32_t diffuse = 0;
+        if (fvf & 0x40)
+        {
+            const uint32_t position = (fvf & 0xe) == 0x4 ? 16 : 12, offset = position + ((fvf & 0x10) ? 12 : 0)
+                                                                                + ((fvf & 0x20) ? 4 : 0);
+            if (offset + 4 <= stride)
+                memcpy(&diffuse, static_cast<const uint8_t*>(copy) + offset, 4);
+        }
+        pf::logInfo("dump: up draw, stride %u, x %.3f..%.3f, y %.3f..%.3f, diffuse %08x", stride, x0, x1, y0, y1,
+                    diffuse);
+    }
     return draw(app, cpu, type, count, copy, nullptr, vertices, decl->layout(stride), decl->texComponents(),
                 decl->positionT(), nullptr, nullptr);
 }

@@ -32,6 +32,9 @@ namespace win32 { namespace d3d9 { namespace bridge
 
 using x86::reg32;
 
+// debug_frame_dump=on (development): true while the frame being recorded is written to the log draw by draw.
+bool dumpingFrame();
+
 // ---- IDirect3DDevice9 ----
 
 HRESULT setTransform(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD state, const float* matrix);
