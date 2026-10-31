@@ -1,15 +1,16 @@
 # One-step build of the VPK: finds the game, regenerates the recompiled code when needed, configures and builds.
 # Usage: tools/build.ps1 [-Game <the game folder>] [-Config Release|Debug] [-Clean] [-Reconfigure] [-Jobs N]
-#                        [-Regenerate] [-Compiler gcc|clang] [-NoLto] [-PgoGenerate [-PgoList <file>]]
-#                        [-PgoUse <profile>[,<profile>...]] [-FlagAudit]
+#                        [-Regenerate] [-Compiler clang|gcc] [-NoLto] [-PgoGenerate [-PgoList <file>]]
+#                        [-PgoUse <profile>[,<profile>...]] [-NoPgo] [-FlagAudit]
 # The game folder (with Speed.exe) comes from -Game, then NFSU_GAME_DIR, then the folder used last time; it is
 # remembered for the next run. Code is generated again when the executable, the audio banks (Sound/**/*.abk) or the
 # recompiler changed, or with -Regenerate. Only what changed is rebuilt.
-# -Compiler clang builds with clang and lld (NFSU_LLVM: the LLVM root) and ThinLTO (-NoLto: without) into
-# build-<config>-clang; -PgoGenerate makes the instrumented build (build-<config>-pgogen; -PgoList: only the functions
-# and sources a clang -fprofile-list file selects), -PgoUse optimises with a merged .profdata (build-<config>-clangpgo,
-# README). With gcc, -PgoGenerate builds into build-<config>-gcov and -PgoUse takes one or more
-# nfsu.gcov files from instrumented runs (build-<config>-pgo).
+# The default compiler is clang with lld (NFSU_LLVM: the LLVM root) and ThinLTO (-NoLto: without), built into
+# build-<config>-clang. -PgoUse optimises with a merged .profdata (build-<config>-clangpgo, README); without -PgoUse
+# the profile named by NFSU_PGO_PROFILE is used when that file exists (-NoPgo: none). -PgoGenerate makes the
+# instrumented build (build-<config>-pgogen; -PgoList: only the functions and sources a clang -fprofile-list file
+# selects). -Compiler gcc builds with VitaSDK's gcc into build-<config>; there -PgoGenerate builds into
+# build-<config>-gcov and -PgoUse takes one or more nfsu.gcov files from instrumented runs (build-<config>-pgo).
 param(
     [string]$Game,
     [string]$Config = 'Release',
@@ -18,12 +19,14 @@ param(
     [switch]$Regenerate,
     [switch]$FlagAudit,
     [int]$Jobs = [Environment]::ProcessorCount,
-    [ValidateSet('gcc', 'clang')][string]$Compiler = 'gcc',
+    [ValidateSet('gcc', 'clang')][string]$Compiler = 'clang',
     [switch]$NoLto,
     [switch]$PgoGenerate,
     [string]$PgoList,
-    [string[]]$PgoUse
+    [string[]]$PgoUse,
+    [switch]$NoPgo
 )
+if ($NoPgo -and $PgoUse) { throw '-NoPgo and -PgoUse exclude each other' }
 if ($NoLto -and $Compiler -ne 'clang') { throw '-NoLto needs -Compiler clang' }
 if ($PgoList -and -not ($PgoGenerate -and $Compiler -eq 'clang')) { throw '-PgoList needs -Compiler clang -PgoGenerate' }
 if ($PgoList) { $PgoList = (Resolve-Path $PgoList).Path -replace '\\', '/' }
@@ -33,6 +36,22 @@ $PgoUse = @($PgoUse | Where-Object { $_ } | ForEach-Object { (Resolve-Path $_).P
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'env.ps1')
+if ($Compiler -eq 'clang') {
+    $clang = if ($env:NFSU_LLVM) { Join-Path $env:NFSU_LLVM 'bin/clang*' } else { $null }
+    if (-not ($clang -and (Test-Path $clang)) -and -not (Get-Command clang -ErrorAction SilentlyContinue)) {
+        throw ('clang not found: set NFSU_LLVM to the LLVM root (environment or tools/env.local.ps1), or build ' +
+               'with -Compiler gcc.')
+    }
+    # The profile of NFSU_PGO_PROFILE when no profile was given and none is being made.
+    if (-not $PgoUse -and -not $PgoGenerate -and -not $NoPgo -and $env:NFSU_PGO_PROFILE) {
+        if (Test-Path $env:NFSU_PGO_PROFILE) {
+            $PgoUse = @((Resolve-Path $env:NFSU_PGO_PROFILE).Path -replace '\\', '/')
+            Write-Host "PGO profile from NFSU_PGO_PROFILE: $($PgoUse[0])"
+        } else {
+            Write-Host "NFSU_PGO_PROFILE=$env:NFSU_PGO_PROFILE not found: building without a profile"
+        }
+    }
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ($Compiler -eq 'clang') { $suffix = if ($PgoGenerate) { '-pgogen' } elseif ($PgoUse) { '-clangpgo' } else { '-clang' } }
 else { $suffix = if ($PgoGenerate) { '-gcov' } elseif ($PgoUse) { '-pgo' } else { '' } }

@@ -103,35 +103,32 @@ stays off unless `benchmark_timing_log=on` or `timing_log=on`). Off by default; 
 
 ## Build (for developers)
 
-Needs [VitaSDK](https://vitasdk.org) (with `VITASDK` set, in the environment or in `tools/env.local.ps1`), Python 3
-and PowerShell (Windows PowerShell 5.1 or PowerShell 7). CMake and Ninja are installed with pip when they are missing;
-the recompiler's Python package (capstone) is installed automatically.
+Needs [VitaSDK](https://vitasdk.org) (with `VITASDK` set, in the environment or in `tools/env.local.ps1`),
+[LLVM](https://github.com/llvm/llvm-project/releases) with clang and lld (`NFSU_LLVM`: its root), Python 3 and
+PowerShell (Windows PowerShell 5.1 or PowerShell 7). CMake and Ninja are installed with pip when they are missing;
+the recompiler's Python package (capstone) is installed automatically. VitaSDK provides the libraries and the
+packaging tools; the game is compiled with clang and ThinLTO.
 
 The generated recompilation (`src/nfsu/generated/`) and any game binary or data are not tracked: the build generates
 the code from your own `Speed.exe`. Only the version listed in `tools/recompiler/generate.py` is accepted (its SHA-256
 is checked).
 
 ```powershell
-tools/build.ps1 -Game <folder with Speed.exe>   # -> build-release/NFSUG1VITA.vpk; rebuilds only what changed
+tools/build.ps1 -Game <folder with Speed.exe>   # -> build-release-clang/NFSUG1VITA.vpk; rebuilds only what changed
 ```
 
-The game folder can also come from `NFSU_GAME_DIR`; it is remembered for the next run. Without game files,
-`-DNFSU_RUNTIME_CHECK=ON` compiles the runtime alone. The shaders ship prebuilt in `shaders/gxp/`; the official PSP2
-SDK (`host_tools/bin/psp2cgc`, `SCE_PSP2_SDK_DIR`) is only needed to change them.
+With a profile (below), `tools/build.ps1 -PgoUse nfsu.profdata` builds the optimised game into
+`build-release-clangpgo/`; set `NFSU_PGO_PROFILE` to the .profdata to make that the plain `tools/build.ps1`
+(`-NoPgo`: without it). `-NoLto` builds without ThinLTO. The game folder can also come from `NFSU_GAME_DIR`; it is
+remembered for the next run. Without game files, `-DNFSU_RUNTIME_CHECK=ON` compiles the runtime alone. The shaders
+ship prebuilt in `shaders/gxp/`; the official PSP2 SDK (`host_tools/bin/psp2cgc`, `SCE_PSP2_SDK_DIR`) is only needed
+to change them.
 
-### clang build (optional)
+### Profile-guided optimisation
 
-VitaSDK's gcc is the default. With [LLVM](https://github.com/llvm/llvm-project/releases) (clang and lld; `NFSU_LLVM`
-is its root) the game also builds with clang, ThinLTO and profile-guided optimisation; VitaSDK still provides the
-libraries and the packaging tools.
+With a profile from your own runs:
 
-```powershell
-tools/build.ps1 -Compiler clang                 # -> build-release-clang/NFSUG1VITA.vpk (ThinLTO; -NoLto without)
-```
-
-Profile-guided optimisation, with a profile from your own runs:
-
-1. `tools/build.ps1 -Compiler clang -PgoGenerate` builds the instrumented game (`build-release-pgogen/`; slower, the
+1. `tools/build.ps1 -PgoGenerate` builds the instrumented game (`build-release-pgogen/`; slower, the
    profile runtime is fetched for the LLVM version unless `NFSU_COMPILER_RT` names a compiler-rt source tree).
    `-PgoList <file>` instruments only what a clang `-fprofile-list` file selects (`[llvm]`, `default:skip`, then
    `source:*name.cpp=allow` and `function:*name*=allow` lines), for a smaller and faster instrumented game.
@@ -141,16 +138,20 @@ Profile-guided optimisation, with a profile from your own runs:
    after each session (FTP, USB) under its own name, e.g. `run1.profraw`, and start the next session.
 3. Merge the runs (each weighs the same) and build with the profile:
    `& "$env:NFSU_LLVM/bin/llvm-profdata" merge -o nfsu.profdata run*.profraw`, then
-   `tools/build.ps1 -Compiler clang -PgoUse nfsu.profdata` (`build-release-clangpgo/`). The profile matches only the
-   sources of the instrumented build; functions changed since then are built without it.
+   `tools/build.ps1 -PgoUse nfsu.profdata` (`build-release-clangpgo/`). The profile matches only the sources of the
+   instrumented build; functions changed since then are built without it.
 
-### Profile-guided optimisation with gcc
+### gcc build
 
-1. `tools/build.ps1 -PgoGenerate` builds the instrumented game (`build-release-gcov/`; edge counters only, slower).
+`tools/build.ps1 -Compiler gcc` builds with VitaSDK's gcc into `build-release/` (no LLVM needed). Its own
+profile-guided optimisation:
+
+1. `tools/build.ps1 -Compiler gcc -PgoGenerate` builds the instrumented game (`build-release-gcov/`; edge counters
+   only, slower).
 2. Install it and play the scenes that matter. The game writes its counters to `ux0:data/NFSUG1VITA/nfsu.gcov` every
    30 seconds and at exit; the file holds the whole session. Copy it off after each session under its own name, e.g.
    `run1.gcov`.
-3. `tools/build.ps1 -PgoUse run1.gcov,run2.gcov` merges the runs with `gcov-tool merge-stream` into
+3. `tools/build.ps1 -Compiler gcc -PgoUse run1.gcov,run2.gcov` merges the runs with `gcov-tool merge-stream` into
    `build-release-pgo/` and builds the optimised game there. The profile matches only the sources and options of
    the instrumented build; functions changed since then are built without it.
 

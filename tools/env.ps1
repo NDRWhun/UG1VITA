@@ -3,7 +3,8 @@
 #   $env:VITASDK          = '<VitaSDK root>'                    required (https://vitasdk.org)
 #   $env:NFSU_GAME_DIR    = '<the game folder with Speed.exe>'  optional: else tools/build.ps1 -Game
 #   $env:SCE_PSP2_SDK_DIR = '<official PSP2 SDK root>'          optional: recompiles shaders with psp2cgc
-#   $env:NFSU_LLVM        = '<LLVM root, with bin/clang>'       optional: tools/build.ps1 -Compiler clang
+#   $env:NFSU_LLVM        = '<LLVM root, with bin/clang>'       required for the default clang build (else -Compiler gcc)
+#   $env:NFSU_PGO_PROFILE = '<merged .profdata>'                optional: the clang build's default PGO profile
 # Python 3 must be installed; CMake and Ninja are installed with pip when they are missing.
 
 $local = Join-Path $PSScriptRoot 'env.local.ps1'
