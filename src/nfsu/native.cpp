@@ -5,6 +5,7 @@
 #include "movie_yuv.h"
 #include "phases.h"
 
+#include <lib/guest.h>
 #include <lib/winapp.h>
 #include <platform/config.h>
 #include <platform/gxm.h>
@@ -384,6 +385,13 @@ bool isFill(x86::reg32 renderObject, x86::reg32 object, const Box& box)
            (texelsY > 0.0f && box.y1 - box.y0 >= 4.0f * texelsY);
 }
 
+// A box: a fill 160 to 560 wide and at least 64 tall within x 24..616 (dialog and list frames).
+bool isBox(const Box& box, bool fill)
+{
+    const float width = box.x.x1 - box.x.x0, height = box.y1 - box.y0;
+    return fill && width >= 160.0f && width < 560.0f && height >= 64.0f && box.x.x0 >= 24.0f && box.x.x1 <= 616.0f;
+}
+
 bool isStretched(const Box& box, bool fill, bool box2D)
 {
     return fill && !box2D && (box.x.x1 - box.x.x0 >= 160.0f || (box.x.x0 < 320.0f && box.x.x1 > 320.0f));
@@ -448,8 +456,7 @@ void placeMenuElements(x86::reg32 render, x86::reg32 package)
             if (element.onScreen && !allLeft)
             {
                 element.fill = isFill(found->second, object, b);
-                element.box2D = element.fill && width >= 160.0f && width < 560.0f && height >= 64.0f &&
-                                b.x.x0 >= 24.0f && b.x.x1 <= 616.0f;
+                element.box2D = isBox(b, element.fill);
                 element.stretch = isStretched(b, element.fill, element.box2D);
                 element.member = !fixed && b.y1 > 0.0f && b.y0 < 480.0f && !(b.x.x0 <= 8.0f && b.x.x1 >= 632.0f) &&
                                  !element.stretch && !(element.fill && !element.box2D && height > 48.0f) &&
@@ -592,7 +599,8 @@ bool menuPlace(x86::reg32 renderObject)
         stretch = element->stretch, weight = element->weight, endLeft = element->endLeft, endRight = element->endRight;
     else
     {
-        stretch = isStretched(box, isFill(renderObject, object, box), false);
+        const bool fill = isFill(renderObject, object, box);
+        stretch = isStretched(box, fill, isBox(box, fill));
         if (!s_menuFixed)
         {
             weight = bandWeight(x.x0, x.x1);
@@ -730,6 +738,44 @@ static void drawObject(win32::WinApplication* app, x86::CPU& cpu)
     sub_514b90_guest(app, cpu);
 }
 
+// A movie covering the 640x480 space (x 0..640) on a wider screen: the side areas are drawn black with the movie's
+// own polygons through the 2D polygon routine 0x40BEF0 (eax = polygon at node + 0x10, ecx = texture, esi = the
+// render object's draw count above 2, as FERenderObject::Render passes them), their vertex colours (polygon + 0x80,
+// 4 bytes per vertex, alpha last) set to opaque black and mapped onto clip x -1..-k and k..1. The movie draws
+// without blending, so the bars are black whatever the texture holds there.
+static void drawMovieBars(win32::WinApplication* app, x86::CPU& cpu, x86::reg32 renderObject)
+{
+    const double k = s_hudWidth;
+    const x86::reg32 eax = cpu.eax, ebx = cpu.ebx, ecx = cpu.ecx, edx = cpu.edx, esi = cpu.esi, edi = cpu.edi,
+                     ebp = cpu.ebp, esp = cpu.esp;
+    const x86::reg32 head = renderObject + 0x18, drawn = rc::ld32(renderObject + 0x10);
+    for (int side = 0; side < 2 && !cpu.terminate; ++side)
+    {
+        setMapping((1.0 - k) / 640.0, side == 0 ? 1.0 : -k);
+        x86::reg32 node = rc::ld32(head);
+        for (int n = 0; node != head && node != 0 && n < 64 && !cpu.terminate; node = rc::ld32(node), ++n)
+        {
+            const x86::reg32 polygon = node + 0x10, colours = polygon + 0x80;
+            x86::reg32 saved[4];
+            for (x86::reg32 v = 0; v < 4; ++v)
+            {
+                saved[v] = rc::ld32(colours + 4 * v);
+                rc::st32(colours + 4 * v, 0xff000000);
+            }
+            const x86::reg32 texture = rc::ld32(node + 0xb0);
+            cpu.eax = polygon;
+            cpu.ecx = texture ? texture : rc::ld32(renderObject + 0x14);
+            cpu.esi = drawn > 2 ? 1 : 0;
+            ::native::callGuest(app, cpu, 0x40bef0);
+            for (x86::reg32 v = 0; v < 4; ++v)
+                rc::st32(colours + 4 * v, saved[v]);
+        }
+    }
+    setPlace(Place::Centre);
+    cpu.eax = eax, cpu.ebx = ebx, cpu.ecx = ecx, cpu.edx = edx, cpu.esi = esi, cpu.edi = edi, cpu.ebp = ebp;
+    cpu.esp = esp;
+}
+
 // End of an FE package's rendering (cFEng, ecx; the package in the argument): the guest draws the package's render
 // list (0x4F2EB0). In a HUD package the objects are placed first (placeElements), in the other packages the menu
 // layout is built first (placeMenuElements), and FE render objects are drawn at their place (sub_514b90).
@@ -751,8 +797,26 @@ void sub_4f5730(win32::WinApplication* app, x86::CPU& cpu)
 
 // Draws the polygons of an FE render object (FERenderObject in the argument, its FEObject at +8) through the 2D
 // polygon routine 0x40BEF0. In a menu flush the menu layout places it (menuPlace). With anchoring: full-width objects
-// are stretched, HUD objects go to their place.
+// are stretched, HUD objects go to their place. A movie covering the 640x480 space gets black side bars
+// (drawMovieBars): the full-screen effect pass the game draws before it copies a render target that holds an old
+// picture there.
+static void placeAndDraw(win32::WinApplication* app, x86::CPU& cpu);
+
 void sub_514b90(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const x86::reg32 renderObject = argument(cpu, 0);
+    bool movie = false;
+    if (s_hudWidth < 1.0 && rc::ld32(rc::ld32(renderObject + 8) + FEObjectType) == TypeMovie)
+    {
+        const Span x = renderSpan(renderObject);
+        movie = !x.empty() && x.x0 <= 1.0f && x.x1 >= 639.0f;
+    }
+    placeAndDraw(app, cpu);
+    if (movie && !cpu.terminate)
+        drawMovieBars(app, cpu, renderObject);
+}
+
+static void placeAndDraw(win32::WinApplication* app, x86::CPU& cpu)
 {
     if (s_menuFlush)
     {
