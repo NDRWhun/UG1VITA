@@ -57,11 +57,15 @@ nfsu_add_shaders(NFSU_SHADER_SOURCES)
 
 if(NFSU_CLANG)
   set(NFSU_ARCH_FLAGS -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
+  # Every multiply and add rounded on its own, as in the gcc build (the VFPv3 unit has no fused multiply-add).
+  set(NFSU_FP_FLAGS -ffp-contract=off)
 else()
   set(NFSU_ARCH_FLAGS -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard)
+  set(NFSU_FP_FLAGS "")
 endif()
 set(NFSU_COMMON_FLAGS
   ${NFSU_ARCH_FLAGS}
+  ${NFSU_FP_FLAGS}
   # Math functions do not set errno: sqrt is a single vsqrt.f64.
   -fno-math-errno
   -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables
