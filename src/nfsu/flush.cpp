@@ -96,8 +96,8 @@ const Settings& settings()
 {
     static const Settings s = []
     {
-        Settings r = { pf::Config::getBool("flush_native", false), shadowCompare(), bridge::DeferOff };
-        const int async = pf::Config::getInt("flush_async", 0);
+        Settings r = { pf::Config::getBool("flush_native", true), shadowCompare(), bridge::DeferOff };
+        const int async = pf::Config::getInt("flush_async", 1);
         if (r.native && !r.shadow && (async == 1 || async == 2))
             r.async = async == 1 ? bridge::DeferThread : bridge::DeferInline;
         const int defaultCore = pf::cores::hasCore3() ? 3 : 2;

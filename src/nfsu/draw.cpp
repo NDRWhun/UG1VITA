@@ -119,7 +119,7 @@ const Settings& settings()
 {
     static const Settings s = []
     {
-        const Settings r = { pf::Config::getBool("draw_native", false), pf::Config::getBool("shadow_draw", false),
+        const Settings r = { pf::Config::getBool("draw_native", true), pf::Config::getBool("shadow_draw", false),
                              pf::Config::getBool("matrices_on_render_thread", true) };
         pf::logInfo("draw: setup functions %s%s%s", r.native ? "native" : "guest",
                     r.native && r.shadow ? ", shadow compare" : "",

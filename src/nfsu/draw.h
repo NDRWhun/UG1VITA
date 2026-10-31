@@ -15,17 +15,17 @@ namespace nfsu { namespace draw
 // Native setup functions of the deferred draw queue's flush, bit-exact with the translated guest code: the same
 // guest memory stores, the same device and effect calls in the same order (d3d9_native.h), x87 chains in double in
 // the guest's order with floats where the guest stores floats, and the registers, flags and x87 state the callers
-// read. Settings: draw_native=on runs them natively (default off: the guest code); shadow_draw=on runs the guest code
+// read. Settings: draw_native=on (default) runs them natively, off runs the guest code; shadow_draw=on runs the guest code
 // with its device and effect calls recorded, then the native code against the recording, and logs the first
 // difference.
 //
 // The draw queue itself (flush.cpp): model submit 0x40c910, packet enqueue 0x40f1e0 and the flush 0x40ed50.
-// flush_native=on runs them natively (default off); with shadow_draw=on each runs as guest code first, recorded, then
+// flush_native=on (default) runs them natively; with shadow_draw=on each runs as guest code first, recorded, then
 // natively against the recording.
 //
-// flush_async (with flush_native=1, without shadow_draw): 1 queues the native flush's device and effect calls
-// (d3d9_native.h deferral) and a queue thread runs them while the game thread goes on; 2 queues them and the next
-// drain runs them on the game thread; 0 (default) calls them at once. flush_async_frame=1 (default) keeps queuing the
+// flush_async (with flush_native=on, without shadow_draw): 1 (default) queues the native flush's device and effect
+// calls (d3d9_native.h deferral) and a queue thread runs them while the game thread goes on; 2 queues them and the
+// next drain runs them on the game thread; 0 calls them at once. flush_async_frame=1 (default) keeps queuing the
 // game thread's device and effect calls after the first flush, 0 only those of flushes. flush_async_core (1-3,
 // default 3 with core 3, else 2) and flush_async_priority (default 70) place the queue thread.
 

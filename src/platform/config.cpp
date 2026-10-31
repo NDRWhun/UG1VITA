@@ -32,7 +32,8 @@ const char* const Known[] =
     "gxm_precomputed", "gxm_lists", "gxm_core2", "cull_swap",
     // Native versions of guest code and their shadow compares.
     "bank_native", "shadow_bank", "coll_native", "shadow_coll", "cull_native", "cull_parallel", "shadow_cull",
-    "draw_native", "shadow_draw", "flush_native", "flares_native", "flares_parallel", "shadow_flares",
+    "draw_native", "shadow_draw", "flush_native", "flush_async", "flush_async_core", "flush_async_priority",
+    "flush_async_frame", "flares_native", "flares_parallel", "shadow_flares",
     "load_native", "shadow_load", "math_native", "shadow_math", "particles_native", "particles_update",
     "particles_parallel", "particles_direct", "shadow_particles", "prep_native", "shadow_prep",
 };
