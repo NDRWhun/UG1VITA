@@ -21,6 +21,8 @@ JCC = set('j' + cc for cc in C.CC_ALIASES) | {'jcxz', 'jecxz', 'loop', 'loope', 
 REG_SHIFT = 8
 ALL_REG_STATE = C.ALL_REGS << REG_SHIFT
 ALL_STATE = C.ALL_FLAGS | ALL_REG_STATE
+# Registers whose writes on every path of a callee end their liveness at the call (Program.reg_must).
+CALL_WRITTEN = C.REG_BIT['eax'] | C.REG_BIT['ecx'] | C.REG_BIT['edx']
 MEMORY_DEFS = ('popfd', 'popf')     # write cpu.flags directly
 # pf and af are produced only by sahf, popf and x87 compares; these capstone flags mark instructions that set them on
 # x86 (integer arithmetic) without the generator modelling it.
@@ -299,6 +301,37 @@ class Function:
                     work.append(j)
         return result
 
+    def reg_must_def(self):
+        """Of eax, ecx and edx, the ones written as a whole on every path from the entry to a return or tail jump:
+        direct callees and tail targets count by their summaries, indirect calls and jumps write nothing. A path
+        ending in a trap does not return."""
+        must = self.program.reg_must
+        state = [None] * self.n
+        state[self.entry] = 0
+        work = [self.entry]
+        result = CALL_WRITTEN
+        while work:
+            i = work.pop()
+            s = state[i] | (self.effects[i].reg_def & CALL_WRITTEN)
+            if self.branch[i][0] == 'call':
+                s |= must.get(self.branch[i][1], 0)
+            for x in self.exits[i]:
+                if x.edge != 'call':
+                    result &= s | (must.get(x.target, 0) if x.kind == 'tail' else 0)
+            for j in self.succ[i]:
+                new = s if state[j] is None else state[j] & s
+                if new != state[j]:
+                    state[j] = new
+                    work.append(j)
+        return result
+
+    def callee_must_def(self, i):
+        """State the direct callee at i writes on every path before returning (registers only)."""
+        b = self.branch[i]
+        if b[0] == 'call':
+            return self.program.reg_must.get(b[1], 0) << REG_SHIFT
+        return 0
+
     def call_clobber(self, x):
         """Flags whose liveness ends at call x: the ones the callee may write and the x87 condition codes; every
         flag at an indirect call."""
@@ -315,7 +348,9 @@ class Function:
         if x.kind == 'ret':
             return p.ret_live[self.entry_address]
         if x.kind == 'tail':
-            return p.live_in.get(x.target, ALL_STATE) | p.ret_live[self.entry_address]
+            # The registers the target writes on every path reach this function's callers from the target.
+            passed = p.ret_live[self.entry_address] & ~(p.reg_must.get(x.target, 0) << REG_SHIFT)
+            return p.live_in.get(x.target, ALL_STATE) | passed
         if x.kind == 'dyntail':
             return p.indirect_live_in | p.ret_live[self.entry_address]
         if x.kind == 'call':
@@ -325,7 +360,8 @@ class Function:
         raise AssertionError(x.kind)
 
     def liveness(self):
-        """Backward liveness of flags and registers; calls pass live state through."""
+        """Backward liveness of flags and registers; calls pass live state through, except the flags the callee may
+        write and the registers it writes on every path."""
         n = self.n
         live_in = self.live_in if self.live_in else [0] * n
         out = [0] * n
@@ -343,7 +379,7 @@ class Function:
                 for x in self.exits[i]:
                     if x.edge == 'call':
                         call_use |= self.exit_use(x)
-                        clobber |= self.call_clobber(x)
+                        clobber |= self.call_clobber(x) | self.callee_must_def(i)
                     else:
                         o |= self.exit_use(x)
                 use = self.use[i]
@@ -522,9 +558,10 @@ class Function:
             self.decide_registers()
 
     def boundary_registers(self, i, x):
-        """Registers code outside may read on exit edge x of instruction i."""
+        """Registers code outside may read on exit edge x of instruction i: at a call, the callee's inputs and the
+        registers read after it that it changes on some paths only (where it does not, cpu holds the value)."""
         if x.edge == 'call':
-            mask = self.exit_use(x) | (self.live_out[i] & self.callee_may_def(i))
+            mask = self.exit_use(x) | (self.live_out[i] & self.callee_may_def(i) & ~self.callee_must_def(i))
         else:
             mask = self.exit_use(x)
         return (mask >> REG_SHIFT) & C.ALL_REGS
@@ -757,6 +794,9 @@ class Program:
         self.indirect_mask = ALL_REG_STATE if abi_flags else ALL_STATE
         self.flag_clobber = {}
         self.flag_must = {}
+        # Of eax, ecx and edx, the registers each function writes on every path before returning (none for native
+        # overrides and setjmp, whose bodies the analysis does not see).
+        self.reg_must = {}
         # Flags read by the callers of a function leaving through an indirect jump; the returns of the functions
         # that jump reaches store them (jump_targets: site -> entries, else every address-taken function).
         self.jump_targets = dict(jump_targets or {})
@@ -840,6 +880,23 @@ class Program:
                 v = fn.flag_must_def()
                 if v != self.flag_must[fn.entry_address]:
                     self.flag_must[fn.entry_address] = v
+                    changed = True
+
+    def compute_reg_must(self, fns):
+        """Function.reg_must_def of every function, to the greatest fixed point (recursion assumes the registers
+        written until a path proves otherwise). Registers a function restores before returning do not count."""
+        unknown = self.native_overrides | {self.setjmp}
+        self.reg_must = dict((fn.entry_address, 0 if fn.entry_address in unknown else CALL_WRITTEN) for fn in fns)
+        changed = True
+        while changed:
+            changed = False
+            for fn in fns:
+                a = fn.entry_address
+                if a in unknown:
+                    continue
+                v = fn.reg_must_def() & (self.may_def.get(a, 0) >> REG_SHIFT)
+                if v != self.reg_must[a]:
+                    self.reg_must[a] = v
                     changed = True
 
     def provided(self, fn, q, f):
@@ -938,6 +995,10 @@ class Program:
             self.may_def[self.setjmp] = ALL_STATE
         if self.abi_flags:
             self.compute_flag_summaries(fns)
+        self.compute_reg_must(fns)
+        log('registers written on every path: %s functions'
+            % ', '.join('%s %d' % (r, sum(1 for m in self.reg_must.values() if m & C.REG_BIT[r]))
+                        for r in ('eax', 'ecx', 'edx')))
         for fn in fns:
             self.live_in[fn.entry_address] = 0
             self.ret_live[fn.entry_address] = 0
