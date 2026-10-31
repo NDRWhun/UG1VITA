@@ -24,6 +24,7 @@ set(NFSU_PLATFORM_SOURCES
   src/platform/jobs.cpp
   src/platform/ime.cpp
   src/platform/log.cpp
+  src/platform/memfuncs.cpp
   src/platform/perf.cpp
   src/platform/time.cpp
   src/platform/sha256.cpp

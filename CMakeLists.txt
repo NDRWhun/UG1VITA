@@ -128,6 +128,8 @@ add_library(nfsu_runtime OBJECT ${NFSU_RUNTIME_SOURCES} ${NFSU_SHADER_SOURCES})
 target_compile_options(nfsu_runtime PRIVATE ${NFSU_COMMON_FLAGS} -O3 ${NFSU_CLANG_FLAGS} ${NFSU_GCC_FLAGS})
 target_compile_definitions(nfsu_runtime PRIVATE ${NFSU_RUNTIME_DEFINES})
 target_include_directories(nfsu_runtime PRIVATE ${NFSU_INCLUDES})
+# The run-time helpers the code generator calls stay out of link-time optimisation, which would drop them.
+set_source_files_properties(src/platform/memfuncs.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
 
 add_executable(NFSUG1VITA.elf src/nfsu/main.cpp ${NFSU_CLANG_SOURCES} ${NFSU_GCC_SOURCES}
                $<TARGET_OBJECTS:nfsu_game> $<TARGET_OBJECTS:nfsu_runtime>)
