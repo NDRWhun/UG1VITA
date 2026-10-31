@@ -33,7 +33,7 @@ static const x86::reg32 ThreadControlOffset  = teb::HostControl;
 
 // How long a thread of a raised level waits awake for the execution lock before it blocks, and how long a thread
 // that yielded it waits for such a thread to take it before queueing again.
-static const uint64_t PreemptSpinUs = 500;
+static const uint32_t PreemptSpinUs = 500;
 
 // Threads waiting for the execution lock per preemption level above normal (m_preemptWaiters is their sum).
 static std::atomic<int> s_levelWaiters[scheduler::LevelCount];
@@ -399,13 +399,13 @@ static void acquire(Mutex* executionContext, scheduler::Level level, std::atomic
     preemptWaiters.fetch_add(1, std::memory_order_relaxed);
     // The owner gives the lock up at its next preemption point, usually within microseconds: a waiter that stays
     // awake takes it without a wake-up.
-    const uint64_t spinEnd = pf::ticksUs() + PreemptSpinUs;
+    const uint32_t spinStart = pf::ticksUsLow();
     bool owned = executionContext->tryLock();
     for (uint32_t spin = 1; !owned; ++spin)
     {
         if (!s_lockHeld.load(std::memory_order_relaxed))
             owned = executionContext->tryLock();
-        if (!owned && (spin & SpinClockMask) == 0 && pf::ticksUs() >= spinEnd)
+        if (!owned && (spin & SpinClockMask) == 0 && pf::ticksUsLow() - spinStart >= PreemptSpinUs)
             break;
     }
     if (!owned)
@@ -513,10 +513,10 @@ void WinApplication::yieldContext(const x86::CPU& cpu)
     pf::perf::blocking(pf::perf::BlockPreempt);
     unlockContext(cpu);
     // A waiter that spins for the lock takes it now; this thread must not take it back first.
-    const uint64_t spinEnd = pf::ticksUs() + PreemptSpinUs;
+    const uint32_t spinStart = pf::ticksUsLow();
     for (uint32_t spin = 1; higherWaits(); ++spin)
     {
-        if ((spin & SpinClockMask) == 0 && pf::ticksUs() >= spinEnd)
+        if ((spin & SpinClockMask) == 0 && pf::ticksUsLow() - spinStart >= PreemptSpinUs)
             break;
     }
     lockContext(cpu);

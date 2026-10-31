@@ -3,9 +3,12 @@
 # NFSU_CLANG_SOURCES, NFSU_CLANG_LINK_FLAGS and NFSU_LLD_SCRIPT.
 #   NFSU_LTO=ON            ThinLTO over the generated code, the runtime and main.cpp (default)
 #   NFSU_PGO_GENERATE=ON   instrumented build: the game writes ux0:data/NFSUG1VITA/nfsu.profraw
+#   NFSU_PGO_LIST=<file>   with NFSU_PGO_GENERATE: instrument only the functions and sources the file selects
+#                          (clang's -fprofile-list format); empty: everything
 #   NFSU_PGO_USE=<file>    optimise with an indexed profile (llvm-profdata merge)
 
 option(NFSU_LTO "ThinLTO (clang)" ON)
+set(NFSU_PGO_LIST "" CACHE FILEPATH "Functions and sources to instrument (-fprofile-list); empty: everything")
 
 include(cmake/vita-lld.cmake)
 nfsu_lld_script(NFSU_LLD_SCRIPT)
@@ -35,6 +38,15 @@ if(NFSU_PGO_GENERATE)
   nfsu_pgo_runtime(NFSU_PGO_RUNTIME)
   # IR-level instrumentation with value profiles, atomic counter updates.
   set(NFSU_PGO_FLAGS -fprofile-generate -fprofile-update=prefer-atomic)
+  if(NFSU_PGO_LIST)
+    if(NOT EXISTS "${NFSU_PGO_LIST}")
+      message(FATAL_ERROR "NFSU_PGO_LIST: ${NFSU_PGO_LIST} not found")
+    endif()
+    list(APPEND NFSU_PGO_FLAGS "-fprofile-list=${NFSU_PGO_LIST}")
+    # Sources are compiled again when the selection changes.
+    set_property(SOURCE ${NFSU_GENERATED_SOURCES} ${NFSU_RUNTIME_SOURCES} src/nfsu/main.cpp
+                 APPEND PROPERTY OBJECT_DEPENDS "${NFSU_PGO_LIST}")
+  endif()
   list(APPEND NFSU_CLANG_FLAGS ${NFSU_PGO_FLAGS})
   list(APPEND NFSU_CLANG_GAME_FLAGS ${NFSU_PGO_FLAGS})
   list(APPEND NFSU_RUNTIME_DEFINES NFSU_PGO_GENERATE)
@@ -54,4 +66,5 @@ elseif(NFSU_PGO_USE)
                APPEND PROPERTY OBJECT_DEPENDS "${NFSU_PGO_USE}")
 endif()
 
-message(STATUS "clang build: ThinLTO ${NFSU_LTO}, PGO generate ${NFSU_PGO_GENERATE}, PGO use '${NFSU_PGO_USE}'")
+message(STATUS "clang build: ThinLTO ${NFSU_LTO}, PGO generate ${NFSU_PGO_GENERATE} (list '${NFSU_PGO_LIST}'), "
+               "PGO use '${NFSU_PGO_USE}'")

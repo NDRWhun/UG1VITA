@@ -295,7 +295,7 @@ void init(bool enabled)
 uint32_t now()
 {
     count(CountClock);
-    return uint32_t(sceKernelGetProcessTimeWide());
+    return sceKernelGetProcessTimeLow();
 }
 
 void countSlow(Count counter)

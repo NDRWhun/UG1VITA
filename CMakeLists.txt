@@ -57,11 +57,15 @@ nfsu_add_shaders(NFSU_SHADER_SOURCES)
 
 if(NFSU_CLANG)
   set(NFSU_ARCH_FLAGS -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
+  # Every multiply and add rounded on its own, as in the gcc build (the VFPv3 unit has no fused multiply-add).
+  set(NFSU_FP_FLAGS -ffp-contract=off)
 else()
   set(NFSU_ARCH_FLAGS -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard)
+  set(NFSU_FP_FLAGS "")
 endif()
 set(NFSU_COMMON_FLAGS
   ${NFSU_ARCH_FLAGS}
+  ${NFSU_FP_FLAGS}
   # Math functions do not set errno: sqrt is a single vsqrt.f64.
   -fno-math-errno
   -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables
@@ -128,6 +132,8 @@ add_library(nfsu_runtime OBJECT ${NFSU_RUNTIME_SOURCES} ${NFSU_SHADER_SOURCES})
 target_compile_options(nfsu_runtime PRIVATE ${NFSU_COMMON_FLAGS} -O3 ${NFSU_CLANG_FLAGS} ${NFSU_GCC_FLAGS})
 target_compile_definitions(nfsu_runtime PRIVATE ${NFSU_RUNTIME_DEFINES})
 target_include_directories(nfsu_runtime PRIVATE ${NFSU_INCLUDES})
+# The run-time helpers the code generator calls stay out of link-time optimisation, which would drop them.
+set_source_files_properties(src/platform/memfuncs.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
 
 add_executable(NFSUG1VITA.elf src/nfsu/main.cpp ${NFSU_CLANG_SOURCES} ${NFSU_GCC_SOURCES}
                $<TARGET_OBJECTS:nfsu_game> $<TARGET_OBJECTS:nfsu_runtime>)

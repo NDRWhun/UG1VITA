@@ -1,13 +1,14 @@
 # One-step build of the VPK: finds the game, regenerates the recompiled code when needed, configures and builds.
 # Usage: tools/build.ps1 [-Game <the game folder>] [-Config Release|Debug] [-Clean] [-Reconfigure] [-Jobs N]
-#                        [-Regenerate] [-Compiler gcc|clang] [-NoLto] [-PgoGenerate] [-PgoUse <profile>[,<profile>...]]
-#                        [-FlagAudit]
+#                        [-Regenerate] [-Compiler gcc|clang] [-NoLto] [-PgoGenerate [-PgoList <file>]]
+#                        [-PgoUse <profile>[,<profile>...]] [-FlagAudit]
 # The game folder (with Speed.exe) comes from -Game, then NFSU_GAME_DIR, then the folder used last time; it is
 # remembered for the next run. Code is generated again when the executable, the audio banks (Sound/**/*.abk) or the
 # recompiler changed, or with -Regenerate. Only what changed is rebuilt.
 # -Compiler clang builds with clang and lld (NFSU_LLVM: the LLVM root) and ThinLTO (-NoLto: without) into
-# build-<config>-clang; -PgoGenerate makes the instrumented build (build-<config>-pgogen), -PgoUse optimises with a
-# merged .profdata (README). With gcc, -PgoGenerate builds into build-<config>-gcov and -PgoUse takes one or more
+# build-<config>-clang; -PgoGenerate makes the instrumented build (build-<config>-pgogen; -PgoList: only the functions
+# and sources a clang -fprofile-list file selects), -PgoUse optimises with a merged .profdata (build-<config>-clangpgo,
+# README). With gcc, -PgoGenerate builds into build-<config>-gcov and -PgoUse takes one or more
 # nfsu.gcov files from instrumented runs (build-<config>-pgo).
 param(
     [string]$Game,
@@ -20,9 +21,12 @@ param(
     [ValidateSet('gcc', 'clang')][string]$Compiler = 'gcc',
     [switch]$NoLto,
     [switch]$PgoGenerate,
+    [string]$PgoList,
     [string[]]$PgoUse
 )
 if ($NoLto -and $Compiler -ne 'clang') { throw '-NoLto needs -Compiler clang' }
+if ($PgoList -and -not ($PgoGenerate -and $Compiler -eq 'clang')) { throw '-PgoList needs -Compiler clang -PgoGenerate' }
+if ($PgoList) { $PgoList = (Resolve-Path $PgoList).Path -replace '\\', '/' }
 if ($PgoGenerate -and $PgoUse) { throw '-PgoGenerate and -PgoUse exclude each other' }
 if ($PgoUse -and $Compiler -eq 'clang' -and $PgoUse.Count -ne 1) { throw '-PgoUse with clang takes one merged .profdata' }
 $PgoUse = @($PgoUse | Where-Object { $_ } | ForEach-Object { (Resolve-Path $_).Path -replace '\\', '/' })
@@ -30,7 +34,7 @@ $PgoUse = @($PgoUse | Where-Object { $_ } | ForEach-Object { (Resolve-Path $_).P
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'env.ps1')
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-if ($Compiler -eq 'clang') { $suffix = if ($PgoGenerate) { '-pgogen' } else { '-clang' } }
+if ($Compiler -eq 'clang') { $suffix = if ($PgoGenerate) { '-pgogen' } elseif ($PgoUse) { '-clangpgo' } else { '-clang' } }
 else { $suffix = if ($PgoGenerate) { '-gcov' } elseif ($PgoUse) { '-pgo' } else { '' } }
 $build = Join-Path $repo "build-$($Config.ToLower())$suffix"
 $generated = Join-Path $repo 'src/nfsu/generated'
@@ -88,10 +92,11 @@ if ($Clean -and (Test-Path $build)) { Remove-Item $build -Recurse -Force -ErrorA
 $compilerOptions = @("-DNFSU_COMPILER=$Compiler", "-DNFSU_PGO_GENERATE=$(if ($PgoGenerate) { 'ON' } else { 'OFF' })",
                      "-DNFSU_PGO_USE=$($PgoUse -join ';')")
 if ($Compiler -eq 'clang') {
-    $compilerOptions += "-DNFSU_LTO=$(if ($NoLto) { 'OFF' } else { 'ON' })"
+    $compilerOptions += "-DNFSU_LTO=$(if ($NoLto) { 'OFF' } else { 'ON' })", "-DNFSU_PGO_LIST=$PgoList"
     if (-not $env:NFSU_LLVM) { Write-Host 'NFSU_LLVM not set: clang from PATH' }
 }
-$stampLines = $compilerOptions + @($PgoUse | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash })
+$stampLines = $compilerOptions + @(@($PgoUse) + @($PgoList) | Where-Object { $_ } |
+                                   ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash })
 $optionsFile = Join-Path $build 'build-options.txt'
 $previous = if (Test-Path $optionsFile) { (Get-Content $optionsFile -Raw).Trim() } else { '' }
 $optionsChanged = $previous -ne ($stampLines -join ' ')

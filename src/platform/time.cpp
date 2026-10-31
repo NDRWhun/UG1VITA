@@ -12,6 +12,12 @@ uint64_t ticksUs()
     return sceKernelGetProcessTimeWide();
 }
 
+uint32_t ticksUsLow()
+{
+    perf::count(perf::CountClock);
+    return sceKernelGetProcessTimeLow();
+}
+
 uint32_t ticksMs()
 {
     perf::count(perf::CountClock);

@@ -133,12 +133,16 @@ Profile-guided optimisation, with a profile from your own runs:
 
 1. `tools/build.ps1 -Compiler clang -PgoGenerate` builds the instrumented game (`build-release-pgogen/`; slower, the
    profile runtime is fetched for the LLVM version unless `NFSU_COMPILER_RT` names a compiler-rt source tree).
-2. Install it and play the scenes that matter (menus, races on several tracks, replays). The game writes its
-   counters to `ux0:data/NFSUG1VITA/nfsu.profraw` every 30 seconds and at exit; the file holds the whole session.
-   Copy it off after each session (FTP, USB) under its own name, e.g. `run1.profraw`, and start the next session.
+   `-PgoList <file>` instruments only what a clang `-fprofile-list` file selects (`[llvm]`, `default:skip`, then
+   `source:*name.cpp=allow` and `function:*name*=allow` lines), for a smaller and faster instrumented game.
+2. Install it and play the scenes that matter (menus, races on several tracks, replays), or run the benchmark race
+   with `benchmark=on` and `benchmark_exit=on`. The game writes its counters to
+   `ux0:data/NFSUG1VITA/nfsu.profraw` every 30 seconds and at exit; the file holds the whole session. Copy it off
+   after each session (FTP, USB) under its own name, e.g. `run1.profraw`, and start the next session.
 3. Merge the runs (each weighs the same) and build with the profile:
    `& "$env:NFSU_LLVM/bin/llvm-profdata" merge -o nfsu.profdata run*.profraw`, then
-   `tools/build.ps1 -Compiler clang -PgoUse nfsu.profdata`.
+   `tools/build.ps1 -Compiler clang -PgoUse nfsu.profdata` (`build-release-clangpgo/`). The profile matches only the
+   sources of the instrumented build; functions changed since then are built without it.
 
 ### Profile-guided optimisation with gcc
 
