@@ -570,6 +570,19 @@ ULONG Surface::release()
     return m_container ? m_container->release() : Object::release();
 }
 
+void Surface::bind()
+{
+    if (m_container)
+        m_container->bind();
+    else
+        Object::bind();
+}
+
+ULONG Surface::unbind()
+{
+    return m_container ? m_container->unbind() : Object::unbind();
+}
+
 HRESULT Surface::GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* device)
 {
     RC_USE(app);

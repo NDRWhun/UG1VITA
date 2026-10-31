@@ -20,6 +20,7 @@
 #include <mmx.h>
 #include <nfsu.h>
 #include <nfsu_layout.h>
+#include <winapi/d3d9_native.h>
 #include <winapi/kernel32.h>
 #include <psp2/ctrl.h>
 #include <psp2/power.h>
@@ -284,6 +285,8 @@ int main(int, char**)
         if (!win32::File::setCurrentDirectory(s_guestGameFolder))
             pf::fatal("%s (the game folder) is missing", s_guestGameFolder);
         app.execute();
+        // The deferred device calls finish before the application goes.
+        win32::d3d9::bridge::drain();
     }
     pf::logInfo("NFSUG1VITA exiting");
 #ifdef NFSU_PGO_GENERATE

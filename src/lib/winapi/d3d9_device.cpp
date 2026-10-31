@@ -129,16 +129,17 @@ Device::Device(WinApplication* app, Direct3D* d3d, const D3DPRESENT_PARAMETERS& 
 
 Device::~Device()
 {
+    bridge::deviceGone(this);
     // Values recorded into a frame that is never submitted.
     if (m_frame)
         markEffectValuesDirty();
-    hold(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
-    hold(m_state.stream, static_cast<Buffer*>(nullptr));
-    hold(m_state.indices, static_cast<Buffer*>(nullptr));
-    hold(m_state.target, static_cast<Surface*>(nullptr));
-    hold(m_state.depth, static_cast<Surface*>(nullptr));
+    bindSlot(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
+    bindSlot(m_state.stream, static_cast<Buffer*>(nullptr));
+    bindSlot(m_state.indices, static_cast<Buffer*>(nullptr));
+    bindSlot(m_state.target, static_cast<Surface*>(nullptr));
+    bindSlot(m_state.depth, static_cast<Surface*>(nullptr));
     for (Object*& texture : m_state.textures)
-        hold(texture, static_cast<Object*>(nullptr));
+        bindSlot(texture, static_cast<Object*>(nullptr));
     for (VertexDeclaration* d : m_fvfDeclarations)
         delete d;
     delete m_backBuffer;
@@ -147,14 +148,14 @@ Device::~Device()
 }
 
 template< typename T >
-void Device::hold(T*& slot, T* object)
+void Device::bindSlot(T*& slot, T* object)
 {
     if (slot == object)
         return;
     if (object)
-        object->addRef();
+        object->bind();
     if (slot)
-        slot->release();
+        slot->unbind();
     slot = object;
 }
 
@@ -167,9 +168,9 @@ void Device::resetBackBuffer(const D3DPRESENT_PARAMETERS& params)
         m_params.BackBufferHeight = pf::gxm::DisplayHeight;
     }
     if (m_state.target == m_backBuffer)
-        hold(m_state.target, static_cast<Surface*>(nullptr));
+        bindSlot(m_state.target, static_cast<Surface*>(nullptr));
     if (m_state.depth == m_autoDepth)
-        hold(m_state.depth, static_cast<Surface*>(nullptr));
+        bindSlot(m_state.depth, static_cast<Surface*>(nullptr));
     delete m_backBuffer;
     delete m_autoDepth;
     m_autoDepth = nullptr;
@@ -226,8 +227,8 @@ void Device::defaults()
     }
     for (D3DMATRIX& m : m_state.transforms)
         m = s_identity;
-    hold(m_state.target, m_backBuffer);
-    hold(m_state.depth, m_autoDepth);
+    bindSlot(m_state.target, m_backBuffer);
+    bindSlot(m_state.depth, m_autoDepth);
     m_state.viewport = D3DVIEWPORT9{ 0, 0, m_params.BackBufferWidth, m_params.BackBufferHeight, 0.0f, 1.0f };
     m_sceneOpen = false;
     m_stateDirty = true;
@@ -239,6 +240,8 @@ render::Frame* Device::frame(WinApplication* app, x86::CPU& cpu)
 {
     if (!m_frame)
     {
+        if (bridge::onQueueThread())
+            pf::fatal("d3d9: the queue thread would open a frame");
         app->unlockContext(cpu);
         m_frame = gpu().beginFrame(m_params.BackBufferWidth, m_params.BackBufferHeight);
         app->lockContext(cpu);
@@ -258,7 +261,8 @@ void Device::submit()
     gpu().submitFrame(m_frame, m_vblanks);
     m_frame = nullptr;
     m_stream = nullptr;
-    Texture::trimKept();
+    if (!bridge::onQueueThread())
+        Texture::trimKept();
 }
 
 void Device::record(uint32_t header, DWORD value)
@@ -546,10 +550,10 @@ HRESULT Device::Reset(WinApplication* app, x86::CPU& cpu, D3DPRESENT_PARAMETERS*
     RC_USE(cpu);
     resetBackBuffer(*params);
     for (Object*& texture : m_state.textures)
-        hold(texture, static_cast<Object*>(nullptr));
-    hold(m_state.stream, static_cast<Buffer*>(nullptr));
-    hold(m_state.indices, static_cast<Buffer*>(nullptr));
-    hold(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
+        bindSlot(texture, static_cast<Object*>(nullptr));
+    bindSlot(m_state.stream, static_cast<Buffer*>(nullptr));
+    bindSlot(m_state.indices, static_cast<Buffer*>(nullptr));
+    bindSlot(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
     defaults();
     return D3D_OK;
 }
@@ -816,7 +820,7 @@ HRESULT Device::SetRenderTarget(WinApplication* app, x86::CPU& cpu, DWORD index,
     if (!surface || surface->role() == Surface::RoleDepth
         || (surface->role() == Surface::RoleLevel && (!surface->container() || !surface->container()->desc().target)))
         return D3DERR_INVALIDCALL;
-    hold(m_state.target, surface);
+    bindSlot(m_state.target, surface);
     // A new render target resets the viewport to the whole target.
     m_state.viewport = D3DVIEWPORT9{ 0, 0, surface->width(), surface->height(), 0.0f, 1.0f };
     recordWords(CmdViewport, &m_state.viewport, sizeof(D3DVIEWPORT9) / 4);
@@ -845,7 +849,7 @@ HRESULT Device::SetDepthStencilSurface(WinApplication* app, x86::CPU& cpu, Surfa
     RC_USE(cpu);
     if (surface && surface->role() != Surface::RoleDepth)
         return D3DERR_INVALIDCALL;
-    hold(m_state.depth, surface);
+    bindSlot(m_state.depth, surface);
     return D3D_OK;
 }
 
@@ -1154,7 +1158,7 @@ HRESULT Device::SetTexture(WinApplication* app, x86::CPU& cpu, DWORD stage, Obje
         return D3DERR_INVALIDCALL;
     if (stage < render::MaxSamplers)
         m_deviceSamplers |= uint32_t(DeviceTexture) << (stage * 8);
-    hold(m_state.textures[stage], texture);
+    bindSlot(m_state.textures[stage], texture);
     return D3D_OK;
 }
 
@@ -1321,7 +1325,7 @@ HRESULT Device::DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, 
     VertexDeclaration* decl = m_state.declaration ? m_state.declaration
                             : m_state.fvf ? fvfDeclaration(m_state.fvf) : nullptr;
     // A user-pointer draw unbinds stream 0.
-    hold(m_state.stream, static_cast<Buffer*>(nullptr));
+    bindSlot(m_state.stream, static_cast<Buffer*>(nullptr));
     m_state.streamOffset = m_state.streamStride = 0;
     if (!decl || !data || !stride)
         return D3DERR_INVALIDCALL;
@@ -1347,8 +1351,8 @@ HRESULT Device::DrawIndexedPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD
     const DrawTimer timer;
     VertexDeclaration* decl = m_state.declaration ? m_state.declaration
                             : m_state.fvf ? fvfDeclaration(m_state.fvf) : nullptr;
-    hold(m_state.stream, static_cast<Buffer*>(nullptr));
-    hold(m_state.indices, static_cast<Buffer*>(nullptr));
+    bindSlot(m_state.stream, static_cast<Buffer*>(nullptr));
+    bindSlot(m_state.indices, static_cast<Buffer*>(nullptr));
     m_state.streamOffset = m_state.streamStride = 0;
     if (!decl || !data || !indices || !stride || indexFormat != D3DFMT_INDEX16)
         return D3DERR_INVALIDCALL;
@@ -1385,7 +1389,7 @@ HRESULT Device::SetVertexDeclaration(WinApplication* app, x86::CPU& cpu, VertexD
 {
     RC_USE(app);
     RC_USE(cpu);
-    hold(m_state.declaration, declaration);
+    bindSlot(m_state.declaration, declaration);
     m_state.fvf = 0;
     return D3D_OK;
 }
@@ -1406,7 +1410,7 @@ HRESULT Device::SetFVF(WinApplication* app, x86::CPU& cpu, DWORD fvf)
 {
     RC_USE(app);
     RC_USE(cpu);
-    hold(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
+    bindSlot(m_state.declaration, static_cast<VertexDeclaration*>(nullptr));
     m_state.fvf = fvf;
     return D3D_OK;
 }
@@ -1454,7 +1458,7 @@ HRESULT Device::SetStreamSource(WinApplication* app, x86::CPU& cpu, UINT stream,
     }
     if (buffer && buffer->kind() != KindVertexBuffer)
         return D3DERR_INVALIDCALL;
-    hold(m_state.stream, buffer);
+    bindSlot(m_state.stream, buffer);
     m_state.streamOffset = offset;
     m_state.streamStride = stride;
     return D3D_OK;
@@ -1491,7 +1495,7 @@ HRESULT Device::SetIndices(WinApplication* app, x86::CPU& cpu, Buffer* buffer)
     RC_USE(cpu);
     if (buffer && buffer->kind() != KindIndexBuffer)
         return D3DERR_INVALIDCALL;
-    hold(m_state.indices, buffer);
+    bindSlot(m_state.indices, buffer);
     return D3D_OK;
 }
 

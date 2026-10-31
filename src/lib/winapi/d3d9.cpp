@@ -58,8 +58,13 @@ x86::reg32 allocateBlock()
 
 }
 
+uint32_t g_objectGeneration = 0;
+
 Object::~Object()
 {
+    ++g_objectGeneration;
+    if (m_boundOnly)
+        bridge::countBoundOnly(-1);
     if (!m_guest || !s_app)
         return;
     const uint32_t handle = s_app->getMemory<x86::reg32>(m_guest + 4);
@@ -77,7 +82,17 @@ ULONG Object::release()
 {
     const ULONG refs = --m_refs;
     if (!refs)
-        delete this;
+    {
+        if (bridge::onQueueThread())
+            bridge::deleteLater(this);
+        else
+            delete this;
+    }
+    else if (refs == m_bindings && !m_boundOnly && !bridge::onQueueThread())
+    {
+        m_boundOnly = true;
+        bridge::countBoundOnly(1);
+    }
     return refs;
 }
 
@@ -110,6 +125,7 @@ ULONG Object::Release(WinApplication* app, x86::CPU& cpu)
 x86::reg32 publish(WinApplication* app, Object* object)
 {
     initInterfaces(app);
+    ++g_objectGeneration;
     uint32_t handle;
     if (!s_freeHandles.empty())
     {
@@ -207,7 +223,7 @@ const MethodEntry s_device[] = {
     D3D_TRAP(GetSwapChain),
     D3D_METHOD(Device, GetNumberOfSwapChains),
     D3D_METHOD(Device, Reset),
-    D3D_METHOD(Device, Present),
+    D3D_GUEST(Present),
     D3D_METHOD(Device, GetBackBuffer),
     D3D_METHOD(Device, GetRasterStatus),
     D3D_METHOD(Device, SetDialogBoxMode),
@@ -227,17 +243,17 @@ const MethodEntry s_device[] = {
     D3D_TRAP(StretchRect),
     D3D_TRAP(ColorFill),
     D3D_TRAP(CreateOffscreenPlainSurface),
-    D3D_METHOD(Device, SetRenderTarget),
+    D3D_GUEST(SetRenderTarget),
     D3D_METHOD(Device, GetRenderTarget),
-    D3D_METHOD(Device, SetDepthStencilSurface),
+    D3D_GUEST(SetDepthStencilSurface),
     D3D_METHOD(Device, GetDepthStencilSurface),
-    D3D_METHOD(Device, BeginScene),
-    D3D_METHOD(Device, EndScene),
-    D3D_METHOD(Device, Clear),
+    D3D_GUEST(BeginScene),
+    D3D_GUEST(EndScene),
+    D3D_GUEST(Clear),
     D3D_GUEST(SetTransform),
     D3D_METHOD(Device, GetTransform),
     D3D_METHOD(Device, MultiplyTransform),
-    D3D_METHOD(Device, SetViewport),
+    D3D_GUEST(SetViewport),
     D3D_METHOD(Device, GetViewport),
     D3D_GUEST(SetMaterial),
     D3D_METHOD(Device, GetMaterial),
@@ -257,9 +273,9 @@ const MethodEntry s_device[] = {
     D3D_METHOD(Device, GetTexture),
     D3D_GUEST(SetTexture),
     D3D_METHOD(Device, GetTextureStageState),
-    D3D_METHOD(Device, SetTextureStageState),
+    D3D_GUEST(SetTextureStageState),
     D3D_METHOD(Device, GetSamplerState),
-    D3D_METHOD(Device, SetSamplerState),
+    D3D_GUEST(SetSamplerState),
     D3D_METHOD(Device, ValidateDevice),
     D3D_TRAP(SetPaletteEntries),
     D3D_TRAP(GetPaletteEntries),
@@ -279,7 +295,7 @@ const MethodEntry s_device[] = {
     D3D_METHOD(Device, CreateVertexDeclaration),
     D3D_GUEST(SetVertexDeclaration),
     D3D_METHOD(Device, GetVertexDeclaration),
-    D3D_METHOD(Device, SetFVF),
+    D3D_GUEST(SetFVF),
     D3D_METHOD(Device, GetFVF),
     D3D_TRAP(CreateVertexShader),
     D3D_METHOD(Device, SetVertexShader),
@@ -659,6 +675,7 @@ x86::reg32 Direct3DCreate9(WinApplication* app, x86::CPU& cpu, UINT SDKVersion)
         pf::logError("d3d9: Direct3DCreate9(%u): unsupported SDK version", SDKVersion);
         return 0;
     }
+    bridge::drain();
     return publish(app, new Direct3D());
 }
 

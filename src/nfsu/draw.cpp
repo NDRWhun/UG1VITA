@@ -736,11 +736,11 @@ void lightsNative(WinApplication* app, x86::CPU& cpu)
     }
     else
     {
-        bridge::effectSetVectorArray(app, cpu, rc::ld32(group + 0x18), rc::ld32(group + 0x48),
-                                     guestFloats(light + 0x120), 10);
-        const reg32 g = rc::ld32(CurrentGroup);
-        const reg32 effect = rc::ld32(g + 0x18);
-        cpu.eax = bridge::effectSetVector(app, cpu, effect, rc::ld32(g + 0x3c), guestFloats(light + 0xc0));
+        const reg32 effect = rc::ld32(group + 0x18);
+        bridge::EffectCalls calls(app, cpu, effect);
+        calls.setVectorArray(rc::ld32(group + 0x48), guestFloats(light + 0x120), 10);
+        calls.setVector(rc::ld32(group + 0x3c), guestFloats(light + 0xc0));
+        cpu.eax = calls.run();
         cpu.edx = rc::ld32(effect);
     }
     saved.restore(cpu);
@@ -914,22 +914,18 @@ void materialNative(WinApplication* app, x86::CPU& cpu)
     }
     else
     {
-        const auto setVector = [&](reg32 handle, const float* vector)
-        {
-            const reg32 g = rc::ld32(CurrentGroup);
-            bridge::effectSetVector(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + handle), vector);
-        };
-        setVector(0x50, d0);
-        setVector(0x54, d1);
-        setVector(0x58, d2);
-        setVector(0x5c, d3);
-        setVector(0x64, d4);
-        setVector(0x68, d5);
         const reg32 g = rc::ld32(CurrentGroup);
-        bridge::effectSetFloat(app, cpu, rc::ld32(g + 0x18), rc::ld32(g + 0x60), float(ld(0x7070d4) * m(0x58)));
-        const reg32 g2 = rc::ld32(CurrentGroup);
-        const reg32 effect = rc::ld32(g2 + 0x18);
-        cpu.eax = bridge::effectSetFloat(app, cpu, effect, rc::ld32(g2 + 0x6c), float(m(0x7c)));
+        const reg32 effect = rc::ld32(g + 0x18);
+        bridge::EffectCalls calls(app, cpu, effect);
+        calls.setVector(rc::ld32(g + 0x50), d0);
+        calls.setVector(rc::ld32(g + 0x54), d1);
+        calls.setVector(rc::ld32(g + 0x58), d2);
+        calls.setVector(rc::ld32(g + 0x5c), d3);
+        calls.setVector(rc::ld32(g + 0x64), d4);
+        calls.setVector(rc::ld32(g + 0x68), d5);
+        calls.setFloat(rc::ld32(g + 0x60), float(ld(0x7070d4) * m(0x58)));
+        calls.setFloat(rc::ld32(g + 0x6c), float(m(0x7c)));
+        cpu.eax = calls.run();
         cpu.edx = rc::ld32(effect);
     }
     saved.restore(cpu);
@@ -1268,6 +1264,7 @@ void logUsage(unsigned frames)
     if (nativeQueue() && s.shadow)
         pf::logInfo("shadow_draw: queue %u calls compared, %u differ, %u not compared", unsigned(q.compared),
                     unsigned(q.differing), unsigned(q.skipped));
+    logDeferral(frames);
     memset(s_calls, 0, sizeof(s_calls));
     s_sampledUs = 0;
 }

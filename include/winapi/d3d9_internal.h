@@ -10,6 +10,7 @@
 #include <lib/winapp.h>
 #include <lib/memmap.h>
 #include <winapi/types.h>
+#include <winapi/d3d9_native.h>
 #include <winapi/wrapper.h>
 #include <platform/log.h>
 #include <platform/render.h>
@@ -234,6 +235,10 @@ public:
     // container's references, as in Direct3D.
     virtual ULONG addRef()          { return ++m_refs; }
     virtual ULONG release();
+    // A reference of a binding that deferred calls change (device texture stages, vertex declaration, stream and
+    // indices; effect textures), counted apart as well.
+    virtual void bind()             { ++m_bindings; addRef(); }
+    virtual ULONG unbind()          { --m_bindings; return release(); }
 
     HRESULT QueryInterface(WinApplication* app, x86::CPU& cpu, const GUID* iid, x86::reg32* object);
     ULONG AddRef(WinApplication* app, x86::CPU& cpu);
@@ -245,6 +250,8 @@ private:
     Kind        m_kind;
     uint32_t    m_refs;
     x86::reg32  m_guest;
+    uint32_t    m_bindings = 0;
+    bool        m_boundOnly = false;    // counted in bridge::countBoundOnly
 };
 
 // Gives a host object its guest COM object (the vtable of its kind) and returns the guest address.
@@ -253,6 +260,35 @@ x86::reg32 publish(WinApplication* app, Object* object);
 Object* lookup(x86::reg32 guest);
 // Builds the vtables and registers the methods, once.
 void initInterfaces(WinApplication* app);
+
+class Device;
+
+namespace bridge
+{
+
+// True on the thread that runs deferred calls (d3d9_native.h).
+bool onQueueThread();
+// Queue thread: the object is deleted by the next drain.
+void deleteLater(Object* object);
+// Objects that only bindings hold: +1 when one becomes so, -1 when it is deleted. While there are any, calls that
+// change bindings are not deferred. Game thread.
+void countBoundOnly(int delta);
+// A device is deleted.
+void deviceGone(const Device* device);
+
+}
+
+// Counts object publications and deletions.
+extern uint32_t g_objectGeneration;
+
+// A guest method that drains the deferred calls (d3d9_native.h) before it runs; cpu.ip is its slot address.
+template< MethodPtr M >
+void drained(WinApplication* app, x86::CPU& cpu)
+{
+    bridge::drain(cpu.ip);
+    M(app, cpu);
+    bridge::afterDirect();
+}
 
 // A vtable slot: the method, or null for one that logs its name and guest address and traps.
 struct MethodEntry
@@ -275,6 +311,16 @@ void SetMaterial(WinApplication* app, x86::CPU& cpu);
 void SetLight(WinApplication* app, x86::CPU& cpu);
 void LightEnable(WinApplication* app, x86::CPU& cpu);
 void SetRenderState(WinApplication* app, x86::CPU& cpu);
+void SetTextureStageState(WinApplication* app, x86::CPU& cpu);
+void SetSamplerState(WinApplication* app, x86::CPU& cpu);
+void Present(WinApplication* app, x86::CPU& cpu);
+void SetViewport(WinApplication* app, x86::CPU& cpu);
+void SetFVF(WinApplication* app, x86::CPU& cpu);
+void Clear(WinApplication* app, x86::CPU& cpu);
+void BeginScene(WinApplication* app, x86::CPU& cpu);
+void EndScene(WinApplication* app, x86::CPU& cpu);
+void SetRenderTarget(WinApplication* app, x86::CPU& cpu);
+void SetDepthStencilSurface(WinApplication* app, x86::CPU& cpu);
 void SetTexture(WinApplication* app, x86::CPU& cpu);
 void SetVertexDeclaration(WinApplication* app, x86::CPU& cpu);
 void SetStreamSource(WinApplication* app, x86::CPU& cpu);
@@ -297,8 +343,8 @@ void EffectEnd(WinApplication* app, x86::CPU& cpu);
 #define D3D_GUEST(fn) { #fn, &win32::d3d9::guest::fn }
 #define D3D_GUEST_NAMED(name, fn) { name, &win32::d3d9::guest::fn }
 
-#define D3D_METHOD(cls, fn) { #fn, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
-#define D3D_NAMED(name, cls, fn) { name, &win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall }
+#define D3D_METHOD(cls, fn) { #fn, &win32::d3d9::drained<&win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall> }
+#define D3D_NAMED(name, cls, fn) { name, &win32::d3d9::drained<&win32::Wrapper<decltype(&cls::fn), &cls::fn>::stdcall> }
 #define D3D_TRAP(fn) { #fn, nullptr }
 
 // Logs a message once per call site.
@@ -426,6 +472,8 @@ public:
     void setDepth(render::DepthStorage* depth) { m_depth = depth; }
     ULONG addRef() override;
     ULONG release() override;
+    void bind() override;
+    ULONG unbind() override;
 
     HRESULT GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* device);
     DWORD SetPriority(WinApplication* app, x86::CPU& cpu, DWORD priority);
@@ -748,6 +796,15 @@ public:
     void effectTextureApplied(uint32_t stage)   { m_deviceSamplers &= ~(uint32_t(DeviceTexture) << (stage * 8)); }
     // The stream of the frame being recorded; null between frames.
     Stream* stream() const                      { return m_stream; }
+    // What draws need bound: stream 0 and its stride, indices, a declaration, the FVF.
+    void bindings(bool& stream, UINT& stride, bool& indices, bool& declaration, DWORD& fvf) const
+    {
+        stream = m_state.stream != nullptr;
+        stride = m_state.streamStride;
+        indices = m_state.indices != nullptr;
+        declaration = m_state.declaration != nullptr;
+        fvf = m_state.fvf;
+    }
 
     HRESULT TestCooperativeLevel(WinApplication* app, x86::CPU& cpu);
     UINT GetAvailableTextureMem(WinApplication* app, x86::CPU& cpu);
@@ -863,7 +920,8 @@ private:
 
     void defaults();
     void resetBackBuffer(const D3DPRESENT_PARAMETERS& params);
-    template< typename T > void hold(T*& slot, T* object);
+    // Sets a state slot with a binding reference (Object::bind).
+    template< typename T > void bindSlot(T*& slot, T* object);
     render::Frame* frame(WinApplication* app, x86::CPU& cpu);
     render::Scene* scene();
     uint16_t viewportIndex(render::Frame& frame, const render::Viewport& viewport);

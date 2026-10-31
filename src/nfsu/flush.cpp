@@ -10,8 +10,10 @@
 
 #include <winapi/d3d9_native.h>
 #include <platform/config.h>
+#include <platform/cores.h>
 #include <platform/log.h>
 #include <platform/perf.h>
+#include <platform/sync.h>
 
 #include <cstdio>
 #include <cstring>
@@ -87,14 +89,29 @@ struct Settings
 {
     bool native;
     bool shadow;
+    bridge::DeferMode async;    // the native flush's device and effect calls
 };
 
 const Settings& settings()
 {
     static const Settings s = []
     {
-        const Settings r = { pf::Config::getBool("flush_native", false), shadowCompare() };
-        pf::logInfo("draw: queue %s%s", r.native ? "native" : "guest", r.native && r.shadow ? ", shadow compare" : "");
+        Settings r = { pf::Config::getBool("flush_native", false), shadowCompare(), bridge::DeferOff };
+        const int async = pf::Config::getInt("flush_async", 0);
+        if (r.native && !r.shadow && (async == 1 || async == 2))
+            r.async = async == 1 ? bridge::DeferThread : bridge::DeferInline;
+        const int defaultCore = pf::cores::hasCore3() ? 3 : 2;
+        int core = pf::Config::getInt("flush_async_core", defaultCore);
+        if (core < 1 || core > 3 || (core == 3 && !pf::cores::hasCore3()))
+            core = defaultCore;
+        int priority = pf::Config::getInt("flush_async_priority", pf::Thread::PriorityHigh + 6);
+        if (priority < pf::Thread::PriorityHigh || priority > pf::Thread::PriorityLow)
+            priority = pf::Thread::PriorityHigh + 6;
+        bridge::configureDeferral(r.async, pf::Config::getBool("flush_async_frame", true), core, priority);
+        pf::logInfo("draw: queue %s%s%s", r.native ? "native" : "guest", r.native && r.shadow ? ", shadow compare" : "",
+                    r.async == bridge::DeferThread ? ", device calls of the flush on the queue thread (flush_async=1)"
+                    : r.async == bridge::DeferInline ? ", device calls of the flush queued, run at the next drain"
+                                                       " (flush_async=2)" : "");
         return r;
     }();
     return s;
@@ -346,7 +363,7 @@ bool drawIndexed(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 f)
             r.ecx = rc::ld32(r.eax);
             rc::st32(f - 4, r.edi);
             rc::st32(f - 8, r.eax);
-            r.eax = bridge::effectPass(app, cpu, r.eax, r.edi);
+            const reg32 effect = r.eax, pass = r.edi;
             r.edx = rc::ld32(DevicePointer);
             r.ecx = rc::ld32(r.edx);
             r.edx = rc::ld32(f + 0x10);
@@ -362,7 +379,7 @@ bool drawIndexed(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 f)
             rc::st32(f - 20, 0);
             rc::st32(f - 24, 4);
             rc::st32(f - 28, r.edx);
-            r.eax = bridge::drawIndexedPrimitive(app, cpu, r.edx, 4, 0, 0, r.eax, start, primitives);
+            r.eax = bridge::passDrawIndexed(app, cpu, effect, pass, r.edx, 4, 0, 0, r.eax, start, primitives);
             ++s_usage.draws;
             r.eax = rc::ld32(r.esi + 0x18);
             r.ecx = rc::ld32(r.eax + 0x14);
@@ -1136,6 +1153,38 @@ bool nativeQueue()
     return settings().native;
 }
 
+void logDeferral(unsigned frames)
+{
+    if (!frames || settings().async == bridge::DeferOff)
+        return;
+    const bridge::DeferStats d = bridge::takeDeferStats();
+    char errors[512] = {};
+    int at = 0;
+    for (uint32_t op = 0; op < bridge::DeferOpCount && at < int(sizeof(errors)); ++op)
+    {
+        if (d.errors[op])
+            at += snprintf(errors + at, sizeof(errors) - at, " %s %.1f/frame (0x%08x),", bridge::deferOpName(op),
+                           double(d.errors[op]) / frames, unsigned(d.errorCodes[op]));
+    }
+    char sites[512] = {};
+    int siteAt = 0;
+    for (uint32_t i = 0; i < bridge::DeferSiteCount && siteAt < int(sizeof(sites)); ++i)
+    {
+        if (d.sites[i].count)
+            siteAt += snprintf(sites + siteAt, sizeof(sites) - siteAt, " %s %.1f/frame %.2f ms/frame,",
+                               bridge::drainSiteName(d.sites[i].address), double(d.sites[i].count) / frames,
+                               double(d.sites[i].us) / 1000.0 / frames);
+    }
+    pf::logInfo("flush_async: drains that waited, by method:%s", siteAt ? sites : " none");
+    pf::logInfo("flush_async: %u flushes/frame, %u queued calls/frame (%u KiB), %u ran at once; queue run %.2f ms/frame;"
+                " drains that waited %u/frame (%u inside a flush), wait %.2f ms/frame; in these frames: results that"
+                " differ from the returned ones %u, Begin pass counts that differ %u, late deletes %u; results not"
+                " D3D_OK by method:%s", d.windows / frames, d.calls / frames, d.words / frames / 256,
+                d.fallbacks / frames, double(d.runUs) / 1000.0 / frames, d.drains / frames, d.windowDrains / frames,
+                double(d.waitUs) / 1000.0 / frames, unsigned(d.mismatches), unsigned(d.passes), unsigned(d.deletes),
+                at ? errors : " none");
+}
+
 }
 
 namespace native
@@ -1161,7 +1210,11 @@ void sub_40ed50(win32::WinApplication* app, x86::CPU& cpu)
     }
     else
     {
+        const bool deferred = s.async != win32::d3d9::bridge::DeferOff
+                              && win32::d3d9::bridge::deferBegin(app, cpu, rc::ld32(draw::DevicePointer));
         draw::flushNative(app, cpu);
+        if (deferred)
+            win32::d3d9::bridge::deferEnd();
     }
     ++draw::s_usage.flushes;
     if (timed)
