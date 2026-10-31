@@ -364,6 +364,9 @@ class Function:
     def flag_live_out(self, i, f):
         return bool(self.live_out[i] & C.FLAG_BIT[f])
 
+    def reg_live_out(self, i, r):
+        return bool(self.live_out[i] & (C.REG_BIT[r] << REG_SHIFT))
+
     def writes_fc(self, i):
         """The x87 condition codes set at i are read later."""
         return self.flag_live_out(i, 'fc') or i in self.fc_needed

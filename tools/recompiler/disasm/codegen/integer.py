@@ -632,6 +632,9 @@ def cg_cpuid(ctx):
 
 
 def cg_rdtsc(ctx):
+    # When nothing reads edx afterwards, only the low word of the counter is needed (recording keeps the full form).
+    if not ctx.record and not ctx.fn.reg_live_out(ctx.index, 'edx'):
+        return _runtime(ctx, 'cpu.rdtscLow();', (), ('eax',))
     return _runtime(ctx, 'cpu.rdtsc();', (), ('eax', 'edx'))
 
 

@@ -134,6 +134,8 @@ struct CPU
 
     void cpuid();
     void rdtsc();
+    // rdtsc for code that reads only eax: the low word of the counter, edx unchanged.
+    void rdtscLow();
     FPU fpu;
     MMX mmx;
     bool terminate;

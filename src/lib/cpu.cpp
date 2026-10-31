@@ -74,6 +74,12 @@ void CPU::rdtsc()
     edx_eax = pf::ticksUs() * TimestampMhz;
 }
 
+// The low word of rdtsc, from the low word of the clock (the low word of the product depends on nothing else).
+void CPU::rdtscLow()
+{
+    eax = pf::ticksUsLow() * TimestampMhz;
+}
+
 // The CPU the guest sees (docs/re/cpu_threads.md section 1): a family 5 x86 of an unknown vendor, "VitaRecomp86",
 // so the game's CPU class is the default one and it skips its REALTIME/affinity MHz measurement. Leaf 1 reports
 // fpu vme de pse tsc msr mce cx8 and no MMX, SSE or SSE2; there are no extended leaves (0x80000000 answers
