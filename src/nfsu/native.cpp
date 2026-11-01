@@ -274,7 +274,9 @@ const Element* findElement(x86::reg32 object)
 // - fills: images (types 1, 9) without texture or whose texture is magnified at least 4 times across or down. A fill
 //   at least 160 wide or across x = 320 that is no box (below) is stretched: each of its ends moves with the object
 //   it touches there (the nearest within 4, overlapping it vertically), else by the band of the end; a fill at least
-//   320 wide with an end in a band reaches the edge of the display there.
+//   320 wide with an end in a band reaches the edge of the display there, unless that end touches an object that
+//   does not move to that edge. A fill on a box (at least half of it on the box, at most 64 wider: selection bars
+//   and rows of a list) goes with the box instead.
 // - clusters: the other drawn objects on the 640x480 screen (no movies, nothing reaching both edges at x <= 8 and
 //   >= 632, no fill taller than 48 unless a box, no picture 320 or wider), joined when their boxes are less than 24
 //   apart horizontally and 12 vertically, and the objects of a top-level group whose drawn objects span at most 320.
@@ -343,6 +345,7 @@ struct MenuElement
     size_t cluster;         // union-find parent while the clusters are built
     float weight;           // placement of a translated object
     float endLeft, endRight;    // weights of the ends of a stretched fill
+    bool freeLeft, freeRight;   // the end may reach the display edge (endWeight)
 };
 std::vector<MenuElement> s_menu;    // by object while a menu flush runs
 bool s_menuFlush = false, s_menuAllLeft = false, s_menuFixed = false;
@@ -402,10 +405,22 @@ bool touches(const Box& a, const Box& b)
     return a.x.x0 - 4.0f <= b.x.x1 && b.x.x0 <= a.x.x1 + 4.0f && a.y0 < b.y1 && b.y0 < a.y1;
 }
 
-// Weight of the end x of a stretched fill: that of the object it touches there, else that of the band.
-float endWeight(const MenuElement& fill, float x, float band)
+// A fill belonging to a box: at least half of it on the box and at most 64 wider (rows and selection bars of a list).
+bool onBox(const Box& fill, const Box& box)
+{
+    const float width = fill.x.x1 - fill.x.x0, height = fill.y1 - fill.y0;
+    const float overlapX = std::min(fill.x.x1, box.x.x1) - std::max(fill.x.x0, box.x.x0);
+    const float overlapY = std::min(fill.y1, box.y1) - std::max(fill.y0, box.y0);
+    return overlapX > 0.0f && overlapY > 0.0f && overlapX * overlapY >= 0.5f * width * height &&
+           width <= box.x.x1 - box.x.x0 + 64.0f;
+}
+
+// Weight of the end x of a stretched fill: that of the object it touches there, else that of the band. *free: the end
+// touches nothing or an object that moves to that end's screen edge (side -1 left, 1 right).
+float endWeight(const MenuElement& fill, float x, float band, float side, bool* free)
 {
     float best = band, distance = HUGE_VALF, strength = -1.0f;
+    bool touched = false;
     for (const MenuElement& other : s_menu)
     {
         if (!other.onScreen || other.stretch || &other == &fill)
@@ -415,8 +430,9 @@ float endWeight(const MenuElement& fill, float x, float band)
             continue;
         const float d = x >= o.x.x0 && x <= o.x.x1 ? 0.0f : std::min(std::fabs(o.x.x0 - x), std::fabs(o.x.x1 - x));
         if (d < distance || (d == distance && std::fabs(other.weight) > strength))
-            best = other.weight, distance = d, strength = std::fabs(other.weight);
+            best = other.weight, distance = d, strength = std::fabs(other.weight), touched = true;
     }
+    *free = !touched || best * side > 0.0f;
     return best;
 }
 
@@ -444,7 +460,7 @@ void placeMenuElements(x86::reg32 render, x86::reg32 package)
         {
             const x86::reg32 object = rc::ld32(entry + 8);
             MenuElement element = {object, topGroup(render, object), Box(), false, false, false, false, false,
-                                   s_menu.size(), allLeft ? -1.0f : 0.0f, 0.0f, 0.0f};
+                                   s_menu.size(), allLeft ? -1.0f : 0.0f, 0.0f, 0.0f, false, false};
             const auto found = std::lower_bound(s_renders.begin(), s_renders.end(),
                                                 std::make_pair(object, x86::reg32(0)));
             if (found != s_renders.end() && found->first == object)
@@ -544,6 +560,21 @@ void placeMenuElements(x86::reg32 render, x86::reg32 package)
             break;
     }
 
+    // Fills on a box (selection bars, rows of a list) go with the box's cluster instead of stretching.
+    for (size_t i = 0; i < s_menu.size(); ++i)
+    {
+        MenuElement& element = s_menu[i];
+        if (!element.stretch)
+            continue;
+        for (size_t j : order)
+            if (s_menu[j].box2D && onBox(element.box, s_menu[j].box))
+            {
+                element.stretch = false;
+                attached[i] = clusterOf(j);
+                break;
+            }
+    }
+
     // Weights of the translated objects, then the ends of the stretched fills.
     for (size_t i = 0; i < s_menu.size(); ++i)
     {
@@ -560,8 +591,10 @@ void placeMenuElements(x86::reg32 render, x86::reg32 package)
         if (!element.stretch || fixed)
             continue;
         const Span& x = element.box.x;
-        element.endLeft = endWeight(element, x.x0, -rampDown(x.x0, BandLeft, BandLeft + BandBlend));
-        element.endRight = endWeight(element, x.x1, rampUp(x.x1, BandRight - BandBlend, BandRight));
+        element.endLeft = endWeight(element, x.x0, -rampDown(x.x0, BandLeft, BandLeft + BandBlend), -1.0f,
+                                    &element.freeLeft);
+        element.endRight = endWeight(element, x.x1, rampUp(x.x1, BandRight - BandBlend, BandRight), 1.0f,
+                                     &element.freeRight);
     }
 
     std::sort(s_menu.begin(), s_menu.end(),
@@ -591,12 +624,15 @@ bool menuPlace(x86::reg32 renderObject)
     // An object first drawn this frame is placed by its own extent.
     const MenuElement* element = findMenuElement(object);
     const bool known = element && !element->box.x.empty();
-    bool stretch;
+    bool stretch, freeLeft = true, freeRight = true;
     float weight = 0.0f, endLeft = 0.0f, endRight = 0.0f;
     if (s_menuAllLeft)
         stretch = false, weight = -1.0f;
     else if (known)
+    {
         stretch = element->stretch, weight = element->weight, endLeft = element->endLeft, endRight = element->endRight;
+        freeLeft = element->freeLeft, freeRight = element->freeRight;
+    }
     else
     {
         const bool fill = isFill(renderObject, object, box);
@@ -614,8 +650,10 @@ bool menuPlace(x86::reg32 renderObject)
         double x0 = x.x0 * scale - k + endLeft * b, x1 = x.x1 * scale - k + endRight * b;
         if (x.x1 - x.x0 >= 320.0f && !s_menuFixed)
         {
-            x0 += rampDown(x.x0, BandLeft, BandLeft + BandBlend) * (std::min(x0, -1.0) - x0);
-            x1 += rampUp(x.x1, BandRight - BandBlend, BandRight) * (std::max(x1, 1.0) - x1);
+            if (freeLeft)
+                x0 += rampDown(x.x0, BandLeft, BandLeft + BandBlend) * (std::min(x0, -1.0) - x0);
+            if (freeRight)
+                x1 += rampUp(x.x1, BandRight - BandBlend, BandRight) * (std::max(x1, 1.0) - x1);
         }
         else if (x.x1 - x.x0 >= 320.0f)
         {
