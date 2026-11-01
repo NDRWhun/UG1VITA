@@ -380,8 +380,6 @@ void configure(win32::WinApplication& app)
     setDword(SkipFeRaceMode, s_mode == Knockout ? 3 : 1);
     setDword(SkipFeDrag, s_mode == Drag ? 1 : 0);
     setDword(SkipFeTransmission, 0);
-    if (s_driver == AiDriver)
-        setDword(OverridePlayerControl, AiControl);
     s_trackTableLoader = app.replaceMethod(TrackTableLoader, trackTableLoaderHook);
 
     const uint32_t capacity = s_seconds ? std::min<uint32_t>(MaxFrames, uint32_t(s_seconds) * 60 + 600) : MaxFrames;
@@ -407,15 +405,20 @@ void poll()
     const int phase = s_phase.load(std::memory_order_acquire);
     if (phase == Idle)
     {
+        // Until the countdown ends (race stage 4, set by 0x00435570 when 0x00434D10 reports the start) the player's
+        // car keeps the race's own controls with no input held; the AI gets it at the start.
         if (!racing())
             return;
+        if (s_driver == AiDriver)
+            setDword(OverridePlayerControl, AiControl);
         s_startUs = pf::perf::now();
         const x86::reg32 player = player0();
         const x86::reg32 car = player ? dword(player + PlayerCar) : 0;
         const x86::reg32 ride = car ? dword(car + CarRide) : 0;
         const int type = ride ? int(int32_t(dword(ride))) : -1;
-        pf::logInfo("bench: race started (%s, track %d), player car %s (car type %d), measuring", ModeNames[s_mode],
-                    int(int32_t(dword(ConfigTrack))), carName(type).c_str(), type);
+        pf::logInfo("bench: race started (%s, track %d), player car %s (car type %d), %s, measuring",
+                    ModeNames[s_mode], int(int32_t(dword(ConfigTrack))), carName(type).c_str(), type,
+                    s_driver == AiDriver ? "the AI takes the player's car" : "throttle held");
         hitch::resetSummary();
         s_phase.store(Recording, std::memory_order_release);
         return;
