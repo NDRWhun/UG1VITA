@@ -17,19 +17,22 @@ A fan port of the PC version of Need for Speed Underground (2003): native widesc
 ## What you need
 
 - A PS Vita with custom firmware (HENkaku / Ensō) and [VitaShell](https://github.com/TheOfficialFloW/VitaShell).
+- `NFSUG1VITA.vpk`, which you build yourself for now (see [Building](#building)).
 - Optional: if you like, an overclocking plugin such as [PSVshell](https://github.com/Electry/PSVshell) can help the
   game run more smoothly. Whether you use one is entirely up to you.
-- Optional: CapUnlocker, which lets the game use one more CPU core.
+- Optional: [CapUnlocker](https://github.com/GrapheneCt/CapUnlocker), which lets the game use one more CPU core.
 - Your own copy of **Need for Speed Underground for PC, version 1.4**. Other versions are refused.
 - About 1.5 GB of free space on the memory card.
 
 ## Installing
 
 1. Install `NFSUG1VITA.vpk` with VitaShell.
-2. On your PC, open the folder where the game is installed (the one with `Speed.exe`).
-3. Copy **everything inside that folder** to `ux0:data/NFSUG1VITA/` on the Vita (VitaShell's FTP or USB mode works).
+2. In VitaShell, create the folder `ux0:data/NFSUG1VITA/` (or start the game once; it creates the folder and
+   closes).
+3. On your PC, open the folder where the game is installed (the one with `Speed.exe`).
+4. Copy **everything inside that folder** to `ux0:data/NFSUG1VITA/` on the Vita (VitaShell's FTP or USB mode works).
    `Speed.exe` must end up directly at `ux0:data/NFSUG1VITA/Speed.exe`.
-4. Start the game from the home screen.
+5. Start the game from the home screen.
 
 If the game closes right away, check `ux0:data/NFSUG1VITA/nfsug1vita.log`: it says what is missing.
 
@@ -46,13 +49,15 @@ If the game closes right away, check `ux0:data/NFSUG1VITA/nfsug1vita.log`: it sa
 | △ | Change camera | | |
 | D-pad up / down, or rear touch right / left | Shift up / down | | |
 | SELECT | Reset car to the track | | |
+| SELECT + △ | On-screen keyboard | | |
 | START | Pause | | |
 
 To quit, use the PS button.
 
 ## Settings
 
-Settings are optional. Create a text file `ux0:data/NFSUG1VITA/nfsug1vita.cfg` with one setting per line, for example:
+Settings are optional. Create a text file `ux0:data/NFSUG1VITA/nfsug1vita.cfg` with one setting per line (make sure it is not saved as
+`nfsug1vita.cfg.txt`), for example:
 
 ```
 menu_widescreen=off
@@ -65,6 +70,8 @@ menu_widescreen=off
 | `hud_widescreen` | `on` (default), `off` | Race HUD at the screen edges, or centred at 4:3 |
 | `button_prompts` | `vita` (default), `pc` | Vita buttons on screen, or the original PC keys |
 | `rear_touch` | `on` (default), `off` | Gear shifting on the rear touch pad |
+| `fit_4_3` | `stretch` (default), `pillarbox` | With `widescreen=off`: stretch the 4:3 picture, or keep it with black bars |
+| `car_reflection_interval` | `1` (default) to `6` | Higher values update the car reflections less often, for more speed |
 
 ## Known issues
 

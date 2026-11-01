@@ -85,7 +85,7 @@ HRESULT IDirectSound::CreateSoundBuffer(WinApplication* app, x86::CPU& cpu,
     if (pUnkOuter)
         return DSERR_NOAGGREGATION;
     // Mixing is software only and buffers have no 3D control (no DS3D buffer object): the game's hardware 3D and
-    // EAX probe asks for LOCHARDWARE | CTRL3D and gives up quietly (docs/re/audio.md section 3).
+    // EAX probe asks for LOCHARDWARE | CTRL3D and gives up quietly.
     if (lpcDSBufferDesc && lpcDSBufferDesc->validSize()
         && !(lpcDSBufferDesc->dwFlags & DSBCAPS_PRIMARYBUFFER)
         && (lpcDSBufferDesc->dwFlags & (DSBCAPS_LOCHARDWARE | DSBCAPS_CTRL3D)))

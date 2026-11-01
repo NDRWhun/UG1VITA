@@ -213,7 +213,7 @@ HRESULT IDirectDraw2::GetCaps(WinApplication* app, x86::CPU& cpu, LPDDCAPS lpDDC
 {
     RC_USE(app);
     RC_USE(cpu);
-    // Speed.exe asks only for the driver caps (HEL NULL) to read the video memory size (docs/re/render.md 1.4).
+    // Speed.exe asks only for the driver caps (HEL NULL) to read the video memory size.
     // Either structure may be NULL; each is filled up to its own dwSize (DDCAPS of DirectX 1 to 7).
     static const HRESULT DDERR_INVALIDPARAMS = 0x80070057;
     static const DWORD VideoMemory = 128 * 1024 * 1024;     // the Vita's CDRAM

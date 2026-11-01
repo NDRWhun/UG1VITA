@@ -133,7 +133,7 @@ void store(Key* key, const std::string& name, x86::reg32 type, const void* data,
 
 static void loadFile(const char* path);
 
-// Values a retail install provides that the game reads (docs/re/boot.md section 5, cpu_threads.md section 1.3);
+// Values a retail install provides that the game reads;
 // the file's own values win. Not seeded on purpose: "CD Drive" (a failed open would then retry on a CD and run the
 // insert-disc loop) and "Install Dir" (it only feeds the unused file cache); the cache sizes and
 // StreamingInstall, whose defaults the game handles. ~MHz matches the 500 MHz time stamp counter, so the EA

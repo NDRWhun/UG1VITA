@@ -201,7 +201,7 @@ HRESULT IDirectInput8::FindDevice(WinApplication* app, x86::CPU& cpu,
     return DIERR_DEVICENOTREG;
 }
 
-// The game's two action formats map keyboard semantics only (docs/re/input.md section 2). The Vita has no keyboard
+// The game's two action formats map keyboard semantics only. The Vita has no keyboard
 // and the pad is read through its own bindings, so no device suits the formats: none is enumerated, and the game
 // builds no action map.
 HRESULT IDirectInput8::EnumDevicesBySemantics(WinApplication* app, x86::CPU& cpu,

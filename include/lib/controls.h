@@ -8,7 +8,7 @@
 namespace win32
 {
 
-// Vita controls as the game sees them (docs/re/input.md section 7): one DirectInput 8 game controller presented as
+// Vita controls as the game sees them: one DirectInput 8 game controller presented as
 // the EMS USB2 PlayStation 2 adapter, whose buttons follow the game's built-in table for that product, plus key
 // messages for text fields. The mapping tables are in controls.cpp.
 namespace controls
@@ -97,7 +97,7 @@ struct State
     bool        openIme;            // the on-screen keyboard chord was pressed
 };
 
-// Turns pad samples into joystick and key state: chords with Select, the Select tap (camera cycle) and buttons held
+// Turns pad samples into joystick and key state: chords with Select, the Select tap (respot) and buttons held
 // across chords. One instance; calls must not overlap.
 class Mapper
 {

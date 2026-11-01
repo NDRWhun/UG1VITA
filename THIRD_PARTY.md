@@ -14,6 +14,11 @@ The recompiler disassembles with Capstone (BSD 3-Clause License), version pinned
 `tools/recompiler/requirements.txt`. It is not part of the repository: pip or `tools/recompiler/bootstrap.py`
 installs it into `.pydeps/`.
 
+## LLVM compiler-rt
+
+The optional profile-guided build links compiler-rt's profile runtime (Apache License 2.0 with LLVM Exceptions). It
+is not part of the repository: `cmake/pgo-runtime.cmake` downloads it for the compiler's version.
+
 ## Need for Speed Underground
 
 Game code, binaries and assets are the property of Electronic Arts Inc. and its licensors and are not part of this

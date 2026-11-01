@@ -90,7 +90,7 @@ static LRESULT callWindowProc(WinApplication* app, x86::CPU& cpu, HWND hWnd, UIN
 
 // The application becomes active once, when its first window is shown, and stays active: the Vita has no other
 // application to switch to (suspend and resume happen outside the guest). The messages go to the window procedure
-// at once, so the game's pump sees the active flag (docs/re/boot.md section 4) before its first frame.
+// at once, so the game's pump sees the active flag before its first frame.
 static void activate(WinApplication* app, x86::CPU& cpu, HWND hWnd)
 {
     if (s_activated.exchange(true))
@@ -300,7 +300,7 @@ HWND FindWindowA(WinApplication* app, x86::CPU& cpu,
 }
 
 // There is no keyboard: no key is down and no lock key is toggled on (the game's lock-key reset then has nothing to
-// do, docs/re/input.md section 6).
+// do).
 SHORT GetAsyncKeyState(WinApplication* app, x86::CPU& cpu,
                        int vKey)
 {
@@ -878,7 +878,7 @@ BOOL SystemParametersInfoA(WinApplication* app, x86::CPU& cpu,
     }
 }
 
-// Key messages carry no characters on the port: text arrives as WM_CHAR directly (docs/re/input.md section 6).
+// Key messages carry no characters on the port: text arrives as WM_CHAR directly.
 BOOL TranslateMessage(WinApplication* app, x86::CPU& cpu,
                       const MSG *lpMsg)
 {

@@ -1,6 +1,6 @@
 #include <lib/scheduler.h>
 
-// The guest threads of Speed.exe (docs/re/cpu_threads.md section 2.1). Each sets its own Windows priority after it
+// The guest threads of Speed.exe. Each sets its own Windows priority after it
 // is created; the scheduler maps that onto the execution lock: TIME_CRITICAL (the audio mixer) and HIGHEST (EA
 // TIMER, network pump, serial) preempt the game thread at its next preemption point, ABOVE_NORMAL (EA FILE)
 // preempts normal threads. The network, modem and serial threads only start for online, modem or serial play;

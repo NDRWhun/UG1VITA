@@ -80,7 +80,7 @@ void CPU::rdtscLow()
     eax = pf::ticksUsLow() * TimestampMhz;
 }
 
-// The CPU the guest sees (docs/re/cpu_threads.md section 1): a family 5 x86 of an unknown vendor, "VitaRecomp86",
+// The CPU the guest sees: a family 5 x86 of an unknown vendor, "VitaRecomp86",
 // so the game's CPU class is the default one and it skips its REALTIME/affinity MHz measurement. Leaf 1 reports
 // fpu vme de pse tsc msr mce cx8 and no MMX, SSE or SSE2; there are no extended leaves (0x80000000 answers
 // 0x80000000, and 0x80000001, which the game reads without checking, is all zero), so 3DNow! is off too. Every

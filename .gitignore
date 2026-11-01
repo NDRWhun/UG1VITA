@@ -20,6 +20,27 @@ param.sfo
 *.DLL
 *.dat
 *.DAT
+*.bun
+*.BUN
+*.bin
+*.BIN
+!/assets/*.bin
+*.mad
+*.MAD
+*.fng
+*.FNG
+*.lzc
+*.LZC
+*.efx
+*.EFX
+*.ini
+*.INI
+
+# Logs and profiles
+*.log
+*.profraw
+*.profdata
+*.gcda
 
 # Local environment
 tools/env.local.ps1

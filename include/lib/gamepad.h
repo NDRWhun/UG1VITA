@@ -92,7 +92,7 @@ public:
     // field and types Enter. Cross while the keyboard is closed opens it again.
     static void editText(const char* title, const char* text, uint32_t maxLength, const char* extraChars,
                          bool cancellable);
-    // The field is no longer edited: a keyboard still open for it closes without typing.
+    // Ends the edit of the field: a keyboard still open for it closes without typing.
     static void endTextEdit();
 
 private:

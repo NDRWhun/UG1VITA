@@ -59,8 +59,8 @@ struct BufferStorage : Resource
     uint32_t    size;
     void*       data;       // vertex or index data the GPU reads; written by the layer
     std::atomic<uint32_t> writes{0};    // in-place writes of the layer
-    // Render thread (d3d9 resolver): smallest byte at alphaOffset + n * alphaStride over the buffer, read when writes
-    // was alphaWrites; alphaScans counts the scans.
+    // Render thread (d3d9 resolver): smallest byte at alphaOffset + n * alphaStride over the buffer, valid while writes
+    // equals alphaWrites; alphaScans counts the scans.
     uint32_t    alphaWrites = ~0u;
     uint16_t    alphaStride = 0, alphaOffset = 0;
     uint8_t     alpha = 0, alphaScans = 0;

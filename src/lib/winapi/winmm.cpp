@@ -80,7 +80,7 @@ MMRESULT timeKillEvent(WinApplication* app, x86::CPU& cpu,
 }
 
 // One-shot (TIME_ONESHOT 0) or periodic (TIME_PERIODIC 1) timers calling a function (TIME_CALLBACK_FUNCTION); the
-// game's EA timer re-arms a one-shot timer from its own callback every 10 ms (docs/re/cpu_threads.md section 2.1).
+// game's EA timer re-arms a one-shot timer from its own callback every 10 ms.
 // TIME_KILL_SYNCHRONOUS (0x100) needs nothing more: a callback runs guest code only under the execution lock, which
 // the caller of timeKillEvent holds, and a killed timer is not fired again.
 // Event callbacks (TIME_CALLBACK_EVENT_SET / _PULSE) are not used by the game and trap.

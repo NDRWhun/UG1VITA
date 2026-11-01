@@ -170,7 +170,7 @@ static void setEnvmapSchedule()
                 rate);
 }
 
-// Text fields (docs/re/input.md section 6). Every edit of the game's line editor sets its active flag [0x007363A8],
+// Text fields. Every edit of the game's line editor sets its active flag [0x007363A8],
 // buffer [0x0073639C] and length limit [0x007363AC]; the edit ends when the flag is cleared. The front end's
 // keyboard screen (the profile name) edits 0x00777B74 and flags itself in [0x00735BA4]; it ignores Back when its
 // cancel message [0x00777B64] is -1, and Escape would then leave the profile screen waiting. Accepted characters:

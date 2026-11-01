@@ -41,7 +41,7 @@ struct Field
     bool        cancellable;    // Escape cancels it
 };
 
-// Characters the game's line editor takes as commands (docs/re/input.md section 6).
+// Characters the game's line editor takes as commands.
 const char CharBackspace = 0x08;
 const char CharEnter = 0x0D;
 const char CharEscape = 0x1B;

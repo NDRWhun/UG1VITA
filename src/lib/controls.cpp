@@ -10,12 +10,12 @@ namespace win32 { namespace controls
 {
 
 // The Vita pad is presented as the EMS USB2 PlayStation 2 adapter (VID 0B43, PID 0003): the game has a built-in
-// binding table for that product (docs/re/input.md sections 5 and 7), so no binding file is needed.
+// binding table for that product, so no binding file is needed.
 const char* const JoystickName       = "Vita Gamepad";
 const x86::reg32  JoystickDeviceType = 0x0204;      // DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_GAMEPAD
 const GUID        JoystickProduct    = { 0x00030B43, 0x0000, 0x0000, { 0, 0, 'P', 'I', 'D', 'V', 'I', 'D' } };
 
-// ---- Layout (docs/re/input.md section 7) ----
+// ---- Layout ----
 
 // Joystick buttons by DirectInput index, in the adapter's PlayStation order. src/nfsu/main.cpp sets the race and menu
 // actions of these indices (per input map, at each poll). The game's original EMS table: 0 camera / back, 1 look back,

@@ -735,7 +735,7 @@ DWORD GetModuleFileNameW(WinApplication* app, x86::CPU& cpu,
 
 // ---- Modules --------------------------------------------------------------------------------------------------
 
-// The libraries the game resolves at run time (docs/re/cpu_threads.md section 4). They are imported by Speed.exe,
+// The libraries the game resolves at run time. They are imported by Speed.exe,
 // so they count as loaded for GetModuleHandleA. Names not listed resolve to NULL, which every caller checks:
 // d3d9 Direct3DShaderValidatorCreate9 and DebugSetMute, kernel32 GetDiskFreeSpaceExA (only the unused EA file
 // cache calls it), user32 GetProcessWindowStation / GetUserObjectInformationA (the CRT then skips its
@@ -2838,7 +2838,7 @@ void GetSystemTimeAsFileTime(WinApplication* app, x86::CPU& cpu, LPFILETIME lpSy
 }
 
 // No process list on the Vita: the snapshot fails (INVALID_HANDLE_VALUE). The game's single-instance check then
-// reports no other instance (docs/re/boot.md section 1).
+// reports no other instance.
 HANDLE CreateToolhelp32Snapshot(WinApplication* app, x86::CPU& cpu, DWORD dwFlags, DWORD th32ProcessID)
 {
     RC_USE(dwFlags);
@@ -2885,7 +2885,7 @@ DWORD GetLongPathNameA(WinApplication* app, x86::CPU& cpu, LPCSTR lpszShortPath,
 }
 
 // The process runs on one CPU as far as the guest knows (GetSystemInfo); masks are kept, not applied. The game
-// changes them only around its MHz measurement, which the reported CPU vendor skips (docs/re/cpu_threads.md 1.1).
+// changes them only around its MHz measurement, which the reported CPU vendor skips.
 static DWORD s_processAffinity = 1;
 static DWORD s_priorityClass = 0x20;   // NORMAL_PRIORITY_CLASS
 
@@ -2951,7 +2951,7 @@ BOOL QueryPerformanceFrequency(WinApplication* app, x86::CPU& cpu, x86::reg64* l
 }
 
 // The CPU profile of cpuid (cpu.cpp): x87 without the FDIV erratum, cmpxchg8b and rdtsc; no MMX, SSE, SSE2 or
-// 3DNow!, so every SIMD path of the game stays off (docs/re/cpu_threads.md section 1).
+// 3DNow!, so every SIMD path of the game stays off.
 BOOL IsProcessorFeaturePresent(WinApplication* app, x86::CPU& cpu, DWORD ProcessorFeature)
 {
     RC_USE(app);
