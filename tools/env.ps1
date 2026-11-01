@@ -2,7 +2,6 @@
 # Machine-specific settings come from the environment or from tools/env.local.ps1 (ignored by git):
 #   $env:VITASDK          = '<VitaSDK root>'                    required (https://vitasdk.org)
 #   $env:NFSU_GAME_DIR    = '<the game folder with Speed.exe>'  optional: else tools/build.ps1 -Game
-#   $env:SCE_PSP2_SDK_DIR = '<official PSP2 SDK root>'          optional: recompiles shaders with psp2cgc
 #   $env:NFSU_LLVM        = '<LLVM root, with bin/clang>'       required for the default clang build (else -Compiler gcc)
 #   $env:NFSU_PGO_PROFILE = '<merged .profdata>'                optional: the clang build's default PGO profile
 # Python 3 must be installed; CMake and Ninja are installed with pip when they are missing.
@@ -55,5 +54,3 @@ if ($missing) {
 }
 
 Write-Host "VITASDK=$env:VITASDK"
-if ($env:SCE_PSP2_SDK_DIR) { Write-Host "SCE_PSP2_SDK_DIR=$env:SCE_PSP2_SDK_DIR (shaders are compiled)" }
-else { Write-Host 'SCE_PSP2_SDK_DIR not set: using the prebuilt shaders in shaders/gxp' }

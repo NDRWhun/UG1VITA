@@ -122,7 +122,6 @@ $optionsChanged = $previous -ne ($stampLines -join ' ')
 if ($Reconfigure -or -not (Test-Path (Join-Path $build 'build.ninja')) -or $optionsChanged) {
     $toolchain = if ($Compiler -eq 'clang') { "$repo/cmake/vita-clang.cmake" } else { "$env:VITASDK/share/vita.toolchain.cmake" }
     $options = @("-DCMAKE_TOOLCHAIN_FILE=$toolchain", "-DCMAKE_BUILD_TYPE=$Config") + $compilerOptions
-    $options += if ($env:SCE_PSP2_SDK_DIR) { "-DSCE_PSP2_SDK_DIR=$env:SCE_PSP2_SDK_DIR" } else { '-USCE_PSP2_SDK_DIR' }
     cmake -S $repo -B $build -G Ninja @options
     if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
     Set-Content -Path $optionsFile -Value ($stampLines -join ' ') -Encoding UTF8
