@@ -130,13 +130,14 @@ void framePresented(uint32_t presentUs)
 
     const uint32_t frames = s_frameCount;
     uint64_t total = 0;
-    uint32_t max = 0, over33 = 0, over50 = 0;
+    uint32_t max = 0, over33 = 0, over42 = 0, over50 = 0;
     for (uint32_t i = 0; i < frames; ++i)
     {
         const uint32_t t = s_frames[i];
         total += t;
         max = std::max(max, t);
         over33 += t > 33400;
+        over42 += t > 41700;
         over50 += t > 50000;
     }
     uint32_t p99 = 0;
@@ -149,10 +150,12 @@ void framePresented(uint32_t presentUs)
     }
     const double seconds = double(total) / 1000000.0;
     pf::logInfo("bench: summary (%s): %u frames in %.1f s, %.2f fps | frame avg %.2f ms p99 %.2f max %.2f"
-                " | over 33.4 ms %u (%.1f%%), over 50 ms %u (%.1f%%)",
+                " | over 33.4 ms %u (%.1f%%), over 41.7 ms (a missed vblank at 30 fps) %u (%.1f%%),"
+                " over 50 ms %u (%.1f%%)",
                 s_endReason, unsigned(frames), seconds, seconds > 0.0 ? double(frames) / seconds : 0.0,
                 frames ? double(total) / 1000.0 / frames : 0.0, double(p99) / 1000.0, double(max) / 1000.0,
                 unsigned(over33), frames ? 100.0 * over33 / frames : 0.0,
+                unsigned(over42), frames ? 100.0 * over42 / frames : 0.0,
                 unsigned(over50), frames ? 100.0 * over50 / frames : 0.0);
     if (s_frameCount == s_frames.size())
         pf::logInfo("bench: frame buffer full, later frames not counted");
