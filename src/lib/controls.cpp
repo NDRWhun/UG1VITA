@@ -86,9 +86,8 @@ static const float s_stickDeadZone   = 0.08f;
 static const float s_stickSaturation = 0.94f;
 static const float s_stickLinear     = 0.6f;
 
-// Front touch strip height and the panel sizes (front 1920x1088, rear 1920x890 starting at y 108).
-static const int s_frontStripHeight = 136;
-static const int s_panelCentreX     = 960;
+// Horizontal centre of the rear panel (1920x890 starting at y 108).
+static const int s_panelCentreX = 960;
 
 // ---- Keys ----
 
@@ -221,16 +220,12 @@ static const PadButton s_padButtons[] =
 
 static bool s_touchReady = false;
 static bool s_rearTouch = true;
-static bool s_frontTouch = true;
 
-// Settings rear_touch / front_touch (both on by default) turn the touch inputs off.
+// Setting rear_touch (on by default) turns the rear touch inputs off.
 static void initTouch()
 {
     s_touchReady = true;
     s_rearTouch = pf::Config::getBool("rear_touch", true);
-    s_frontTouch = pf::Config::getBool("front_touch", true);
-    if (s_frontTouch)
-        sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     if (s_rearTouch)
         sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 }
@@ -265,14 +260,6 @@ PadSample readPad()
     {
         for (SceUInt32 i = 0; i < touch.reportNum && i < SCE_TOUCH_MAX_REPORT; ++i)
             sample.inputs |= bit(touch.report[i].x < s_panelCentreX ? RearLeft : RearRight);
-    }
-    if (s_frontTouch && sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) >= 0)
-    {
-        for (SceUInt32 i = 0; i < touch.reportNum && i < SCE_TOUCH_MAX_REPORT; ++i)
-        {
-            if (touch.report[i].y < s_frontStripHeight)
-                sample.inputs |= bit(FrontTop);
-        }
     }
     return sample;
 }

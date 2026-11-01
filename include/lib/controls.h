@@ -20,7 +20,6 @@ enum Input
     Cross, Circle, Square, Triangle, L, R, Select, Start,
     DpadUp, DpadDown, DpadLeft, DpadRight,
     RearLeft, RearRight,    // rear touch, left / right half
-    FrontTop,               // front touch, top strip
     InputCount
 };
 

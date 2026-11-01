@@ -22,7 +22,7 @@ const int MaxLine    = 256;
 const char* const Known[] =
 {
     // Player settings.
-    "widescreen", "hud_widescreen", "menu_widescreen", "button_prompts", "fit_4_3", "frame_rate", "car_reflection_interval", "rear_touch", "front_touch",
+    "widescreen", "hud_widescreen", "menu_widescreen", "button_prompts", "fit_4_3", "frame_rate", "car_reflection_interval", "rear_touch",
     // Cores, logs and the benchmark.
     "use_core3", "core3_tasks", "timing_log", "timing_phases", "console_log",
     "benchmark", "benchmark_exit", "benchmark_seconds", "benchmark_laps", "benchmark_opponents", "benchmark_track",
