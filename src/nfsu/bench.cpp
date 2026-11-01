@@ -1,5 +1,7 @@
 #include "bench.h"
 
+#include "hitch.h"
+
 #include <lib/controls.h>
 #include <lib/memmap.h>
 #include <platform/config.h>
@@ -264,13 +266,6 @@ void trackTableLoaderHook(win32::WinApplication* app, x86::CPU& cpu)
     }
 }
 
-bool racing()
-{
-    const x86::reg32 coordinator = dword(RaceCoordinator);
-    const x86::reg32 race = dword(CurrentRace);
-    return coordinator && race && dword(coordinator) == 4 && dword(race) == 4;
-}
-
 x86::reg32 player0()
 {
     return dword(PlayerCount) >= 1 ? dword(Player0) : 0;
@@ -320,6 +315,13 @@ void framePresented(uint32_t presentUs)
     s_phase.store(Done, std::memory_order_release);
 }
 
+}
+
+bool racing()
+{
+    const x86::reg32 coordinator = dword(RaceCoordinator);
+    const x86::reg32 race = dword(CurrentRace);
+    return coordinator && race && dword(coordinator) == 4 && dword(race) == 4;
 }
 
 bool enabled()
@@ -406,6 +408,7 @@ void poll()
         const int type = ride ? int(int32_t(dword(ride))) : -1;
         pf::logInfo("bench: race started (%s, track %d), player car %s (car type %d), measuring", ModeNames[s_mode],
                     int(int32_t(dword(ConfigTrack))), carName(type).c_str(), type);
+        hitch::resetSummary();
         s_phase.store(Recording, std::memory_order_release);
         return;
     }
@@ -425,6 +428,12 @@ void poll()
         pf::logInfo("bench: measurement ended: %s", reason);
         s_phase.store(Stopping, std::memory_order_release);
         return;
+    }
+    static bool s_hitchSummary = false;
+    if (phase == Done && !s_hitchSummary)
+    {
+        s_hitchSummary = true;
+        hitch::logSummary("benchmark");
     }
     if (phase == Done && s_exit && !s_quit)
     {

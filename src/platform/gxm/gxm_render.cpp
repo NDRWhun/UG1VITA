@@ -549,7 +549,11 @@ render::Frame* FrameRenderer::beginFrame(uint32_t width, uint32_t height)
     Slot& s = m_slots[index % Slots];
     if (s.inFlight)
     {
+        const bool timed = perf::hitch();
+        const uint32_t start = timed ? perf::now() : 0;
         sceGxmNotificationWait(&s.done);
+        if (timed)
+            perf::event(perf::EventFenceWaitUs, perf::now() - start);
         s.inFlight = false;
         m_completed = std::max(m_completed, s.frame.index);
     }
@@ -734,7 +738,7 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return;
     settle(t);
-    if (perf::enabled())
+    if (perf::timed())
     {
         perf::upload(perf::UploadLevels, 1);
         perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
@@ -799,7 +803,7 @@ uint32_t FrameRenderer::writeTextureAsync(render::TextureStorage* storage, uint3
         writeTexture(storage, face, level, data, pitch);
         return 0;
     }
-    if (perf::enabled())
+    if (perf::timed())
     {
         perf::upload(perf::UploadLevels, 1);
         perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
@@ -833,7 +837,7 @@ uint32_t FrameRenderer::queueUpload(Upload* upload)
         m_uploading.push_back(ticket);
         m_firstUploading.store(m_uploading.front(), std::memory_order_relaxed);
     }
-    if (perf::enabled())
+    if (perf::timed())
         perf::upload(perf::UploadAsync, 1);
     jobs::post(&runUpload, upload);
     return ticket;
@@ -844,7 +848,7 @@ void FrameRenderer::runUpload(void* argument)
     Upload* u = static_cast<Upload*>(argument);
     FrameRenderer* self = u->owner;
     self->waitUpload(u->after);
-    const bool timed = perf::enabled();
+    const bool timed = perf::timed();
     const uint32_t start = timed ? perf::now() : 0;
     if (u->from)
     {
@@ -902,7 +906,7 @@ void FrameRenderer::settle(const Texture* texture)
 {
     if (uploadDone(texture->lastTicket))
         return;
-    const bool timed = perf::enabled();
+    const bool timed = perf::timed();
     const uint32_t start = timed ? perf::now() : 0;
     waitUpload(texture->lastTicket);
     if (timed)
@@ -1715,7 +1719,7 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
 
 void FrameRenderer::waitFrameUploads(const render::Frame& frame)
 {
-    const bool timed = perf::enabled();
+    const bool timed = perf::timed();
     for (uint32_t i = 0; i < frame.drawCount; ++i)
     {
         for (const render::TextureStorage* t : frame.draws[i].state.textures)

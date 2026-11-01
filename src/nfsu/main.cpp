@@ -255,7 +255,8 @@ int main(int, char**)
     // benchmark=on logs its summary without the timing log; benchmark_timing_log=on adds the timing log to a
     // benchmark.
     pf::perf::init(pf::Config::getBool("timing_log", false)
-                   || (pf::Config::getBool("benchmark", false) && pf::Config::getBool("benchmark_timing_log", false)));
+                   || (pf::Config::getBool("benchmark", false) && pf::Config::getBool("benchmark_timing_log", false)),
+                   pf::Config::getBool("hitch_log", false));
 #ifdef NFSU_PGO_GENERATE
     pf::pgo::start(dataPath(pf::pgo::FileName).c_str());
 #endif

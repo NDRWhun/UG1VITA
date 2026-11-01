@@ -4,9 +4,10 @@
 #include <lib/winapp.h>
 
 // Phase log (timing_phases=on): game thread time of the main loop's top-level phases and of the render's sub-phases,
-// per frame, without the time the thread had the execution lock released (known with the timing log on), plus
-// event counts of all threads (clock reads, critical sections, lock releases, preemptions). One log line pair every
-// ReportFrames frames. Off by default; a phase costs two clock reads per call when on.
+// per frame, without the time the thread had the execution lock released (known with the timing or hitch log on),
+// plus event counts of all threads (clock reads, critical sections, lock releases, preemptions). One log line pair
+// every ReportFrames frames. Off by default; a phase costs two clock reads per call when on. The hitch log
+// (hitch_log=on) turns the phase timing on without the log lines and takes each frame's sums.
 
 namespace nfsu { namespace phases
 {
@@ -64,10 +65,11 @@ private:
     Id m_id;
 };
 
-// Reads timing_phases; before guest code runs.
+// Reads timing_phases; before guest code runs, after pf::perf::init.
 void configure();
 
-// Game thread, after each frame render: counts the frame and logs every ReportFrames frames.
+// Game thread, after each frame render: hands the frame's phase sums to the hitch log, counts the frame and logs
+// every ReportFrames frames.
 void frame();
 
 }}

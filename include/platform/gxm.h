@@ -55,6 +55,8 @@ public:
     void submitFrame(render::Frame* frame, uint32_t vblanks);
     // Index of the newest frame the GPU has finished; every older frame is finished too.
     uint32_t completedFrame();
+    // Index of the newest frame begun (render::Frame::index), 0 before the first.
+    uint32_t lastBegunFrame() const;
     bool busy(const render::Resource& resource) { return resource.lastUse > completedFrame(); }
 
     // Null when out of memory. Target textures are rendered to and sampled; the others are written by

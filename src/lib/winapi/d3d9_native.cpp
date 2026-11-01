@@ -887,7 +887,9 @@ void runInline()
     if (readFpscr() != fpscr)
         writeFpscr(fpscr);
     d.read.store(r, std::memory_order_relaxed);
-    d.runUs.fetch_add(clockUs() - start, std::memory_order_relaxed);
+    const uint32_t us = clockUs() - start;
+    d.runUs.fetch_add(us, std::memory_order_relaxed);
+    pf::perf::event(pf::perf::EventQueueRunUs, us);
 }
 
 int queueEntry(void*)
@@ -919,7 +921,9 @@ int queueEntry(void*)
         }
         const uint32_t start = clockUs();
         r = runRecords(r, w, true);
-        d.runUs.fetch_add(clockUs() - start, std::memory_order_relaxed);
+        const uint32_t us = clockUs() - start;
+        d.runUs.fetch_add(us, std::memory_order_relaxed);
+        pf::perf::event(pf::perf::EventQueueRunUs, us);
         d.read.store(r, std::memory_order_seq_cst);
         notifyDrain();
     }
@@ -961,7 +965,10 @@ void waitRead(uint32_t target)
         d.done->wait();
     }
     std::atomic_thread_fence(std::memory_order_acquire);
-    d.stats.waitUs += clockUs() - start;
+    const uint32_t us = clockUs() - start;
+    d.stats.waitUs += us;
+    pf::perf::event(pf::perf::EventDrainWaits, 1);
+    pf::perf::event(pf::perf::EventDrainWaitUs, us);
 }
 
 // Room for words more words at the head.

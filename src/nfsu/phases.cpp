@@ -2,6 +2,8 @@
 
 #include "phases.h"
 
+#include "hitch.h"
+
 #include <platform/config.h>
 #include <platform/log.h>
 #include <platform/perf.h>
@@ -43,6 +45,7 @@ struct Phase
 {
     const char* name;
     uint64_t us = 0;        // inclusive, lock releases taken out
+    uint32_t frameUs = 0;   // the same in the current frame (hitch log)
     uint32_t calls = 0;
     uint32_t depth = 0;
     uint32_t start = 0;
@@ -55,6 +58,7 @@ Phase s_phases[Count] = {
     {"flush"}, {"flares"}, {"cars"}, {"particle_draw"}, {"fe"},
 };
 
+bool s_report = false;      // timing_phases
 bool s_started = false;
 uint32_t s_frames = 0;
 uint32_t s_intervalStart = 0;
@@ -103,24 +107,39 @@ void leaveSlow(Id id)
         return;
     const uint32_t wall = pf::perf::now() - p.start;
     const uint32_t blocked = pf::perf::gameBlockedTotal() - p.blockedAtStart;
-    p.us += wall > blocked ? wall - blocked : 0;
+    const uint32_t us = wall > blocked ? wall - blocked : 0;
+    p.us += us;
+    p.frameUs += us;
     ++p.calls;
 }
 
 void configure()
 {
-    g_on = pf::Config::getBool("timing_phases", false);
-    if (!g_on)
+    s_report = pf::Config::getBool("timing_phases", false);
+    g_on = s_report || pf::perf::hitch();
+    if (!s_report)
         return;
     pf::perf::startCounting();
     pf::logInfo("phases: phase log on (timing_phases), every %u frames; %s", unsigned(ReportFrames),
-                pf::perf::enabled() ? "lock releases taken out of the phase times"
-                                    : "phase times include lock releases (timing_log=on takes them out)");
+                pf::perf::timed() ? "lock releases taken out of the phase times"
+                                  : "phase times include lock releases (timing_log=on or hitch_log=on takes them out)");
 }
 
 void frame()
 {
     if (!g_on)
+        return;
+    if (pf::perf::hitch())
+    {
+        uint32_t us[Count];
+        for (int i = 0; i < Count; ++i)
+        {
+            us[i] = s_phases[i].frameUs;
+            s_phases[i].frameUs = 0;
+        }
+        hitch::frame(us);
+    }
+    if (!s_report)
         return;
     const uint32_t now = pf::perf::now();
     if (!s_started)

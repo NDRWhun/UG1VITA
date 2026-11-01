@@ -279,6 +279,7 @@ struct Device::Impl
     volatile bool           running = false;
     uint32_t                endSceneTime = 0;
     uint32_t                presentIndex = 0;           // game presents shown so far
+    uint32_t                queueUs = 0;                // render thread: display queue wait of the current present
     Present                 shown = {};                 // image last presented
 
     bool initCore();
@@ -554,12 +555,14 @@ void Device::Impl::run()
             }
         }
 
-        const bool timed = perf::enabled() && queued;
+        const bool timed = perf::timed() && queued;
         const uint32_t start = timed ? perf::now() : 0;
+        const uint32_t index = frame ? frame->index : 0;
+        queueUs = 0;
         if (frame && frame->resolve)
             frame->resolve(*frame);
         uint32_t calls = 0, triangles = 0;
-        if (frame && timed)
+        if (frame && timed && perf::enabled())
         {
             // Counted before the frame is drawn: its slot may be reused once the GPU is done.
             calls = frame->drawCount;
@@ -575,12 +578,13 @@ void Device::Impl::run()
             present(image, queued ? ++presentIndex : 0);
         if (timed)
         {
-            perf::add(perf::Render, perf::now() - start);
-            perf::framePresented(calls, triangles);
+            const uint32_t renderUs = perf::now() - start;
+            perf::add(perf::Render, renderUs);
+            perf::framePresented(index, renderUs, queueUs, calls, triangles);
         }
         else if (queued && perf::frameObserved())
         {
-            perf::framePresented(0, 0);
+            perf::framePresented(index, 0, 0, 0, 0);
         }
     }
 }
@@ -827,13 +831,16 @@ void Device::Impl::queueDisplay(uint32_t vblanks, uint32_t frameIndex)
     data.vblanks = vblanks;
     data.frameIndex = frameIndex;
     data.endSceneTime = endSceneTime;
-    const bool timed = frameIndex && perf::enabled();
+    const bool timed = frameIndex && perf::timed();
     const uint32_t start = timed ? perf::now() : 0;
     const int result = sceGxmDisplayQueueAddEntry(displaySync[frontBuffer], displaySync[backBuffer], &data);
     if (result < 0)
         fatal("sceGxmDisplayQueueAddEntry failed: 0x%08x", result);
     if (timed)
-        perf::add(perf::QueueWait, perf::now() - start);
+    {
+        queueUs = perf::now() - start;
+        perf::add(perf::QueueWait, queueUs);
+    }
     frontBuffer = backBuffer;
     backBuffer = (backBuffer + 1) % DisplayBuffers;
 }
@@ -1012,6 +1019,11 @@ void Device::submitFrame(render::Frame* frame, uint32_t vblanks)
 uint32_t Device::completedFrame()
 {
     return m_impl->frames.completedFrame();
+}
+
+uint32_t Device::lastBegunFrame() const
+{
+    return m_impl->frames.lastIndex();
 }
 
 render::TextureStorage* Device::createTexture(const render::TextureDesc& desc)
