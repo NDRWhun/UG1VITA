@@ -55,7 +55,7 @@ controls::State         s_state;
 uint32_t                s_keysDown;         // controls::Key bits posted down
 bool                    s_imeOpen;          // on-screen keyboard requested or shown
 bool                    s_imeForField;      // ... for s_field
-bool                    s_releaseWait;      // after the keyboard and its typing, until the pad is released
+uint32_t                s_releaseWait;      // buttons held at the end of the keyboard and its typing, until released
 uint32_t                s_padInputs;        // inputs of the last pump
 Field                   s_field;
 std::deque<TypedKey>    s_typing;           // key messages of confirmed text not posted yet
@@ -194,8 +194,9 @@ void typeNext(uint64_t now)
     s_typedUs = now;
 }
 
-// Under s_mutex. While the on-screen keyboard is up or its text is being typed, and until every pad input is
-// released after that (a button that closed the keyboard does not reach the game), the pad holds no keys or buttons.
+// Under s_mutex. While the on-screen keyboard is up or its text is being typed, and until the buttons held at its end
+// are released (a button that closed the keyboard does not reach the game), the pad holds no keys or buttons. The
+// rear touch halves are not waited for.
 // While a field is edited with the keyboard closed, Cross opens it and Circle cancels the field; neither reaches the
 // game then.
 void pump()
@@ -206,10 +207,10 @@ void pump()
     s_padInputs = pad.inputs;
     controls::State state = s_mapper.update(pad, now);
     if (s_imeOpen || !s_typing.empty())
-        s_releaseWait = true;
-    else if (!pad.inputs)
-        s_releaseWait = false;
-    const bool busy = s_imeOpen || !s_typing.empty() || s_releaseWait;
+        s_releaseWait = pad.inputs & ~(controls::bit(controls::RearLeft) | controls::bit(controls::RearRight));
+    else
+        s_releaseWait &= pad.inputs;
+    const bool busy = s_imeOpen || !s_typing.empty() || s_releaseWait != 0;
     if (!busy && s_field.active && !s_field.shown)
     {
         openIme(true);
