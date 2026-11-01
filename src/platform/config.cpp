@@ -26,7 +26,7 @@ const char* const Known[] =
     // Cores, logs and the benchmark.
     "use_core3", "core3_tasks", "timing_log", "timing_phases", "console_log",
     "benchmark", "benchmark_exit", "benchmark_seconds", "benchmark_laps", "benchmark_opponents", "benchmark_track",
-    "benchmark_timing_log",
+    "benchmark_timing_log", "benchmark_mode", "benchmark_car", "benchmark_driver",
     // Renderer.
     "alpha_draw_order", "skip_unused_alpha_test", "matrices_on_render_thread", "texture_cache_mb", "texture_async",
     "gxm_precomputed", "gxm_lists", "gxm_core2", "cull_swap", "debug_frame_dump",
