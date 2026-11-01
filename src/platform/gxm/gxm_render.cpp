@@ -701,6 +701,7 @@ render::TextureStorage* FrameRenderer::createTexture(const render::TextureDesc& 
             delete t;
             return nullptr;
         }
+        memset(t->data, 0, t->bytes);
         sceGxmTextureInitLinear(&t->texture, t->data, format, desc.width, desc.height, 1);
         sceGxmColorSurfaceInit(&t->surfaces[0], SCE_GXM_COLOR_FORMAT_A8R8G8B8, SCE_GXM_COLOR_SURFACE_LINEAR,
                                SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, desc.width,
@@ -731,15 +732,17 @@ render::TextureStorage* FrameRenderer::createTexture(const render::TextureDesc& 
         delete t;
         return nullptr;
     }
+    // Cube mip count 0: one level per face; any other count: faces with mips down to 1x1.
     if (desc.cube)
-        sceGxmTextureInitCube(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
+        sceGxmTextureInitCube(&t->texture, t->data, format, desc.width, desc.height, desc.levels > 1 ? desc.levels : 0);
     else
         sceGxmTextureInitSwizzled(&t->texture, t->data, format, desc.width, desc.height, desc.levels);
     // LOD bias 0, the Direct3D default: the field holds bias * 8 + 31.
     sceGxmTextureSetLodBias(&t->texture, 31);
     if (desc.target)
     {
-        // Cube target: each face a swizzled colour surface.
+        // Cube target: each face a swizzled colour surface, black until the game draws it.
+        memset(t->data, 0, t->bytes);
         for (uint32_t face = 0; face < 6; ++face)
             sceGxmColorSurfaceInit(&t->surfaces[face], SCE_GXM_COLOR_FORMAT_A8R8G8B8, SCE_GXM_COLOR_SURFACE_SWIZZLED,
                                    SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, desc.width,
