@@ -53,7 +53,7 @@ static const char* s_guestGameFolder = "C:\\";
 static const char* s_guestExePath = "C:\\Speed.exe";
 static const char* s_commandLine = "\"C:\\Speed.exe\"";
 
-// Reads the executable and checks it is the one the code was generated from.
+// Reads the executable. A file other than the one the code was generated from is used too; the log names it.
 static bool loadExecutable(std::vector<uint8_t>& image)
 {
     const std::string exePath = dataPath(s_exeName);
@@ -70,33 +70,68 @@ static bool loadExecutable(std::vector<uint8_t>& image)
     image.resize(size > 0 ? size_t(size) : 0);
     const size_t read = image.empty() ? 0 : fread(image.data(), 1, image.size(), file);
     fclose(file);
-    if (read != image.size() || image.size() != nfsu::layout::exeSize)
+    if (read != image.size() || image.empty())
     {
-        pf::logError("%s: %u bytes, expected %u", exeFile, unsigned(image.size()), nfsu::layout::exeSize);
+        pf::logError("%s: reading %u bytes failed", exeFile, unsigned(image.size()));
         return false;
     }
     const std::string hash = pf::sha256Hex(image.data(), image.size());
     if (hash != nfsu::layout::exeSha256)
-    {
-        pf::logError("%s: SHA-256 %s, expected %s", exeFile, hash.c_str(), nfsu::layout::exeSha256);
-        return false;
-    }
+        pf::logInfo("%s: %u bytes, SHA-256 %s; the code was generated from %u bytes, SHA-256 %s", exeFile,
+                    unsigned(image.size()), hash.c_str(), nfsu::layout::exeSize, nfsu::layout::exeSha256);
     return true;
 }
 
-// The headers and the raw data of every section at their guest addresses. Each section also gets an entry without
-// data that covers its whole size (the arena is zeroed, so the rest of a section reads as zero).
-static std::vector<win32::Section> imageSections(const std::vector<uint8_t>& image)
+static uint32_t imageWord(const std::vector<uint8_t>& image, size_t offset, size_t bytes)
 {
-    std::vector<win32::Section> sections;
-    sections.push_back(win32::Section{ image.data(), nfsu::layout::imageBase, nfsu::layout::headerSize });
+    uint32_t value = 0;
+    for (size_t i = 0; i < bytes && offset + i < image.size(); ++i)
+        value |= uint32_t(image[offset + i]) << (8 * i);
+    return value;
+}
+
+// The headers and the raw data of the sections at their guest addresses, read from the executable's own section
+// table. Only the sections of the generated layout are taken, each clipped to its size there; each also gets an
+// entry without data that covers its whole size (the arena is zeroed, so the rest of a section reads as zero).
+static bool imageSections(const std::vector<uint8_t>& image, std::vector<win32::Section>& sections)
+{
+    const size_t pe = imageWord(image, 0x3c, 4);
+    if (imageWord(image, 0, 2) != 0x5a4d || imageWord(image, pe, 4) != 0x4550)
+    {
+        pf::logError("%s is not a Windows executable", s_exeName);
+        return false;
+    }
+    const uint32_t imageBase = imageWord(image, pe + 24 + 28, 4);
+    if (imageBase != nfsu::layout::imageBase)
+    {
+        pf::logError("%s: image base 0x%08x, expected 0x%08x", s_exeName, imageBase, nfsu::layout::imageBase);
+        return false;
+    }
+    const size_t count = imageWord(image, pe + 6, 2);
+    const size_t table = pe + 24 + imageWord(image, pe + 20, 2);
+    sections.push_back(win32::Section{ image.data(), nfsu::layout::imageBase,
+                                       x86::reg32(std::min<size_t>(nfsu::layout::headerSize, image.size())) });
     for (const nfsu::layout::ImageSection& s : nfsu::layout::sections)
     {
-        if (s.rawSize)
-            sections.push_back(win32::Section{ image.data() + s.fileOffset, s.address, s.rawSize });
-        sections.push_back(win32::Section{ nullptr, s.address, s.virtualSize > s.rawSize ? s.virtualSize : s.rawSize });
+        const x86::reg32 size = s.virtualSize > s.rawSize ? s.virtualSize : s.rawSize;
+        size_t entry = table;
+        while (entry < table + count * 40 && imageWord(image, entry + 12, 4) != s.address - imageBase)
+            entry += 40;
+        if (entry >= table + count * 40)
+        {
+            pf::logError("%s has no section at 0x%08x (%s): not version 1.4", s_exeName, s.address, s.name);
+            return false;
+        }
+        const size_t rawOffset = imageWord(image, entry + 20, 4);
+        const size_t rawSize = imageWord(image, entry + 16, 4);
+        if (rawOffset < image.size() && rawSize)
+        {
+            const size_t bytes = std::min<size_t>({ rawSize, size, image.size() - rawOffset });
+            sections.push_back(win32::Section{ image.data() + rawOffset, s.address, x86::reg32(bytes) });
+        }
+        sections.push_back(win32::Section{ nullptr, s.address, size });
     }
-    return sections;
+    return true;
 }
 
 // Bindings of the Vita pad, presented as the EMS PS2 adapter (src/lib/controls.cpp). Per button index, then per hat
@@ -286,8 +321,9 @@ int main(int, char**)
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     std::vector<uint8_t> image;
-    if (!loadExecutable(image))
-        pf::fatal("the game executable is missing or not the supported version (see the log)");
+    std::vector<win32::Section> sections;
+    if (!loadExecutable(image) || !imageSections(image, sections))
+        pf::fatal("the game executable is missing or not version 1.4 (see the log)");
     if (!pf::gxm::Device::get().init())
         pf::fatal("graphics initialisation failed");
     if (pf::Config::getBool("gxm_program_list", true))
@@ -300,7 +336,8 @@ int main(int, char**)
     win32::kernel32::setResourceSection(nfsu::layout::imageBase, nfsu::layout::resourceSection);
     nfsu::bankcode::install();
     {
-        nfsu::Application app(s_commandLine, imageSections(image));
+        nfsu::Application app(s_commandLine, sections);
+        std::vector<win32::Section>().swap(sections);
         std::vector<uint8_t>().swap(image);
         setPadBindings();
         win32::MemMap::addReport(reportPools);
