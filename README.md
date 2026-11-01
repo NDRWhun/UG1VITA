@@ -28,8 +28,7 @@
 
 </div>
 
-> **Status: playable, in development.** Expect bugs; please report them on the [issues page](../../issues).
-> There is no official download yet, so you build the VPK yourself (see [Build](#build)).
+> **Status: playtesting.** The game is being tested before the final release. It's worth the wait!
 
 ## Requirements
 
