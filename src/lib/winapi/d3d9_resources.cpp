@@ -44,7 +44,7 @@ void waitTicket(uint32_t ticket)
 {
     if (gpu().uploadDone(ticket))
         return;
-    const bool timed = pf::perf::enabled();
+    const bool timed = pf::perf::timed();
     const uint32_t start = timed ? pf::perf::now() : 0;
     gpu().waitUpload(ticket);
     if (timed)
@@ -379,6 +379,7 @@ HRESULT Texture::lock(uint32_t face, uint32_t level, D3DLOCKED_RECT* locked, con
     const uint32_t index = face * m_desc.levels + level;
     if (m_locks[index])
         return D3DERR_INVALIDCALL;
+    pf::perf::event(pf::perf::EventTextureLocks, 1);
     const texture::Format format = m_desc.format;
     const uint32_t bytes = texture::levelBytes(format, m_desc.width, m_desc.height, level);
     const uint32_t pitch = texture::levelPitch(format, m_desc.width, level);
@@ -399,7 +400,7 @@ HRESULT Texture::lock(uint32_t face, uint32_t level, D3DLOCKED_RECT* locked, con
         memory = new MemMap(bytes, MemMap::High, pf::perf::AllocTextureLock);
         if (m_written[index] && !(flags & D3DLOCK_DISCARD))
         {
-            const bool timed = pf::perf::enabled();
+            const bool timed = pf::perf::timed();
             const uint32_t start = timed ? pf::perf::now() : 0;
             gpu().readTexture(m_storage, face, level, host(memory->getBlockStart()), pitch);
             if (timed)
@@ -747,6 +748,7 @@ HRESULT Buffer::Lock(WinApplication* app, x86::CPU& cpu, UINT offset, UINT size,
         size = m_size - offset;
     if (m_locks++ == 0)
     {
+        pf::perf::event(pf::perf::EventBufferLocks, 1);
         m_lockOffset = offset;
         m_lockSize = size;
         m_lockFlags = flags;

@@ -1042,8 +1042,16 @@ x86::reg32 MapViewOfFile(WinApplication* app, x86::CPU& cpu,
     MemMap* result = new MemMap(dwNumberOfBytesToMap, MemMap::Low, pf::perf::AllocFileView);
     x86::reg8* data = &app->getMemory<x86::reg8>(result->getBlockStart());
     x86::reg32 bytesRead = 0;
+    const bool timed = pf::perf::hitch();
+    const uint32_t start = timed ? pf::perf::now() : 0;
     const bool loaded = file->seek(0, x86::sreg32(dwFileOffsetLow)) == dwFileOffsetLow
                      && file->read(data, dwNumberOfBytesToMap, &bytesRead);
+    if (timed)
+    {
+        pf::perf::event(pf::perf::EventFileUs, pf::perf::now() - start);
+        pf::perf::event(pf::perf::EventFileReads, 1);
+        pf::perf::event(pf::perf::EventFileBytes, bytesRead);
+    }
     if (loaded)
     {
         // Past the end of the file the view reads as zeros.
@@ -1163,7 +1171,15 @@ BOOL ReadFile(WinApplication* app, x86::CPU& cpu,
     {
         pf::perf::blocking(pf::perf::BlockFile);
         app->unlockContext(cpu);
+        const bool timed = pf::perf::hitch();
+        const uint32_t start = timed ? pf::perf::now() : 0;
         BOOL result = f->read(lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead);
+        if (timed)
+        {
+            pf::perf::event(pf::perf::EventFileUs, pf::perf::now() - start);
+            pf::perf::event(pf::perf::EventFileReads, 1);
+            pf::perf::event(pf::perf::EventFileBytes, lpNumberOfBytesRead ? *lpNumberOfBytesRead : 0);
+        }
         app->lockContext(cpu);
         return result;
     }

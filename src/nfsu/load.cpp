@@ -1765,18 +1765,33 @@ void perfReport(uint32_t now)
     p.started = true;
 }
 
+// Hitch log events of an entry: its call count, followed by its time.
+pf::perf::Event hitchEvent(Entry entry)
+{
+    return entry == EntryJdlz ? pf::perf::EventJdlz
+         : entry == EntryComposite ? pf::perf::EventSkins : pf::perf::EventTextureCreates;
+}
+
 template< typename Body >
 void timed(Entry entry, Body body)
 {
-    if (!pf::perf::enabled())
+    if (!pf::perf::enabled() && !pf::perf::hitch())
     {
         body();
         return;
     }
-    PerfSums& p = s_perf;
     const uint32_t start = pf::perf::now();
     body();
     const uint32_t end = pf::perf::now();
+    if (pf::perf::hitch())
+    {
+        const pf::perf::Event calls = hitchEvent(entry);
+        pf::perf::event(calls, 1);
+        pf::perf::event(pf::perf::Event(calls + 1), end - start);
+    }
+    if (!pf::perf::enabled())
+        return;
+    PerfSums& p = s_perf;
     ++p.calls[entry];
     p.us[entry] += end - start;
     if (!p.started)

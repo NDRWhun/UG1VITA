@@ -115,9 +115,81 @@ enum Count
     CountCount
 };
 
+// Event sums of all threads for the hitch log (hitch_log); a count is followed by its time where both exist.
+enum Event
+{
+    EventTextureLocks,      // texture level locks
+    EventBufferLocks,       // vertex and index buffer locks (outermost)
+    EventFileReads,         // ReadFile and MapViewOfFile calls
+    EventFileBytes,
+    EventFileUs,            // their read time
+    EventJdlz,              // JDLZ decompressions (0x58D190)
+    EventJdlzUs,
+    EventTextureCreates,    // texture creations of texture records (0x407DB0)
+    EventTextureCreateUs,
+    EventSkins,             // car skin compositions (CompositeSkin32, 0x5A8A50)
+    EventSkinUs,
+    EventDrainWaits,        // waits for the Direct3D queue thread (drains and a full queue)
+    EventDrainWaitUs,
+    EventQueueRunUs,        // Direct3D queue run time (the queue thread, or the draining thread when inline)
+    EventSlotWaitUs,        // game thread opening a frame: waiting for a free frame slot, the lock re-taken included
+    EventFenceWaitUs,       // of it: waiting for the GPU to finish the slot's previous frame
+    EventCount
+};
+
+// Sums since start-up, wrapping, counted while the hitch log is on: the difference of two snapshots is what
+// happened in between. Only uint32_t fields.
+struct Totals
+{
+    uint32_t events[EventCount];
+    uint32_t uploads[UploadCount];
+    uint32_t blocked[BlockCount];   // game thread lock releases by reason, re-acquisition included
+    uint32_t releases;
+    uint32_t relockUs;              // of the blocked time: waiting to take the lock again
+    uint32_t held[HolderCount];     // execution lock hold time by kind of holder
+    uint32_t preempted;             // Counter Preempted
+    uint32_t preemptWaits;          // preemptWait calls and their time
+    uint32_t preemptWaitUs;
+};
+
+// Hitch log: a present whose interval from the previous present exceeded HitchUs, with the render thread's time for
+// the frame (resolve, draw and display queueing) and its running averages.
+const uint32_t HitchUs = 41700;
+struct SlowPresent
+{
+    uint32_t frame;         // render::Frame index, 0 for a layer present
+    uint32_t presentUs;     // now() after the present
+    uint32_t intervalUs;
+    uint32_t renderUs;      // render thread, queueUs included
+    uint32_t queueUs;       // sceGxmDisplayQueueAddEntry
+    uint32_t renderAvgUs;   // running averages over every present
+    uint32_t queueAvgUs;
+};
+
 extern bool g_enabled;
+extern bool g_timed;
+extern bool g_hitch;
 extern bool g_counting;
 extern int g_nextBlock;
+
+void eventSlow(Event event, uint32_t value);
+// Any thread: adds to an event sum while the hitch log is on.
+inline void event(Event event, uint32_t value)
+{
+    if (__builtin_expect(g_hitch, 0))
+        eventSlow(event, value);
+}
+// True with hitch_log=on.
+inline bool hitch() { return g_hitch; }
+// True with the timing log or the hitch log on: the timed counters (lock releases, waits, uploads) are measured.
+inline bool timed() { return g_timed; }
+// Any thread: the sums at the moment (each field read on its own).
+void totals(Totals& out);
+// Game thread: the oldest slow present not taken yet, null if none; popSlowPresent removes it.
+const SlowPresent* peekSlowPresent();
+void popSlowPresent();
+// Slow presents dropped because the game thread did not take them in time.
+uint32_t droppedSlowPresents();
 
 void countSlow(Count counter);
 // Any thread: counts an event while counting is on.
@@ -131,15 +203,15 @@ void startCounting();
 // The count since the last take.
 uint32_t takeCount(Count counter);
 
-// Main thread, before any other thread starts: sets the switch and logs start-up facts.
-void init(bool enabled);
+// Main thread, before any other thread starts: sets the switches (timing log, hitch log) and logs start-up facts.
+void init(bool enabled, bool hitchLog);
 inline bool enabled() { return g_enabled; }
 // The thread holding the execution lock names the reason of its next release (read and reset by the release).
 inline void blocking(Block block) { g_nextBlock = block; }
 // Game thread: the execution lock was given up for a reason from release to re-acquisition, relockUs of it waiting
 // for the lock.
 void gameBlocked(Block block, uint32_t microseconds, uint32_t relockUs);
-// Sum of the game thread's lock releases since start-up in microseconds, wrapping (counted with the timing log on).
+// Sum of the game thread's lock releases since start-up in microseconds, wrapping (counted while timed()).
 uint32_t gameBlockedTotal();
 // The calling thread's CPU time is logged under this name (a string literal); a few threads at most.
 void trackThread(const char* name);
@@ -170,9 +242,11 @@ void audio(Audio counter, uint32_t value);
 void audioLocked(const char* reason, uint32_t address);
 // Game thread: kept linear texture copies at the moment.
 void uploadCache(uint32_t bytes, uint32_t levels);
-// Render thread, after each game frame it queued, with the timing log on or a frame observer set: calls the observer
-// and, with the timing log on, logs one line about every 5 s.
-void framePresented(uint32_t drawCalls, uint32_t triangles);
+// Render thread, after each game frame it queued, with the timing or hitch log on or a frame observer set: frame is
+// the render::Frame index (0 for a layer present), renderUs and queueUs its render thread and display queue times
+// (measured when timed()). Calls the observer, queues a slow present for the hitch log and, with the timing log on,
+// logs one line about every 5 s.
+void framePresented(uint32_t frame, uint32_t renderUs, uint32_t queueUs, uint32_t drawCalls, uint32_t triangles);
 // True when a frame observer is set.
 bool frameObserved();
 // Called on the render thread after each log line with the interval length in microseconds.

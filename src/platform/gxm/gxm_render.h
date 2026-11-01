@@ -129,6 +129,7 @@ public:
     // The slot of a frame begun; the device queues it for the render thread.
     void submitted(render::Frame* frame, uint32_t vblanks);
     uint32_t completedFrame();
+    uint32_t lastIndex() const { return m_lastIndex; }
     render::TextureStorage* createTexture(const render::TextureDesc& desc);
     void writeTexture(render::TextureStorage* texture, uint32_t face, uint32_t level, const void* data, uint32_t pitch);
     void readTexture(const render::TextureStorage* texture, uint32_t face, uint32_t level, void* data, uint32_t pitch);

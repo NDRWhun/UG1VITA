@@ -16,6 +16,10 @@ namespace nfsu { namespace bench {
 // True when benchmark=on (read by configure).
 bool enabled();
 
+// Game thread, with or without the benchmark: a race is running (race coordinator state 4 and race stage 4, the
+// state the benchmark measures in).
+bool racing();
+
 // Before guest code runs: sets the game's skip-front-end race settings and hooks the track table loader.
 void configure(win32::WinApplication& app);
 

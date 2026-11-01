@@ -393,7 +393,7 @@ static void acquire(Mutex* executionContext, scheduler::Level level, std::atomic
         executionContext->lock();
         return;
     }
-    const bool timed = pf::perf::enabled();
+    const bool timed = pf::perf::timed();
     const uint32_t start = timed ? pf::perf::now() : 0;
     s_levelWaiters[level].fetch_add(1, std::memory_order_relaxed);
     preemptWaiters.fetch_add(1, std::memory_order_relaxed);
@@ -416,7 +416,7 @@ static void acquire(Mutex* executionContext, scheduler::Level level, std::atomic
         pf::perf::preemptWait(pf::perf::now() - start);
 }
 
-// timing_log accounting of the execution lock. The holder fields change only with the lock held, the game fields only
+// Timing and hitch log accounting of the execution lock. The holder fields change only with the lock held, the game fields only
 // on the game thread.
 static uint32_t s_heldSince = 0;
 static bool     s_gameReleased = false;
@@ -432,7 +432,7 @@ void WinApplication::lockContext(const x86::CPU& cpu)
         return;
     ThreadControl* control = getMemory<ThreadControl*>(cpu.efs + ThreadControlOffset);
     const scheduler::Level level = scheduler::level(control);
-    const bool timed = pf::perf::enabled();
+    const bool timed = pf::perf::timed();
     const uint32_t start = timed ? pf::perf::now() : 0;
     acquire(executionContext, level, m_preemptWaiters);
     ++m_contextDepth;
@@ -465,7 +465,7 @@ void WinApplication::unlockContext(const x86::CPU& cpu)
     RC_ASSERT(executionContext);
     if (executionContext)
     {
-        if (pf::perf::enabled() && m_contextDepth == 1)
+        if (pf::perf::timed() && m_contextDepth == 1)
         {
             const uint32_t released = pf::perf::now();
             ThreadControl* control = getMemory<ThreadControl*>(cpu.efs + ThreadControlOffset);
@@ -507,7 +507,7 @@ void WinApplication::yieldContext(const x86::CPU& cpu)
     };
     if (!higherWaits())
         return;
-    const bool timed = pf::perf::enabled();
+    const bool timed = pf::perf::timed();
     const uint32_t start = timed ? pf::perf::now() : 0;
     pf::perf::count(pf::perf::CountYield);
     pf::perf::blocking(pf::perf::BlockPreempt);

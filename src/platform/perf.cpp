@@ -11,6 +11,8 @@
 namespace pf { namespace perf {
 
 bool g_enabled = false;
+bool g_timed = false;
+bool g_hitch = false;
 bool g_counting = false;
 int g_nextBlock = BlockOther;
 
@@ -44,6 +46,61 @@ std::atomic<uint32_t> s_uploads[UploadCount];
 std::atomic<uint32_t> s_cacheBytes{0};
 std::atomic<uint32_t> s_cacheLevels{0};
 std::atomic<uint32_t> s_audio[AudioCount];
+
+// Hitch log sums (Totals), counted while the hitch log is on.
+struct HitchTotals
+{
+    std::atomic<uint32_t> events[EventCount];
+    std::atomic<uint32_t> uploads[UploadCount];
+    std::atomic<uint32_t> blocked[BlockCount];
+    std::atomic<uint32_t> releases;
+    std::atomic<uint32_t> relockUs;
+    std::atomic<uint32_t> held[HolderCount];
+    std::atomic<uint32_t> preempted;
+    std::atomic<uint32_t> preemptWaits;
+    std::atomic<uint32_t> preemptWaitUs;
+};
+HitchTotals s_hitch;
+
+inline void hitchAdd(std::atomic<uint32_t>& sum, uint32_t value)
+{
+    sum.fetch_add(value, std::memory_order_relaxed);
+}
+
+// Slow presents: written by the render thread, taken by the game thread.
+const uint32_t SlowPresentSlots = 16;
+SlowPresent s_slowPresents[SlowPresentSlots];
+std::atomic<uint32_t> s_slowWritten{0};
+std::atomic<uint32_t> s_slowTaken{0};
+std::atomic<uint32_t> s_slowDropped{0};
+// Render thread only.
+uint32_t s_hitchLastPresent = 0;
+uint32_t s_renderAvgUs = 0;
+uint32_t s_queueAvgUs = 0;
+
+// Render thread: queues the present if its interval is over HitchUs and updates the running averages (1/16 of each
+// new value).
+void hitchPresent(uint32_t frame, uint32_t time, uint32_t renderUs, uint32_t queueUs)
+{
+    const uint32_t last = s_hitchLastPresent;
+    s_hitchLastPresent = time;
+    if (last && time - last > HitchUs)
+    {
+        const uint32_t written = s_slowWritten.load(std::memory_order_relaxed);
+        if (written - s_slowTaken.load(std::memory_order_acquire) >= SlowPresentSlots)
+        {
+            s_slowDropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            s_slowPresents[written % SlowPresentSlots] = SlowPresent{ frame, time, time - last, renderUs, queueUs,
+                                                                      s_renderAvgUs, s_queueAvgUs };
+            s_slowWritten.store(written + 1, std::memory_order_release);
+        }
+    }
+    s_renderAvgUs = uint32_t(int32_t(s_renderAvgUs) + (int32_t(renderUs) - int32_t(s_renderAvgUs)) / 16);
+    s_queueAvgUs = uint32_t(int32_t(s_queueAvgUs) + (int32_t(queueUs) - int32_t(s_queueAvgUs)) / 16);
+}
 
 // Execution lock holders by name.
 struct HolderStats
@@ -278,9 +335,11 @@ uint32_t s_frameMax = 0;
 
 }
 
-void init(bool enabled)
+void init(bool enabled, bool hitchLog)
 {
     g_enabled = enabled;
+    g_hitch = hitchLog;
+    g_timed = enabled || hitchLog;
     s_intervalStart = now();
     logInfo("perf: timing log %s (timing_log), main thread priority %d affinity 0x%x, clocks arm %d bus %d gpu %d xbar %d MHz",
             enabled ? "on" : "off", sceKernelGetThreadCurrentPriority(),
@@ -316,10 +375,58 @@ uint32_t takeCount(Count counter)
 void add(Counter counter, uint32_t microseconds)
 {
     s_counters[counter].fetch_add(microseconds, std::memory_order_relaxed);
+    if (g_hitch && counter == Preempted)
+        hitchAdd(s_hitch.preempted, microseconds);
+}
+
+void eventSlow(Event event, uint32_t value)
+{
+    hitchAdd(s_hitch.events[event], value);
+}
+
+void totals(Totals& out)
+{
+    const HitchTotals& t = s_hitch;
+    for (int i = 0; i < EventCount; ++i)
+        out.events[i] = t.events[i].load(std::memory_order_relaxed);
+    for (int i = 0; i < UploadCount; ++i)
+        out.uploads[i] = t.uploads[i].load(std::memory_order_relaxed);
+    for (int i = 0; i < BlockCount; ++i)
+        out.blocked[i] = t.blocked[i].load(std::memory_order_relaxed);
+    out.releases = t.releases.load(std::memory_order_relaxed);
+    out.relockUs = t.relockUs.load(std::memory_order_relaxed);
+    for (int i = 0; i < HolderCount; ++i)
+        out.held[i] = t.held[i].load(std::memory_order_relaxed);
+    out.preempted = t.preempted.load(std::memory_order_relaxed);
+    out.preemptWaits = t.preemptWaits.load(std::memory_order_relaxed);
+    out.preemptWaitUs = t.preemptWaitUs.load(std::memory_order_relaxed);
+}
+
+const SlowPresent* peekSlowPresent()
+{
+    const uint32_t taken = s_slowTaken.load(std::memory_order_relaxed);
+    if (taken == s_slowWritten.load(std::memory_order_acquire))
+        return nullptr;
+    return &s_slowPresents[taken % SlowPresentSlots];
+}
+
+void popSlowPresent()
+{
+    s_slowTaken.fetch_add(1, std::memory_order_release);
+}
+
+uint32_t droppedSlowPresents()
+{
+    return s_slowDropped.load(std::memory_order_relaxed);
 }
 
 void preemptWait(uint32_t microseconds)
 {
+    if (g_hitch)
+    {
+        hitchAdd(s_hitch.preemptWaits, 1);
+        hitchAdd(s_hitch.preemptWaitUs, microseconds);
+    }
     s_preemptCount.fetch_add(1, std::memory_order_relaxed);
     s_preemptSum.fetch_add(microseconds, std::memory_order_relaxed);
     raiseMax(s_preemptMax, microseconds);
@@ -337,6 +444,12 @@ void gameBlocked(Block block, uint32_t microseconds, uint32_t relockUs)
     s_blockCount.fetch_add(1, std::memory_order_relaxed);
     s_relock.fetch_add(relockUs, std::memory_order_relaxed);
     s_blockedTotal.fetch_add(microseconds, std::memory_order_relaxed);
+    if (g_hitch)
+    {
+        hitchAdd(s_hitch.blocked[block], microseconds);
+        hitchAdd(s_hitch.releases, 1);
+        hitchAdd(s_hitch.relockUs, relockUs);
+    }
 }
 
 uint32_t gameBlockedTotal()
@@ -373,6 +486,8 @@ int holderSlot(const char* name)
 void held(Holder holder, int slot, uint32_t microseconds)
 {
     s_held[holder].fetch_add(microseconds, std::memory_order_relaxed);
+    if (g_hitch)
+        hitchAdd(s_hitch.held[holder], microseconds);
     if (slot < 0 || slot >= HolderSlots)
         return;
     HolderStats& stats = s_holders[slot];
@@ -384,6 +499,8 @@ void held(Holder holder, int slot, uint32_t microseconds)
 void upload(Upload counter, uint32_t value)
 {
     s_uploads[counter].fetch_add(value, std::memory_order_relaxed);
+    if (g_hitch)
+        hitchAdd(s_hitch.uploads[counter], value);
 }
 
 void guestBlock(Alloc kind, uint32_t bytes, uint32_t microseconds, uint32_t searchUs)
@@ -453,12 +570,15 @@ bool frameObserved()
     return s_frameObserver.load(std::memory_order_relaxed) != nullptr;
 }
 
-void framePresented(uint32_t drawCalls, uint32_t triangles)
+void framePresented(uint32_t frameIndex, uint32_t renderUs, uint32_t queueUs, uint32_t drawCalls, uint32_t triangles)
 {
+    const uint32_t time = now();
+    if (g_hitch)
+        hitchPresent(frameIndex, time, renderUs, queueUs);
     if (!g_enabled)
     {
         if (FrameObserver observer = s_frameObserver.load(std::memory_order_acquire))
-            observer(now());
+            observer(time);
         return;
     }
     ++s_frames;
@@ -466,7 +586,6 @@ void framePresented(uint32_t drawCalls, uint32_t triangles)
     s_triangles += triangles;
     if (triangles > s_peakTriangles)
         s_peakTriangles = triangles;
-    const uint32_t time = now();
     if (s_lastPresent && time - s_lastPresent > s_frameMax)
         s_frameMax = time - s_lastPresent;
     s_lastPresent = time;

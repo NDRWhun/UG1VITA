@@ -258,9 +258,13 @@ render::Frame* Device::frame(WinApplication* app, x86::CPU& cpu)
     {
         if (bridge::onQueueThread())
             pf::fatal("d3d9: the queue thread would open a frame");
+        const bool timed = pf::perf::hitch();
+        const uint32_t start = timed ? pf::perf::now() : 0;
         app->unlockContext(cpu);
         m_frame = gpu().beginFrame(m_params.BackBufferWidth, m_params.BackBufferHeight);
         app->lockContext(cpu);
+        if (timed)
+            pf::perf::event(pf::perf::EventSlotWaitUs, pf::perf::now() - start);
         m_sceneOpen = false;
         m_frameFull = false;
         m_stream = &frameStream(m_frame->index);

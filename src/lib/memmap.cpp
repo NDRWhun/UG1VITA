@@ -171,15 +171,16 @@ MemMap::MemMap(x86::reg32 size, Placement placement, pf::perf::Alloc kind)
     RC_ASSERT(m_blockCount >= 1);
     if (m_blockCount > s_blockCount)
         pf::fatal("guest memory exhausted (requested %u bytes)", size);
-    const bool timed = pf::perf::enabled();
+    const bool timed = pf::perf::timed();
+    const bool searchTimed = pf::perf::enabled();
     const uint32_t start = timed ? pf::perf::now() : 0;
     uint32_t searchUs = 0;
     for (;;)
     {
         s_lock->lock();
-        const uint32_t searchStart = timed ? pf::perf::now() : 0;
+        const uint32_t searchStart = searchTimed ? pf::perf::now() : 0;
         m_block = placement == High ? findHigh(m_blockCount) : findLow(m_blockCount);
-        if (timed)
+        if (searchTimed)
             searchUs += pf::perf::now() - searchStart;
         if (m_block != x86::reg32(-1))
             break;
