@@ -79,6 +79,9 @@ enum Alloc : int
     AllocCount
 };
 
+// Short name of an allocation kind ("heap", "chunk", ...).
+const char* allocName(Alloc kind);
+
 // EA SND voice render and the routines of its audio banks, logged as one line per interval.
 enum Audio
 {

@@ -526,6 +526,11 @@ void upload(Upload counter, uint32_t value)
         hitchAdd(s_hitch.uploads[counter], value);
 }
 
+const char* allocName(Alloc kind)
+{
+    return kind >= 0 && kind < AllocCount ? s_allocNames[kind] : "other";
+}
+
 void guestBlock(Alloc kind, uint32_t bytes, uint32_t microseconds, uint32_t searchUs)
 {
     upload(UploadGuestBlocks, 1);

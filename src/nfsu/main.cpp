@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -112,6 +113,28 @@ static const x86::reg32 s_menuHat[4] = { 17, 16, 18, 19 };
 static x86::reg32& guestDword(x86::reg32 address)
 {
     return *reinterpret_cast<x86::reg32*>(win32::g_guestBase + address);
+}
+
+// Exhaustion report: the game's memory pools (table [0x007301D4][8]; pool +0 name, +0x1C allocations, +0x24 bytes
+// owned, +0x28 bytes used, +0x2C peak used).
+static void reportPools()
+{
+    for (x86::reg32 i = 0; i < 8; ++i)
+    {
+        const x86::reg32 pool = guestDword(0x007301D4 + 4 * i);
+        if (!pool || !win32::MemMap::isGuestRange(pool, 0x58))
+            continue;
+        const x86::reg32 nameAddress = guestDword(pool);
+        char name[32] = "?";
+        if (nameAddress && win32::MemMap::isGuestRange(nameAddress, sizeof(name)))
+        {
+            memcpy(name, win32::g_guestBase + nameAddress, sizeof(name) - 1);
+            name[sizeof(name) - 1] = 0;
+        }
+        pf::logInfo("memory: pool %u \"%s\": %u KB owned, %u KB used, peak %u KB, %u allocations", unsigned(i), name,
+                    guestDword(pool + 0x24) / 1024, guestDword(pool + 0x28) / 1024, guestDword(pool + 0x2C) / 1024,
+                    guestDword(pool + 0x1C));
+    }
 }
 
 // The game's defaults for the EMS product (entry 0x00704258: GUID, 16 race, 16 menu actions) become the port's.
@@ -280,6 +303,7 @@ int main(int, char**)
         nfsu::Application app(s_commandLine, imageSections(image));
         std::vector<uint8_t>().swap(image);
         setPadBindings();
+        win32::MemMap::addReport(reportPools);
         setEnvmapSchedule();
         nfsu::prompts::configure();
         nfsu::bench::configure(app);
