@@ -36,7 +36,7 @@
 - Need for Speed Underground for PC, **version 1.4** (your own copy; other versions are refused)
 - PS Vita with HENkaku / Ensō and [VitaShell](https://github.com/TheOfficialFloW/VitaShell)
 - About 1.5 GB free on the memory card
-- ARM clock at 500 MHz, set with an overclocking plugin such as [PSVshell](https://github.com/Electry/PSVshell)
+- Overclocking is mandatory, for example with [PSVshell](https://github.com/Electry/PSVshell)
 - Optional: [CapUnlocker](https://github.com/GrapheneCt/CapUnlocker), which lets the game use one more CPU core
 
 ## Install
