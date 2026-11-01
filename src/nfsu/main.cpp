@@ -225,6 +225,7 @@ static void padPollHook(x86::reg32* buttons, int* pov)
     *buttons &= ~s_hidden;
     if (s_hidden & hatBit)
         *pov = -1;
+    *buttons |= nfsu::bench::heldButtons();
 
     // Menus: Triangle (button 0) gives the menu bar the key of the screen's extra item.
     static x86::reg32 s_previous = 0;
