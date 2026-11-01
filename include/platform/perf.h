@@ -149,7 +149,10 @@ enum RenderPart
     RenderProgramCreates,   // vertex and fragment programs created by the shader patcher (count)
     RenderProgramCreateUs,
     RenderLists,            // command list recording, the wait for the list workers included
-    RenderListWait,         // of it: waiting for the list workers to finish
+    RenderListWait,         // of it: after its own jobs, the workers' unfinished jobs (taken over or waited for); and
+                            // at the frame's start, a worker still in a job taken over the frame before
+    RenderListSteals,       // workers' jobs this thread recorded too (count)
+    RenderListStealsWon,    // of them, finished before the worker (count)
     RenderUploadWait,       // waiting for texture writes the frame reads
     RenderScenes,           // scene submission (begin, lists or draws, end)
     RenderCpu,              // the render thread's CPU time over its whole time for the present

@@ -28,8 +28,10 @@ const x86::reg32 GameFlowState = 0x0077A920;
 const uint32_t FlowFrontEnd = 3;
 
 const uint32_t RecordSlots = 8;
-const uint32_t MaxBuffered = 64;
 const uint32_t LineSize = 1024;
+// Kept lines: about 280 at most; written in one block (a line written on its own costs about 20 ms of file I/O).
+const uint32_t KeptBytes = 256 * 1024;
+const char LinePrefix[] = "[info] ";
 // No cause is named below this excess over the running average.
 const float MinExcessUs = 1000.0f;
 // Each new value's part of a running average.
@@ -137,8 +139,10 @@ uint32_t s_lastFrame = 0;               // frame of the newest record
 float s_average[FirstRender] = {};
 uint32_t s_pendingLogUs = 0;            // writing time not yet in a record
 
-char s_lines[MaxBuffered][LineSize];
-uint32_t s_buffered = 0;
+char s_kept[KeptBytes];
+uint32_t s_keptBytes = 0;
+uint32_t s_keptLines = 0;
+uint32_t s_droppedLines = 0;            // not kept: the space was full
 
 uint32_t s_counts[CauseSlots] = {};
 uint32_t s_slow = 0;
@@ -307,11 +311,12 @@ void appendRender(Line& line, const perf::SlowPresent& p)
     const uint32_t* q = p.parts;
     const uint32_t* a = p.partAvgs;
     line.append(" | frame %u interval %.1f ms, render %.1f (avg %.1f): resolve %.1f plan %.1f programs %.1f"
-                " (%u new %.1f) lists %.1f (wait %.1f) tex waits %.1f scenes %.1f queue %.1f, cpu %.1f (avg %.1f);"
-                " scenes %u draws %u (avg %u %u)",
+                " (%u new %.1f) lists %.1f (wait %.1f, steals %u won %u) tex waits %.1f scenes %.1f queue %.1f,"
+                " cpu %.1f (avg %.1f); scenes %u draws %u (avg %u %u)",
                 unsigned(p.frame), ms(p.intervalUs), ms(p.renderUs), ms(p.renderAvgUs), ms(q[perf::RenderResolve]),
                 ms(q[perf::RenderPlan]), ms(q[perf::RenderPrograms]), unsigned(q[perf::RenderProgramCreates]),
                 ms(q[perf::RenderProgramCreateUs]), ms(q[perf::RenderLists]), ms(q[perf::RenderListWait]),
+                unsigned(q[perf::RenderListSteals]), unsigned(q[perf::RenderListStealsWon]),
                 ms(q[perf::RenderUploadWait]), ms(q[perf::RenderScenes]), ms(p.queueUs), ms(q[perf::RenderCpu]),
                 ms(a[perf::RenderCpu]), unsigned(q[perf::RenderSceneCount]), unsigned(q[perf::RenderDrawCount]),
                 unsigned(a[perf::RenderSceneCount]), unsigned(a[perf::RenderDrawCount]));
@@ -361,27 +366,37 @@ void appendRecord(Line& line, const Record& r)
         line.append(" | hitch log %.1f", ms(r.logUs));
 }
 
-void write(const char* text, bool keep)
+// Keeps a line as the log writes it.
+void keep(const char* text, int length)
 {
-    if (keep && s_buffered < MaxBuffered)
+    const uint32_t prefix = sizeof(LinePrefix) - 1;
+    const uint32_t size = uint32_t(std::min(length, int(LineSize) - 1));
+    if (s_keptBytes + prefix + size + 1 > KeptBytes)
     {
-        memcpy(s_lines[s_buffered++], text, LineSize);
+        ++s_droppedLines;
         return;
     }
-    pf::logInfo("%s", text);
+    memcpy(s_kept + s_keptBytes, LinePrefix, prefix);
+    memcpy(s_kept + s_keptBytes + prefix, text, size);
+    s_keptBytes += prefix + size;
+    s_kept[s_keptBytes++] = '\n';
+    ++s_keptLines;
 }
 
+// Writes the kept lines in one block.
 void flush()
 {
-    if (!s_buffered)
+    if (!s_keptLines && !s_droppedLines)
         return;
-    pf::logInfo("hitch: %u lines kept during the race:", unsigned(s_buffered));
-    for (uint32_t i = 0; i < s_buffered; ++i)
-        pf::logInfo("%s", s_lines[i]);
-    s_buffered = 0;
+    pf::logInfo("hitch: %u lines kept since the last write, %u dropped (no space):", unsigned(s_keptLines),
+                unsigned(s_droppedLines));
+    pf::logBlock(s_kept, s_keptBytes);
+    s_keptBytes = 0;
+    s_keptLines = 0;
+    s_droppedLines = 0;
 }
 
-void report(const perf::SlowPresent& present, const Record* r, bool keep)
+void report(const perf::SlowPresent& present, const Record* r)
 {
     float excess[CauseCount] = {};
     if (r)
@@ -420,17 +435,17 @@ void report(const perf::SlowPresent& present, const Record* r, bool keep)
         line.append(" | dominant %s +%.1f ms", CauseNames[cause], double(largest) / 1000.0);
     else
         line.append(" | dominant %s", CauseNames[cause]);
-    write(line.text, keep);
+    keep(line.text, line.length);
 }
 
-// Logs the slow presents whose records are finished.
-void reportPresents(bool keep)
+// Keeps the lines of the slow presents whose records are finished.
+void reportPresents()
 {
     while (const perf::SlowPresent* present = perf::peekSlowPresent())
     {
         if (present->frame && int32_t(present->frame - s_lastFrame) > 0)
             break;
-        report(*present, present->frame ? findRecord(present->frame) : nullptr, keep);
+        report(*present, present->frame ? findRecord(present->frame) : nullptr);
         perf::popSlowPresent();
     }
 }
@@ -453,8 +468,9 @@ void frame(const uint32_t* phaseUs)
         s_lastEndUs = now;
         s_lastTotals = totals;
         s_lastFrame = pf::gxm::Device::get().lastBegunFrame();
-        pf::logInfo("hitch: hitch log on (hitch_log): one line per presented frame over %.1f ms; the lines of a race"
-                    " are written at its end", ms(perf::HitchUs));
+        pf::logInfo("hitch: hitch log on (hitch_log): one line per presented frame over %.1f ms, kept in memory and"
+                    " written in the front end, with the summary, or outside a race when the space is 3/4 full",
+                    ms(perf::HitchUs));
         return;
     }
 
@@ -489,18 +505,21 @@ void frame(const uint32_t* phaseUs)
         c = Record();
     }
 
+    // The kept lines are written in the front end, when the space is three quarters full outside a race, and with the
+    // summary; never while racing.
     const bool raceEnded = wasRacing && !racing && !bench::enabled();
     const bool raceStarted = racing && !wasRacing && !bench::enabled();
-    const bool writeKept = s_buffered && (!racing || s_buffered == MaxBuffered);
+    const bool writeKept = s_keptLines && !racing
+                        && (guestDword(GameFlowState) == FlowFrontEnd || s_keptBytes >= KeptBytes / 4 * 3);
     if (!perf::peekSlowPresent() && !raceEnded && !raceStarted && !writeKept)
         return;
     const uint32_t start = perf::now();
-    reportPresents(racing);
+    reportPresents();
     if (raceEnded && s_slow)
         logSummary("race");
     if (raceStarted)
         resetSummary();
-    if (!racing || s_buffered == MaxBuffered)
+    if (writeKept)
         flush();
     s_pendingLogUs += perf::now() - start;
 }

@@ -294,6 +294,14 @@ private:
         void*                   hostMem = nullptr;
         uint32_t                frame = 0;      // frame its pools were begun for
         Thread*                 thread = nullptr;
+        uint8_t                 index = 0;      // in m_workers
+        std::atomic<bool>       abandon{false}; // the job it records was finished by another recorder: stop
+    };
+    enum JobState : uint8_t
+    {
+        JobFree,
+        JobClaimed,     // a worker records it
+        JobDone
     };
     // A range of a scene's draws recorded into one command list.
     struct Job
@@ -301,6 +309,12 @@ private:
         uint32_t                scene, begin, end;  // m_order range
         bool                    ok;
         SceGxmCommandList       list;
+        JobState                state;
+        uint8_t                 worker;             // the claiming worker
+    };
+    enum : uint32_t
+    {
+        NoJob = 0xffffffffu
     };
 
     // A queued write (from null) or copy.
@@ -348,7 +362,15 @@ private:
     static void* fragmentMemory(void* worker, SceSize requested, SceSize* size);
     bool recordLists(const render::Frame& frame);
     void runJobs(Worker& worker);
-    bool recordJob(Worker& worker, const render::Frame& frame, const Job& job);
+    // Records a job into list; stops early (the list is not used) when the worker's abandon flag is set.
+    bool recordJob(Worker& worker, const render::Frame& frame, const Job& job, SceGxmCommandList* list);
+    void beginWorkerFrame(Worker& worker, const render::Frame& frame);
+    // A recorder ended job index of generation: the first to end it gives the job its list.
+    void finishJob(Worker& worker, uint32_t generation, uint32_t index, bool ok, const SceGxmCommandList& list);
+    // Render thread: records claimed jobs the workers have not finished, until every job is done.
+    void stealJobs(const render::Frame& frame);
+    // Waits until no recorder reads a frame's draws any more.
+    void waitRecorders();
 
     SceGxmContext*          m_context = nullptr;
     SceGxmShaderPatcher*    m_patcher = nullptr;
@@ -394,6 +416,9 @@ private:
     std::vector<Job>            m_jobs;                 // guarded by m_jobLock while workers run
     const render::Frame*        m_jobFrame = nullptr;
     uint32_t                    m_nextJob = 0, m_doneJobs = 0;
+    uint32_t                    m_jobGeneration = 0;    // counts recordLists calls
+    uint32_t                    m_recording = 0;        // recorders inside recordJob
+    uint32_t                    m_stealing = NoJob;     // the job the render thread records for a worker
     bool                        m_stop = false;
 };
 

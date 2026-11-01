@@ -11,9 +11,10 @@
 // composition calls, Direct3D queue waits, frame slot and GPU fence waits, lock holds of other threads, preemption).
 // Each line names the dominant cause: the part with the largest time over its running average, where a wait or load
 // call inside a phase wins over the phase when it is at least half of that excess. A summary line (slow frames by
-// dominant cause) follows the benchmark summary, or each race's end without the benchmark. While a race runs the
-// lines are kept in memory and written when the race ends, at the summary or when MaxBuffered are kept; elsewhere
-// they are written at once. Off: no clock reads and no work.
+// dominant cause) follows the benchmark summary, or each race's end without the benchmark. The lines are kept in
+// memory and written in one block (one file write) in the front end, with the summary, or outside a race when the
+// space is three quarters full; never while racing (lines that find no space are dropped and counted). Off: no clock
+// reads and no work.
 
 namespace nfsu { namespace hitch {
 

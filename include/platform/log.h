@@ -15,6 +15,9 @@ void logDebug(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void logInfo(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void logError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
+// Appends text, complete lines that already carry their "[level] " prefix and line ends, with one file write.
+void logBlock(const char* text, unsigned length);
+
 // Logs, flushes and terminates the process.
 [[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 

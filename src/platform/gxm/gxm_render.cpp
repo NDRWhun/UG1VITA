@@ -571,6 +571,8 @@ render::Frame* FrameRenderer::beginFrame(uint32_t width, uint32_t height)
         if (timed)
             perf::event(perf::EventFenceWaitUs, perf::now() - start);
         s.inFlight = false;
+        // A worker whose job was taken over may still read the slot's draws.
+        waitRecorders();
         m_completed = std::max(m_completed, s.frame.index);
     }
     completedFrame();
@@ -1752,6 +1754,15 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
         perf::renderPart(perf::RenderSceneCount, frame.sceneCount);
         perf::renderPart(perf::RenderDrawCount, frame.drawCount);
     }
+    // A worker whose job the previous frame took over may still read the plan, order and programs changed below.
+    waitRecorders();
+    if (parts)
+    {
+        const uint32_t now = perf::now();
+        perf::renderPart(perf::RenderLists, now - mark);
+        perf::renderPart(perf::RenderListWait, now - mark);
+        mark = now;
+    }
     planFrame(frame, stretchDirect);
     Shown shown = {};
     shown.presentScene = presentScene(frame);
@@ -2015,6 +2026,7 @@ void FrameRenderer::initLists()
             delete w;
             break;
         }
+        w->index = uint8_t(m_workers.size());
         m_workers.push_back(w);
     }
     if (m_workers.empty())
@@ -2088,38 +2100,118 @@ int FrameRenderer::workerEntry(void* worker)
     return 0;
 }
 
+void FrameRenderer::beginWorkerFrame(Worker& w, const render::Frame& frame)
+{
+    if (w.frame == frame.index)
+        return;
+    w.frame = frame.index;
+    w.recorder.data.begin(frame.index, &finished, this);
+    w.vdm.begin(frame.index, &finished, this);
+    w.vertex.begin(frame.index, &finished, this);
+    w.fragment.begin(frame.index, &finished, this);
+    w.recorder.words.reset();
+}
+
 // Claims jobs until none is left. A worker woken late finds the current frame's jobs, or none.
 void FrameRenderer::runJobs(Worker& w)
 {
     while (true)
     {
         const render::Frame* frame;
-        uint32_t index;
+        uint32_t index, generation;
+        Job job;
         {
             LockGuard guard(*m_jobLock);
             if (m_stop || m_nextJob >= m_jobs.size())
                 return;
             index = m_nextJob++;
             frame = m_jobFrame;
+            generation = m_jobGeneration;
+            m_jobs[index].state = JobClaimed;
+            m_jobs[index].worker = w.index;
+            job = m_jobs[index];
+            w.abandon.store(false, std::memory_order_relaxed);
+            ++m_recording;
         }
-        if (w.frame != frame->index)
-        {
-            w.frame = frame->index;
-            w.recorder.data.begin(frame->index, &finished, this);
-            w.vdm.begin(frame->index, &finished, this);
-            w.vertex.begin(frame->index, &finished, this);
-            w.fragment.begin(frame->index, &finished, this);
-            w.recorder.words.reset();
-        }
-        const bool ok = recordJob(w, *frame, m_jobs[index]);
-        LockGuard guard(*m_jobLock);
-        m_jobs[index].ok = ok;
-        if (++m_doneJobs == m_jobs.size())
-            m_jobsDone->signal();
+        beginWorkerFrame(w, *frame);
+        SceGxmCommandList list;
+        const bool ok = recordJob(w, *frame, job, &list);
+        finishJob(w, generation, index, ok, list);
     }
 }
 
-bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& job)
+void FrameRenderer::finishJob(Worker& w, uint32_t generation, uint32_t index, bool ok, const SceGxmCommandList& list)
+{
+    LockGuard guard(*m_jobLock);
+    --m_recording;
+    const bool stolen = m_stealing == index;
+    if (w.index == 0 && stolen)
+        m_stealing = NoJob;
+    if (generation == m_jobGeneration && m_jobs[index].state != JobDone)
+    {
+        Job& job = m_jobs[index];
+        job.ok = ok;
+        job.list = list;
+        job.state = JobDone;
+        // The other recorder of the job stops: the claiming worker, or the render thread stealing it.
+        if (stolen)
+            m_workers[w.index == 0 ? job.worker : 0]->abandon.store(true, std::memory_order_relaxed);
+        ++m_doneJobs;
+    }
+    m_jobsDone->broadcast();
+}
+
+void FrameRenderer::stealJobs(const render::Frame& frame)
+{
+    Worker& self = *m_workers[0];
+    const bool timed = perf::hitch();
+    while (true)
+    {
+        uint32_t index = NoJob, generation;
+        Job job;
+        {
+            LockGuard guard(*m_jobLock);
+            if (m_doneJobs >= m_jobs.size())
+                return;
+            for (uint32_t i = 0; i < m_jobs.size() && index == NoJob; ++i)
+            {
+                if (m_jobs[i].state == JobClaimed && m_jobs[i].worker != 0)
+                    index = i;
+            }
+            if (index == NoJob)
+            {
+                m_jobsDone->wait();
+                continue;
+            }
+            m_stealing = index;
+            generation = m_jobGeneration;
+            job = m_jobs[index];
+            self.abandon.store(false, std::memory_order_relaxed);
+            ++m_recording;
+        }
+        beginWorkerFrame(self, frame);
+        SceGxmCommandList list;
+        const bool ok = recordJob(self, frame, job, &list);
+        if (timed)
+        {
+            perf::renderPart(perf::RenderListSteals, 1);
+            if (!self.abandon.load(std::memory_order_relaxed))
+                perf::renderPart(perf::RenderListStealsWon, 1);
+        }
+        finishJob(self, generation, index, ok, list);
+    }
+}
+
+void FrameRenderer::waitRecorders()
+{
+    if (!m_jobLock)
+        return;
+    LockGuard guard(*m_jobLock);
+    while (m_recording)
+        m_jobsDone->wait();
+}
+
+bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& job, SceGxmCommandList* list)
 {
     SceGxmContext* context = w.recorder.context;
     const ScenePlan& p = m_plan[job.scene];
@@ -2141,15 +2233,18 @@ bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& 
         sceGxmSetPrecomputedFragmentState(context, nullptr);
     }
     for (uint32_t n = job.begin; n < job.end; ++n)
+    {
+        // Every 8 draws: another recorder finished the job, this list is not used.
+        if (((n - job.begin) & 7) == 7 && w.abandon.load(std::memory_order_relaxed))
+            break;
         draw(w.recorder, frame, m_order[n]);
-    SceGxmCommandList list;
-    error = sceGxmEndCommandList(context, &list);
+    }
+    error = sceGxmEndCommandList(context, list);
     if (error < 0)
     {
         logError("gxm: sceGxmEndCommandList failed: 0x%08x", error);
         return false;
     }
-    const_cast<Job&>(job).list = list;
     return true;
 }
 
@@ -2173,22 +2268,23 @@ bool FrameRenderer::recordLists(const render::Frame& frame)
             for (uint32_t begin = 0; begin < p.orderCount; begin += size)
             {
                 const uint32_t end = std::min(p.orderCount, begin + size);
-                m_jobs.push_back(Job{ i, p.firstOrder + begin, p.firstOrder + end, false, {} });
+                m_jobs.push_back(Job{ i, p.firstOrder + begin, p.firstOrder + end, false, {}, JobFree, 0 });
             }
             p.jobCount = uint32_t(m_jobs.size()) - p.firstJob;
         }
         m_jobFrame = &frame;
         m_nextJob = 0;
         m_doneJobs = 0;
+        ++m_jobGeneration;
     }
     if (threads > 1)
         m_wake->post(int(threads - 1));
     runJobs(*m_workers[0]);
+    // A worker that stalls in its job (another thread runs on its core) is not waited for: this thread records the
+    // job too, and the first to finish gives the job its list.
     const bool timed = perf::hitch();
     const uint32_t start = timed ? perf::now() : 0;
-    LockGuard guard(*m_jobLock);
-    while (m_doneJobs < m_jobs.size())
-        m_jobsDone->wait();
+    stealJobs(frame);
     if (timed)
         perf::renderPart(perf::RenderListWait, perf::now() - start);
     return true;

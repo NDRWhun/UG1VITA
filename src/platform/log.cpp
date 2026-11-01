@@ -100,6 +100,27 @@ void logInfo(const char* fmt, ...)
     va_end(args);
 }
 
+void logBlock(const char* text, unsigned length)
+{
+    if (!length)
+        return;
+    if (s_logMutex >= 0)
+        sceKernelLockMutex(s_logMutex, 1, nullptr);
+    if (s_console)
+        sceClibPrintf("%.*s", int(length), text);
+    if (s_logPath)
+    {
+        int file = open(s_logPath, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (file >= 0)
+        {
+            write(file, text, length);
+            close(file);
+        }
+    }
+    if (s_logMutex >= 0)
+        sceKernelUnlockMutex(s_logMutex, 1);
+}
+
 void logError(const char* fmt, ...)
 {
     va_list args;
