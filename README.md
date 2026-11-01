@@ -37,7 +37,7 @@
 - PS Vita with HENkaku / Ensō and [VitaShell](https://github.com/TheOfficialFloW/VitaShell)
 - About 1.5 GB free on the memory card
 - Overclocking is mandatory, for example with [PSVshell](https://github.com/Electry/PSVshell)
-- Optional: [CapUnlocker](https://github.com/GrapheneCt/CapUnlocker), which lets the game use one more CPU core
+- [CapUnlocker](https://github.com/GrapheneCt/CapUnlocker) is highly recommended
 
 ## Install
 
