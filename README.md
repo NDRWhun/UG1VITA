@@ -17,7 +17,8 @@ A fan port of the PC version of Need for Speed Underground (2003): native widesc
 ## What you need
 
 - A PS Vita with custom firmware (HENkaku / Ensō) and [VitaShell](https://github.com/TheOfficialFloW/VitaShell).
-- [PSVshell](https://github.com/Electry/PSVshell), with the CPU set to **500 MHz**. The game is tuned for that speed.
+- Optional: if you like, an overclocking plugin such as [PSVshell](https://github.com/Electry/PSVshell) can help the
+  game run more smoothly. Whether you use one is entirely up to you.
 - Optional: CapUnlocker, which lets the game use one more CPU core.
 - Your own copy of **Need for Speed Underground for PC, version 1.4**. Other versions are refused.
 - About 1.5 GB of free space on the memory card.
