@@ -37,10 +37,9 @@ $PgoUse = @($PgoUse | Where-Object { $_ } | ForEach-Object { (Resolve-Path $_).P
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'env.ps1')
 if ($Compiler -eq 'clang') {
-    $clang = if ($env:NFSU_LLVM) { Join-Path $env:NFSU_LLVM 'bin/clang*' } else { $null }
-    if (-not ($clang -and (Test-Path $clang)) -and -not (Get-Command clang -ErrorAction SilentlyContinue)) {
-        throw ('clang not found: set NFSU_LLVM to the LLVM root (environment or tools/env.local.ps1), or build ' +
-               'with -Compiler gcc.')
+    if (-not $env:NFSU_LLVM -or -not (Test-Path (Join-Path $env:NFSU_LLVM 'bin/clang*'))) {
+        if ($env:NFSU_LLVM) { Write-Host "NFSU_LLVM=$env:NFSU_LLVM has no bin/clang: using the pinned LLVM" }
+        $env:NFSU_LLVM = Get-Dependency 'llvm'
     }
     # The profile of NFSU_PGO_PROFILE when no profile was given and none is being made.
     if (-not $PgoUse -and -not $PgoGenerate -and -not $NoPgo -and $env:NFSU_PGO_PROFILE) {

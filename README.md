@@ -108,8 +108,9 @@ menu_widescreen=off
 
 ## Build
 
-Requirements: [VitaSDK](https://vitasdk.org) (`VITASDK`), [LLVM](https://github.com/llvm/llvm-project/releases)
-with clang and lld (`NFSU_LLVM`), Python 3, PowerShell. Variables can also go in `tools/env.local.ps1`.
+Requirements: [Python 3](https://www.python.org/downloads/) and PowerShell (part of Windows). Everything else is
+downloaded on the first build: [VitaSDK](https://vitasdk.org) and [LLVM](https://llvm.org) into `.deps/`, CMake and
+Ninja with pip. To use your own VitaSDK or LLVM, set `VITASDK` or `NFSU_LLVM` (or put them in `tools/env.local.ps1`).
 
 ```powershell
 tools/build.ps1 -Game "<folder with Speed.exe>"   # -> build-release-clang/NFSUG1VITA.vpk

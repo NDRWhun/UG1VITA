@@ -1,20 +1,14 @@
 # Sets up the toolchain environment for this shell. Dot-source it: . tools/env.ps1
 # Machine-specific settings come from the environment or from tools/env.local.ps1 (ignored by git):
-#   $env:VITASDK          = '<VitaSDK root>'                    required (https://vitasdk.org)
+#   $env:VITASDK          = '<VitaSDK root>'                    optional: else the pinned VitaSDK in .deps/
 #   $env:NFSU_GAME_DIR    = '<the game folder with Speed.exe>'  optional: else tools/build.ps1 -Game
-#   $env:NFSU_LLVM        = '<LLVM root, with bin/clang>'       required for the default clang build (else -Compiler gcc)
+#   $env:NFSU_LLVM        = '<LLVM root, with bin/clang>'       optional: else the pinned LLVM in .deps/ (clang build)
 #   $env:NFSU_PGO_PROFILE = '<merged .profdata>'                optional: the clang build's default PGO profile
-# Python 3 must be installed; CMake and Ninja are installed with pip when they are missing.
+# Python 3 must be installed; CMake and Ninja are installed with pip when they are missing, VitaSDK and LLVM are
+# downloaded by tools/deps.py.
 
 $local = Join-Path $PSScriptRoot 'env.local.ps1'
 if (Test-Path $local) { . $local }
-
-if (-not $env:VITASDK -or -not (Test-Path (Join-Path $env:VITASDK 'share/vita.toolchain.cmake'))) {
-    throw ('VitaSDK not found. Install it (https://vitasdk.org) and set VITASDK to its root, as an environment ' +
-           'variable or in tools/env.local.ps1.')
-}
-$bin = Join-Path $env:VITASDK 'bin'
-if (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $bin) { $env:PATH = $bin + [IO.Path]::PathSeparator + $env:PATH }
 
 # The first python on PATH that runs Python 3; the Microsoft Store's python alias only prints an install hint.
 function Get-Python3 {
@@ -36,6 +30,23 @@ function Invoke-Python {
     & (Get-Python3) @args | Write-Host
     return $LASTEXITCODE
 }
+
+# Folder of a pinned dependency from tools/deps.py (downloaded on first use).
+function Get-Dependency([string]$Name) {
+    $ErrorActionPreference = 'Continue'
+    $folder = & (Get-Python3) -I (Join-Path $PSScriptRoot 'deps.py') $Name 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.Exception.Message } else { $_ }
+    } | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0 -or -not $folder -or -not (Test-Path $folder)) { throw "Downloading $Name failed" }
+    return $folder
+}
+
+if (-not $env:VITASDK -or -not (Test-Path (Join-Path $env:VITASDK 'share/vita.toolchain.cmake'))) {
+    if ($env:VITASDK) { Write-Host "VITASDK=$env:VITASDK has no share/vita.toolchain.cmake: using the pinned VitaSDK" }
+    $env:VITASDK = Get-Dependency 'vitasdk'
+}
+$bin = Join-Path $env:VITASDK 'bin'
+if (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $bin) { $env:PATH = $bin + [IO.Path]::PathSeparator + $env:PATH }
 
 # CMake and Ninja from pip when they are not on PATH; pip's script folders are added to PATH for this shell.
 $missing = @('cmake', 'ninja') | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) }

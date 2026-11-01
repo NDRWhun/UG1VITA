@@ -60,3 +60,6 @@ __pycache__/
 
 # Python packages fetched by tools/recompiler/bootstrap.py
 /.pydeps/
+
+# VitaSDK and LLVM fetched by tools/deps.py
+/.deps/
