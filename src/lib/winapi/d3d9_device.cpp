@@ -362,14 +362,23 @@ render::Scene* Device::scene()
     return &s;
 }
 
-uint16_t Device::viewportIndex(render::Frame& f, const render::Viewport& viewport)
+bool Device::viewportIndex(render::Frame& f, const render::Viewport& viewport, uint16_t* index)
 {
     if (f.viewportCount && sameWords(&f.viewports[f.viewportCount - 1], &viewport, sizeof(viewport) / 4))
-        return uint16_t(f.viewportCount - 1);
+    {
+        *index = uint16_t(f.viewportCount - 1);
+        return true;
+    }
     if (f.viewportCount == f.viewportCapacity)
-        return uint16_t(f.viewportCount - 1);
+    {
+        if (!m_frameFull)
+            pf::logError("d3d9: frame %u: viewport limit reached, draws dropped", f.index);
+        m_frameFull = true;
+        return false;
+    }
     f.viewports[f.viewportCount] = viewport;
-    return uint16_t(f.viewportCount++);
+    *index = uint16_t(f.viewportCount++);
+    return true;
 }
 
 // Records the geometry, the textures (marked read by this frame) and the active effect pass; the render thread
@@ -397,6 +406,11 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
         m_frameFull = true;
         return D3D_OK;
     }
+    const D3DVIEWPORT9& vp = m_state.viewport;
+    uint16_t viewport;
+    if (!viewportIndex(*f, render::Viewport{ float(vp.X), float(vp.Y), float(vp.Width), float(vp.Height), vp.MinZ,
+                                             vp.MaxZ }, &viewport))
+        return D3D_OK;
     if (m_stateDirty)
     {
         recordWords(CmdFixedState, static_cast<const FixedState*>(&m_state), sizeof(FixedState) / 4);
@@ -409,7 +423,6 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
     d.indices = indices;
     d.count = inputs;
     d.vertexCount = count;
-    const D3DVIEWPORT9& vp = m_state.viewport;
     if (s_dumping)
     {
         const Object* t = m_state.textures[0];
@@ -426,8 +439,7 @@ HRESULT Device::draw(WinApplication* app, x86::CPU& cpu, DWORD type, UINT primit
                     (unsigned long)rs[D3DRS_ALPHATESTENABLE], (unsigned long)rs[D3DRS_ZENABLE],
                     (unsigned long)rs[D3DRS_ZWRITEENABLE], (unsigned long)m_state.fvf, int(m_effectPass != nullptr));
     }
-    d.viewport = viewportIndex(*f, render::Viewport{ float(vp.X), float(vp.Y), float(vp.Width), float(vp.Height),
-                                                     vp.MinZ, vp.MaxZ });
+    d.viewport = viewport;
 
     uint32_t* w = m_stream->append(1 + sizeof(DrawRecord) / 4);
     w[0] = CmdDraw;
@@ -980,6 +992,9 @@ HRESULT Device::Clear(WinApplication* app, x86::CPU& cpu, DWORD count, const D3D
             m_frameFull = true;
             return D3D_OK;
         }
+        uint16_t viewport;
+        if (!viewportIndex(*f, render::Viewport{ 0, 0, float(s->width), float(s->height), 0.0f, 1.0f }, &viewport))
+            return D3D_OK;
         render::DrawCall& d = f->draws[f->drawCount];
         memset(&d, 0, sizeof(d));
         render::VertexLayout layout;
@@ -1014,7 +1029,7 @@ HRESULT Device::Clear(WinApplication* app, x86::CPU& cpu, DWORD count, const D3D
         d.count = 4;
         d.vertexCount = 4;
         d.vertexConstants = render::NoConstants;
-        d.viewport = viewportIndex(*f, render::Viewport{ 0, 0, float(s->width), float(s->height), 0.0f, 1.0f });
+        d.viewport = viewport;
         ++f->drawCount;
         s->drawCount = f->drawCount - s->firstDraw;
     }

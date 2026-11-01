@@ -927,7 +927,8 @@ private:
     template< typename T > void bindSlot(T*& slot, T* object);
     render::Frame* frame(WinApplication* app, x86::CPU& cpu);
     render::Scene* scene();
-    uint16_t viewportIndex(render::Frame& frame, const render::Viewport& viewport);
+    // False when the frame's viewport table is full (the frame then takes no more draws).
+    bool viewportIndex(render::Frame& frame, const render::Viewport& viewport, uint16_t* index);
     // Records a state change for the render thread (header and one value word).
     void record(uint32_t header, DWORD value);
     void recordWords(uint32_t header, const void* payload, uint32_t words);
