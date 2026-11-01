@@ -26,7 +26,7 @@ struct Block
 
 struct State
 {
-    pf::LwMutex                                 mutex{"heap"};
+    pf::LwMutex                                 mutex{"heap", true};    // recursive for the report
     std::vector<x86::reg32>                     classSizes;     // ascending
     std::vector<std::vector<x86::reg32>>        freeLists;      // per class
     std::unordered_map<x86::reg32, Block>       blocks;         // live blocks by address
@@ -35,6 +35,7 @@ struct State
     x86::reg32                                  chunkNext = 0;  // next free byte of the last chunk
     x86::reg32                                  chunkEnd = 0;
     x86::reg32                                  used = 0;
+    x86::reg32                                  smallChunks = 0;
 
     State()
     {
@@ -47,7 +48,10 @@ struct State
             classSizes.push_back(size < LargeSize ? size : LargeSize);
         }
         freeLists.resize(classSizes.size());
+        MemMap::addReport(&report);
     }
+
+    static void report();
 
     int classOf(x86::reg32 size) const
     {
@@ -63,12 +67,20 @@ struct State
         return int(low);
     }
 
-    // Carves a block of a class out of the current chunk; a new chunk when it does not fit.
+    // Carves a block of a class out of the current chunk; a new chunk when it does not fit, smaller than ChunkSize
+    // when no free range of ChunkSize is left.
     x86::reg32 carve(x86::reg32 size)
     {
         if (chunkEnd - chunkNext < size)
         {
-            MemMap* chunk = new MemMap(ChunkSize, MemMap::Low, pf::perf::AllocHeapChunk);
+            MemMap* chunk = MemMap::tryCreate(ChunkSize, MemMap::Low, pf::perf::AllocHeapChunk);
+            if (!chunk)
+            {
+                if (!smallChunks++)
+                    pf::logInfo("heap: no free range of %u KB in guest memory, chunks of the block size from here",
+                                ChunkSize / 1024);
+                chunk = new MemMap(size, MemMap::Low, pf::perf::AllocHeapChunk);
+            }
             chunks.push_back(chunk);
             chunkNext = chunk->getBlockStart();
             chunkEnd = chunkNext + chunk->getBlockSize();
@@ -83,6 +95,24 @@ State& state()
 {
     static State s_state;
     return s_state;
+}
+
+// Called from the guest memory exhaustion report, possibly by the thread that holds the mutex.
+void State::report()
+{
+    State& s = state();
+    pf::LwLockGuard guard(s.mutex);
+    x86::reg32 chunkBytes = 0, freeBytes = 0, largeBytes = 0;
+    for (const MemMap* chunk : s.chunks)
+        chunkBytes += chunk->getBlockSize();
+    for (size_t c = 0; c < s.freeLists.size(); ++c)
+        freeBytes += x86::reg32(s.freeLists[c].size()) * s.classSizes[c];
+    for (const auto& block : s.large)
+        largeBytes += block.second->getBlockSize();
+    pf::logInfo("memory: heap %u KB in live blocks; %u chunks %u KB (%u KB free in size classes, %u KB uncarved, %u "
+                "small); %u large blocks %u KB", s.used / 1024, unsigned(s.chunks.size()), chunkBytes / 1024,
+                freeBytes / 1024, (s.chunkEnd - s.chunkNext) / 1024, s.smallChunks, unsigned(s.large.size()),
+                largeBytes / 1024);
 }
 
 }
