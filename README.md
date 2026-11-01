@@ -10,7 +10,7 @@
   <b>Need for Speed Underground, on the PS Vita</b>
   <br />
   <br />
-  A fan port of the PC version of Need for Speed Underground (2003) (US): native widescreen, Vita controls, 30 fps.
+  A fan port of the PC version of Need for Speed Underground (2003, US and European versions): native widescreen, Vita controls, 30 fps.
   <br />
   <br />
   <a href="#install">Install</a>
@@ -32,7 +32,7 @@
 
 ## Requirements
 
-- Need for Speed Underground for PC, **US, version 1.4** (your own copy)
+- Need for Speed Underground for PC, **US or European, version 1.4** (your own copy)
 - The game's `Speed.exe` must have the **no-DVD patch** applied
 - PS Vita with HENkaku / Ensō and [VitaShell](https://github.com/TheOfficialFloW/VitaShell)
 - About 1.5 GB free on the memory card

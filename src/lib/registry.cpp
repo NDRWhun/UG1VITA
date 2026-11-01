@@ -133,7 +133,7 @@ void store(Key* key, const std::string& name, x86::reg32 type, const void* data,
 
 static void loadFile(const char* path);
 
-// Values a retail install provides that the game reads;
+// Values a retail install provides that the game reads, the language under the key of either region;
 // the file's own values win. Not seeded on purpose: "CD Drive" (a failed open would then retry on a CD and run the
 // insert-disc loop) and "Install Dir" (it only feeds the unused file cache); the cache sizes and
 // StreamingInstall, whose defaults the game handles. ~MHz matches the 500 MHz time stamp counter, so the EA
@@ -141,8 +141,8 @@ static void loadFile(const char* path);
 static void seedDefaults()
 {
     static const char language[] = "English US";
-    Key* game = find(root(HKEY_LOCAL_MACHINE), "Software\\EA Games\\Need For Speed Underground", true);
-    setDefault(game, "Language", REG_SZ, language, sizeof(language));
+    for (const char* path : { "Software\\EA Games\\Need For Speed Underground", "Software\\EA Games\\NFS Underground" })
+        setDefault(find(root(HKEY_LOCAL_MACHINE), path, true), "Language", REG_SZ, language, sizeof(language));
     const x86::reg32 mhz = x86::TimestampMhz;
     Key* cpu = find(root(HKEY_LOCAL_MACHINE), "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", true);
     setDefault(cpu, "~MHz", REG_DWORD, &mhz, sizeof(mhz));

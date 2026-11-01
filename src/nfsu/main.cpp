@@ -2,6 +2,7 @@
 #include "bench.h"
 #include "phases.h"
 #include "prompts.h"
+#include "region.h"
 
 #include <lib/file.h>
 #include <lib/gamepad.h>
@@ -53,7 +54,8 @@ static const char* s_guestGameFolder = "C:\\";
 static const char* s_guestExePath = "C:\\Speed.exe";
 static const char* s_commandLine = "\"C:\\Speed.exe\"";
 
-// Reads the executable. A file other than the one the code was generated from is used too; the log names it.
+// Reads the executable. A file other than the one the code was generated from is used too when its data matches
+// (imageSections); the log names it.
 static bool loadExecutable(std::vector<uint8_t>& image)
 {
     const std::string exePath = dataPath(s_exeName);
@@ -93,7 +95,10 @@ static uint32_t imageWord(const std::vector<uint8_t>& image, size_t offset, size
 // The headers and the raw data of the sections at their guest addresses, read from the executable's own section
 // table. Only the sections of the generated layout are taken, each clipped to its size there; each also gets an
 // entry without data that covers its whole size (the arena is zeroed, so the rest of a section reads as zero).
-static bool imageSections(const std::vector<uint8_t>& image, std::vector<win32::Section>& sections)
+// Sections with a SHA-256 in the layout (all but code) must match it, or the executable must be one of another
+// region whose .rdata and .data are then converted into region.
+static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Converted& region,
+                          std::vector<win32::Section>& sections)
 {
     const size_t pe = imageWord(image, 0x3c, 4);
     if (imageWord(image, 0, 2) != 0x5a4d || imageWord(image, pe, 4) != 0x4550)
@@ -109,11 +114,18 @@ static bool imageSections(const std::vector<uint8_t>& image, std::vector<win32::
     }
     const size_t count = imageWord(image, pe + 6, 2);
     const size_t table = pe + 24 + imageWord(image, pe + 20, 2);
-    sections.push_back(win32::Section{ image.data(), nfsu::layout::imageBase,
-                                       x86::reg32(std::min<size_t>(nfsu::layout::headerSize, image.size())) });
-    for (const nfsu::layout::ImageSection& s : nfsu::layout::sections)
+    constexpr size_t SectionCount = sizeof(nfsu::layout::sections) / sizeof(nfsu::layout::sections[0]);
+    size_t rawOffsets[SectionCount], rawSizes[SectionCount];
+    std::string hashes[SectionCount];
+    const char* targetRdata = "";
+    const char* targetData = "";
+    const char* rdata = "";
+    const char* data = "";
+    size_t rdataIndex = 0, dataIndex = 0;
+    bool same = true;
+    for (size_t i = 0; i < SectionCount; ++i)
     {
-        const x86::reg32 size = s.virtualSize > s.rawSize ? s.virtualSize : s.rawSize;
+        const nfsu::layout::ImageSection& s = nfsu::layout::sections[i];
         size_t entry = table;
         while (entry < table + count * 40 && imageWord(image, entry + 12, 4) != s.address - imageBase)
             entry += 40;
@@ -122,15 +134,57 @@ static bool imageSections(const std::vector<uint8_t>& image, std::vector<win32::
             pf::logError("%s has no section at 0x%08x (%s): not version 1.4", s_exeName, s.address, s.name);
             return false;
         }
-        const size_t rawOffset = imageWord(image, entry + 20, 4);
-        const size_t rawSize = imageWord(image, entry + 16, 4);
-        if (rawOffset < image.size() && rawSize)
+        rawOffsets[i] = imageWord(image, entry + 20, 4);
+        rawSizes[i] = imageWord(image, entry + 16, 4);
+        if (!*s.sha256)
+            continue;
+        if (rawSizes[i] >= s.rawSize && rawOffsets[i] <= image.size() && image.size() - rawOffsets[i] >= s.rawSize)
+            hashes[i] = pf::sha256Hex(image.data() + rawOffsets[i], s.rawSize);
+        same = same && hashes[i] == s.sha256;
+        if (!strcmp(s.name, ".rdata"))
         {
-            const size_t bytes = std::min<size_t>({ rawSize, size, image.size() - rawOffset });
-            sections.push_back(win32::Section{ image.data() + rawOffset, s.address, x86::reg32(bytes) });
+            targetRdata = s.sha256;
+            rdata = hashes[i].c_str();
+            rdataIndex = i;
+        }
+        else if (!strcmp(s.name, ".data"))
+        {
+            targetData = s.sha256;
+            data = hashes[i].c_str();
+            dataIndex = i;
+        }
+    }
+    const bool converted = !same && *rdata && *data
+        && nfsu::region::convert(targetRdata, targetData, rdata, data, image.data() + rawOffsets[rdataIndex],
+                                 image.data() + rawOffsets[dataIndex], region);
+    if (!same && !converted)
+    {
+        pf::logError("%s: a version 1.4 build that is not supported (supported: the US build and the regions in "
+                     "region.cpp)", s_exeName);
+        return false;
+    }
+    if (converted)
+        pf::logInfo("%s: %s version 1.4, its data converted", s_exeName, region.name);
+    sections.push_back(win32::Section{ image.data(), nfsu::layout::imageBase,
+                                       x86::reg32(std::min<size_t>(nfsu::layout::headerSize, image.size())) });
+    for (size_t i = 0; i < SectionCount; ++i)
+    {
+        const nfsu::layout::ImageSection& s = nfsu::layout::sections[i];
+        const x86::reg32 size = s.virtualSize > s.rawSize ? s.virtualSize : s.rawSize;
+        const std::vector<uint8_t>* replaced = !converted ? nullptr
+            : i == rdataIndex ? &region.rdata : i == dataIndex ? &region.data : nullptr;
+        if (replaced)
+            sections.push_back(win32::Section{ replaced->data(), s.address,
+                                               x86::reg32(std::min<size_t>(replaced->size(), size)) });
+        else if (rawOffsets[i] < image.size() && rawSizes[i])
+        {
+            const size_t bytes = std::min<size_t>({ rawSizes[i], size, image.size() - rawOffsets[i] });
+            sections.push_back(win32::Section{ image.data() + rawOffsets[i], s.address, x86::reg32(bytes) });
         }
         sections.push_back(win32::Section{ nullptr, s.address, size });
     }
+    for (const nfsu::region::Variable& v : region.variables)
+        sections.push_back(win32::Section{ reinterpret_cast<const x86::reg8*>(&v.value), v.address, 4 });
     return true;
 }
 
@@ -321,8 +375,9 @@ int main(int, char**)
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     std::vector<uint8_t> image;
+    nfsu::region::Converted region;
     std::vector<win32::Section> sections;
-    if (!loadExecutable(image) || !imageSections(image, sections))
+    if (!loadExecutable(image) || !imageSections(image, region, sections))
         pf::fatal("the game executable is missing or not version 1.4 (see the log)");
     if (!pf::gxm::Device::get().init())
         pf::fatal("graphics initialisation failed");
@@ -339,6 +394,7 @@ int main(int, char**)
         nfsu::Application app(s_commandLine, sections);
         std::vector<win32::Section>().swap(sections);
         std::vector<uint8_t>().swap(image);
+        region = nfsu::region::Converted();
         setPadBindings();
         win32::MemMap::addReport(reportPools);
         setEnvmapSchedule();

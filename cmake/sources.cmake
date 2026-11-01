@@ -101,6 +101,7 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/flares.cpp
   src/nfsu/flush.cpp
   src/nfsu/draw.cpp
+  src/nfsu/region.cpp
   src/nfsu/hitch.cpp
   src/nfsu/mathfn.cpp
   src/nfsu/load.cpp
