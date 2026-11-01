@@ -116,9 +116,9 @@ reg32 allocate()
     return 0;
 }
 
-// The call eViewPlatInterface::Render (guest 0x40c910 at 0x44685e). The guest pushes, right to left,
-// light-or-extra, arg3, model, view, with eax = flags; the function reads eax, [esp+4] = view, [esp+8] = model.
-// arg3 and the fourth slot are the matrix and the light in the light path, or [view+0x54] and the matrix (0) in the
+// The call eViewPlatInterface::Render (guest 0x40c910 at 0x44685e). The guest pushes, right to left, 0 (the bone
+// palette), slotD, slotC, model, view, with eax = flags; the function reads eax, [esp+4] = view, [esp+8] = model.
+// slotC and slotD are the matrix and the light context in the matrix path, or 0x78bcc0 and [view+0x54] in the
 // no-matrix path.
 void submit(win32::WinApplication* app, x86::CPU& cpu, reg32 flags, reg32 view, reg32 model, reg32 slotC, reg32 slotD)
 {
@@ -129,6 +129,7 @@ void submit(win32::WinApplication* app, x86::CPU& cpu, reg32 flags, reg32 view, 
     rc::st32(esp + 8, model);
     rc::st32(esp + 12, slotC);
     rc::st32(esp + 16, slotD);
+    rc::st32(esp + 20, 0);
     c.esp = esp;
     c.eax = flags;
     sub_40c910(app, c);
