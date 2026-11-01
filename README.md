@@ -1,202 +1,100 @@
-<a id="readme-top"></a>
-
 <div align="center">
 
 <img src="assets/logo.png" alt="NFSUG1VITA" width="128" height="128">
 
-<h3 align="center">NFSUG1VITA</h3>
+<h3>NFSUG1VITA</h3>
 
-<p align="center">
-  <b>Need for Speed Underground, on the PS Vita</b>
-  <br />
-  <br />
-  A static recompilation of Need for Speed Underground (PC, 2003) to the PS Vita, with a native sceGxm backend.
-  <br />
-  <br />
-  <a href="#setup-for-players">Setup</a>
-  &nbsp;·&nbsp;
-  <a href="#controls">Controls</a>
-  &nbsp;·&nbsp;
-  <a href="../../issues">Report Bug</a>
-</p>
+<b>Need for Speed Underground on the PS Vita</b>
 
-[![issues][issues-shield]][issues-url]&nbsp;[![last commit][commit-shield]][commit-url]
-
-[![platform][platform-shield]][platform-url]&nbsp;[![resolution][resolution-shield]][resolution-url]&nbsp;[![renderer][renderer-shield]][renderer-url]&nbsp;[![license][license-shield]][license-url]
+A fan port of the PC version of Need for Speed Underground (2003): native widescreen, Vita controls, 30 fps.
 
 </div>
 
-> **Status: in development.** The recompiler, the Win32 runtime and the Vita platform layer are in place; the game
-> does not run yet (the Direct3D 9 renderer is not written) and there is no release.
+> **Work in progress.** The game is playable. Expect bugs; please report them on the
+> [issues page](../../issues). There are no official downloads yet, so you build the game yourself (see
+> [Building](#building)).
 
-<details>
-  <summary>Table of Contents</summary>
-  <ol>
-    <li><a href="#setup-for-players">Setup (for players)</a></li>
-    <li><a href="#controls">Controls</a></li>
-    <li><a href="#settings">Settings</a></li>
-    <li><a href="#known-issues">Known issues</a></li>
-    <li><a href="#build-for-developers">Build (for developers)</a></li>
-    <li><a href="#credits">Credits</a></li>
-    <li><a href="#license">License</a></li>
-  </ol>
-</details>
+## What you need
 
-## Setup (for players)
+- A PS Vita with custom firmware (HENkaku / Ensō) and [VitaShell](https://github.com/TheOfficialFloW/VitaShell).
+- [PSVshell](https://github.com/Electry/PSVshell), with the CPU set to **500 MHz**. The game is tuned for that speed.
+- Optional: CapUnlocker, which lets the game use one more CPU core.
+- Your own copy of **Need for Speed Underground for PC, version 1.4**. Other versions are refused.
+- About 1.5 GB of free space on the memory card.
 
-You need your own copy of Need for Speed Underground for PC, version 1.4: its `Speed.exe` must have the SHA-256
-`c0fad450912952f53809a54690d235aa8b4e25b9f46650693c7cbee1b4c074b7` (other versions are refused).
+## Installing
 
-- The contents of the game folder (`Speed.exe` and the data folders) go directly to `ux0:data/NFSUG1VITA/`.
-- Performance baseline: the ARM clock overclocked to 500 MHz with PSVshell.
-- CapUnlocker is optional: with it, some guest threads move to core 3.
+1. Install `NFSUG1VITA.vpk` with VitaShell.
+2. On your PC, open the folder where the game is installed (the one with `Speed.exe`).
+3. Copy **everything inside that folder** to `ux0:data/NFSUG1VITA/` on the Vita (VitaShell's FTP or USB mode works).
+   `Speed.exe` must end up directly at `ux0:data/NFSUG1VITA/Speed.exe`.
+4. Start the game from the home screen.
 
-There is no VPK to install yet.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+If the game closes right away, check `ux0:data/NFSUG1VITA/nfsug1vita.log`: it says what is missing.
 
 ## Controls
 
-Not final yet.
+| Driving | | Menus | |
+|---|---|---|---|
+| Left stick / D-pad left-right | Steer | D-pad | Move |
+| R | Accelerate | ✕ | Select |
+| L | Brake / reverse | ○ | Back |
+| ✕ | Nitrous | △ | Extra option on the screen (Customize, Stock, …) |
+| □ | Handbrake | START | Start / skip |
+| ○ | Look back | | |
+| △ | Change camera | | |
+| D-pad up / down, or rear touch right / left | Shift up / down | | |
+| SELECT | Reset car to the track | | |
+| START | Pause | | |
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+To quit, use the PS button.
 
 ## Settings
 
-Optional settings go in `ux0:data/NFSUG1VITA/nfsug1vita.cfg`, one `key=value` per line; lines starting with `#` are
-comments. The list of settings is not final yet. On/off settings also accept `true`/`false`, `yes`/`no` and `1`/`0`.
-A key that is not a setting is reported in the log as `config: unknown setting '<key>'` and ignored. The log is
-written to `ux0:data/NFSUG1VITA/nfsug1vita.log`.
+Settings are optional. Create a text file `ux0:data/NFSUG1VITA/nfsug1vita.cfg` with one setting per line, for example:
 
-| Key | Values | Default | Effect |
-|-----|--------|---------|--------|
-| `widescreen` | `on`, `off` | `on` | `on` renders at the display's 960x544 with the 4:3 vertical view and a wider horizontal one, and centres the 2D screens at 4:3; `off` keeps the game's resolution option (800x600 by default) |
-| `hud_widescreen` | `on`, `off` | `on` | `on` puts the race HUD's elements and the track map against the screen edge on their side at the same scale and stretches full-screen 2D (fades, backgrounds) to the full width during races and track loading; menus stay centred. `off` keeps the whole HUD centred at 4:3 |
-| `menu_widescreen` | `on`, `off` | `on` | `on` lays the menus out for the screen width in every part of the game (front end, pause menu, results, dialogs): panels spanning most of the screen reach both edges of the display, titles, menu columns, legends and icons near a screen edge move to that edge, bars between them stretch to stay joined, and dialogs, text, pictures and movies keep their shape; 2D placed off the 4:3 screen stays hidden. `off` keeps the menus centred at 4:3 |
-| `button_prompts` | `vita`, `pc` | `vita` | `vita` shows the Vita buttons where the game shows PC keys: Cross and Circle on the menu bar's Next and Back, Triangle on a screen's extra item (Customize, Performance, Stock, Default settings, Decal colour, Delete profile, the tutorials), which Triangle then presses in menus, and Vita button glyphs in the title screen's prompt, a loading tip and the controls screen; the Quit item is not shown (the PS button closes the game). `pc` keeps the game's PC prompts and menu bar. The glyphs are original art shipped in the VPK (`glyphs.bin`) |
-| `fit_4_3` | `stretch`, `pillarbox` | `stretch` | how a picture that is not 960x544 (`widescreen=off`) fills the display: stretched to the full display, or at its own aspect with black bars |
-| `frame_rate` | `30`, `60` | `30` | frame rate limit: every second display refresh, or every one with 60 or more |
-| `car_reflection_interval` | `1`-`6` | `1` | frames over which the highest car reflection level redraws its six cube faces (`1`: all six every frame, as the game does) |
-| `rear_touch` | `on`, `off` | `on` | rear touch pad input (left and right halves) |
-| `front_touch` | `on`, `off` | `on` | front touch screen input (top strip) |
+```
+menu_widescreen=off
+```
 
-Race benchmark: `benchmark=on` skips the front end and the movies and starts a circuit race in which the AI drives
-your car; a `bench: summary` line gives the fps and frame times from the start signal to the finish (the timing log
-stays off unless `benchmark_timing_log=on` or `timing_log=on`). Off by default; the other keys need `benchmark=on`:
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `benchmark_track` | 1001 | track number (1001-1008 are the circuits; 1001 is Market St.) |
-| `benchmark_laps` | 2 | laps, 1-10 |
-| `benchmark_opponents` | 3 | AI opponents, 0-3 |
-| `benchmark_seconds` | 0 | ends the measurement after this many seconds (0: at the finish) |
-| `benchmark_exit` | `off` | `on` quits the game after the summary |
-| `benchmark_timing_log` | `off` | `on` turns the timing log (`perf:` lines) on during the benchmark |
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+| Setting | Values | What it does |
+|---|---|---|
+| `widescreen` | `on` (default), `off` | Full 16:9 picture, or the original 4:3 one |
+| `menu_widescreen` | `on` (default), `off` | Menus laid out for the wide screen, or centred at 4:3 |
+| `hud_widescreen` | `on` (default), `off` | Race HUD at the screen edges, or centred at 4:3 |
+| `button_prompts` | `vita` (default), `pc` | Vita buttons on screen, or the original PC keys |
+| `rear_touch` | `on` (default), `off` | Gear shifting on the rear touch pad |
 
 ## Known issues
 
-- The game does not run yet: there is no Direct3D 9 renderer.
+- A few frames drop below 30 fps in busy moments of a race.
+- The 3D garage behind some menus can look washed out.
+- Online and LAN play are not available.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+## Building
 
-## Build (for developers)
-
-Needs [VitaSDK](https://vitasdk.org) (with `VITASDK` set, in the environment or in `tools/env.local.ps1`),
-[LLVM](https://github.com/llvm/llvm-project/releases) with clang and lld (`NFSU_LLVM`: its root), Python 3 and
-PowerShell (Windows PowerShell 5.1 or PowerShell 7). CMake and Ninja are installed with pip when they are missing;
-the recompiler's Python package (capstone) is installed automatically. VitaSDK provides the libraries and the
-packaging tools; the game is compiled with clang and ThinLTO.
-
-The generated recompilation (`src/nfsu/generated/`) and any game binary or data are not tracked: the build generates
-the code from your own `Speed.exe`. Only the version listed in `tools/recompiler/generate.py` is accepted (its SHA-256
-is checked).
+You need [VitaSDK](https://vitasdk.org), [LLVM](https://github.com/llvm/llvm-project/releases) (clang and lld),
+Python 3 and PowerShell, plus your own game folder (the code is generated from your `Speed.exe`). Set `VITASDK` and
+`NFSU_LLVM` to their folders (in the environment, or in `tools/env.local.ps1`), then run:
 
 ```powershell
-tools/build.ps1 -Game <folder with Speed.exe>   # -> build-release-clang/NFSUG1VITA.vpk; rebuilds only what changed
+tools/build.ps1 -Game "<your game folder>"
 ```
 
-With a profile (below), `tools/build.ps1 -PgoUse nfsu.profdata` builds the optimised game into
-`build-release-clangpgo/`; set `NFSU_PGO_PROFILE` to the .profdata to make that the plain `tools/build.ps1`
-(`-NoPgo`: without it). `-NoLto` builds without ThinLTO. The game folder can also come from `NFSU_GAME_DIR`; it is
-remembered for the next run. Without game files, `-DNFSU_RUNTIME_CHECK=ON` compiles the runtime alone. The shaders
-ship prebuilt in `shaders/gxp/`; the official PSP2 SDK (`host_tools/bin/psp2cgc`, `SCE_PSP2_SDK_DIR`) is only needed
-to change them.
-
-### Profile-guided optimisation
-
-With a profile from your own runs:
-
-1. `tools/build.ps1 -PgoGenerate` builds the instrumented game (`build-release-pgogen/`; slower, the
-   profile runtime is fetched for the LLVM version unless `NFSU_COMPILER_RT` names a compiler-rt source tree).
-   `-PgoList <file>` instruments only what a clang `-fprofile-list` file selects (`[llvm]`, `default:skip`, then
-   `source:*name.cpp=allow` and `function:*name*=allow` lines), for a smaller and faster instrumented game.
-2. Install it and play the scenes that matter (menus, races on several tracks, replays), or run the benchmark race
-   with `benchmark=on` and `benchmark_exit=on`. The game writes its counters to
-   `ux0:data/NFSUG1VITA/nfsu.profraw` every 30 seconds and at exit; the file holds the whole session. Copy it off
-   after each session (FTP, USB) under its own name, e.g. `run1.profraw`, and start the next session.
-3. Merge the runs (each weighs the same) and build with the profile:
-   `& "$env:NFSU_LLVM/bin/llvm-profdata" merge -o nfsu.profdata run*.profraw`, then
-   `tools/build.ps1 -PgoUse nfsu.profdata` (`build-release-clangpgo/`). The profile matches only the sources of the
-   instrumented build; functions changed since then are built without it.
-
-### gcc build
-
-`tools/build.ps1 -Compiler gcc` builds with VitaSDK's gcc into `build-release/` (no LLVM needed). Its own
-profile-guided optimisation:
-
-1. `tools/build.ps1 -Compiler gcc -PgoGenerate` builds the instrumented game (`build-release-gcov/`; edge counters
-   only, slower).
-2. Install it and play the scenes that matter. The game writes its counters to `ux0:data/NFSUG1VITA/nfsu.gcov` every
-   30 seconds and at exit; the file holds the whole session. Copy it off after each session under its own name, e.g.
-   `run1.gcov`.
-3. `tools/build.ps1 -Compiler gcc -PgoUse run1.gcov,run2.gcov` merges the runs with `gcov-tool merge-stream` into
-   `build-release-pgo/` and builds the optimised game there. The profile matches only the sources and options of
-   the instrumented build; functions changed since then are built without it.
-
-| Path | Contents |
-|------|----------|
-| `include/` | virtual x86 CPU (cpu/fpu/mmx), `lib/` runtime headers, `winapi/` shim headers, `platform/` |
-| `src/lib/` | runtime: guest memory, threads, Win32 shims, DirectDraw presentation |
-| `src/platform/` | Vita backend: gxm device and render thread, audio, input, sync, logging |
-| `src/nfsu/` | entry point (+ generated `generated/`) |
-| `shaders/` | Cg programs; `gxp/` holds their compiled binaries |
-| `tools/` | recompiler, generate, build and environment scripts |
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+The VPK is written to `build-release-clang/NFSUG1VITA.vpk`. The options are described at the top of
+`tools/build.ps1`.
 
 ## Credits
 
-- [Grarak](https://github.com/Grarak) — [psp2-tooling](https://github.com/Grarak/psp2-tooling), for profiling on
-  hardware, and [mh3-wii](https://github.com/Grarak/mh3-wii), a statically recompiled game running at full speed that
-  set the performance goal for this port.
-- [GrapheneCt](https://github.com/GrapheneCt) — CapUnlocker, which opens the fourth CPU core.
+- [Grarak](https://github.com/Grarak) — [psp2-tooling](https://github.com/Grarak/psp2-tooling) for profiling on the
+  Vita, and [mh3-wii](https://github.com/Grarak/mh3-wii), which set the performance goal for this port.
+- [GrapheneCt](https://github.com/GrapheneCt) — CapUnlocker.
 - EA Black Box — the original *Need for Speed Underground*.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## License
 
-The port's own code is MIT (see [LICENSE](LICENSE)); third-party parts keep their own licenses, see
-[THIRD_PARTY.md](THIRD_PARTY.md). The game is not part of this repository.
+The port's own code is MIT (see [LICENSE](LICENSE)); third-party parts keep their own licenses
+([THIRD_PARTY.md](THIRD_PARTY.md)). The game itself is not included.
 
-Unofficial, non-commercial fan port — not affiliated with or endorsed by Electronic Arts. *Need for Speed* is a
-trademark of Electronic Arts; you must own a legal copy to play.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- BADGES -->
-
-[issues-shield]: https://img.shields.io/github/issues/NDRWhun/NFSUG1VITA?label=issues&style=for-the-badge&labelColor=1a1f3d&color=2f7bff&logo=github&logoColor=white
-[issues-url]: ../../issues
-[commit-shield]: https://img.shields.io/github/last-commit/NDRWhun/NFSUG1VITA?label=updated&style=for-the-badge&labelColor=1a1f3d&color=ff3b5c
-[commit-url]: ../../commits/main
-[platform-shield]: https://img.shields.io/badge/PS%20Vita-native-2f7bff?style=for-the-badge&labelColor=1a1f3d&logo=playstation&logoColor=white
-[platform-url]: https://vitasdk.org
-[resolution-shield]: https://img.shields.io/badge/960x544-widescreen%20target-b44dff?style=for-the-badge&labelColor=1a1f3d
-[resolution-url]: #known-issues
-[renderer-shield]: https://img.shields.io/badge/renderer-sceGxm-ff3b5c?style=for-the-badge&labelColor=1a1f3d
-[renderer-url]: src/platform/gxm
-[license-shield]: https://img.shields.io/badge/license-MIT-ff3b5c?style=for-the-badge&labelColor=1a1f3d
-[license-url]: LICENSE
+Unofficial, non-commercial fan port, not affiliated with or endorsed by Electronic Arts. *Need for Speed* is a
+trademark of Electronic Arts. You must own the game to play.
