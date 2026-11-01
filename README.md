@@ -28,7 +28,7 @@
 
 </div>
 
-> **Status: playtesting.** The game is being tested before the final release. It's worth the wait!
+> **Version 0.9, playtesting.** The game is being tested before the final release. It's worth the wait!
 
 ## Requirements
 

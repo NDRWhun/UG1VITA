@@ -39,7 +39,8 @@ endif()
 
 set(VITA_APP_NAME "NFSUG1VITA")
 set(VITA_TITLEID  "NFSUG1VTA")
-set(VITA_VERSION  "00.01")
+set(NFSU_VERSION  "0.9")
+set(VITA_VERSION  "00.90")
 
 option(NFSU_LOG_DEBUG        "Verbose runtime logging" OFF)
 option(NFSU_ASSERT_SOFT      "Log failed assertions instead of trapping" OFF)
@@ -76,7 +77,7 @@ set(NFSU_COMMON_FLAGS
 )
 # Generated code only sees the stable defines; debug switches stay in the runtime to avoid full rebuilds.
 set(NFSU_DEFINES VITA __vita__ WITH_MMX)
-set(NFSU_RUNTIME_DEFINES ${NFSU_DEFINES})
+set(NFSU_RUNTIME_DEFINES ${NFSU_DEFINES} NFSU_VERSION="${NFSU_VERSION}")
 if(NFSU_LOG_DEBUG)
   list(APPEND NFSU_RUNTIME_DEFINES NFSU_LOG_DEBUG)
 endif()

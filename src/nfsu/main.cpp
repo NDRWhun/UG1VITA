@@ -267,7 +267,7 @@ int main(int, char**)
     mkdir("ux0:data", 0777);
     mkdir(s_dataDirectory.c_str(), 0777);
     pf::logInit(dataPath("nfsug1vita.log").c_str());
-    pf::logInfo("NFSUG1VITA starting");
+    pf::logInfo("NFSUG1VITA %s starting", NFSU_VERSION);
     pf::logInfo("clocks: arm %d MHz, bus %d MHz, gpu %d MHz, xbar %d MHz", scePowerGetArmClockFrequency(),
                 scePowerGetBusClockFrequency(), scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
     x86::mmxSelfTest();

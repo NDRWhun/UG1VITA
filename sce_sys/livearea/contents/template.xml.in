@@ -14,7 +14,7 @@
   <frame id="frame3">
     <liveitem>
       <text valign="bottom" align="left" text-align="left" text-valign="bottom" word-wrap="off" ellipsis="on">
-        <str size="22" color="#ffffff" shadow="on">v@VITA_VERSION@</str>
+        <str size="22" color="#ffffff" shadow="on">v@NFSU_VERSION@</str>
       </text>
     </liveitem>
   </frame>
