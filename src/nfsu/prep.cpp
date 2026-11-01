@@ -8,6 +8,7 @@
 #include "mathfn.h"
 #include "particles.h"
 #include "phases.h"
+#include "retstate.h"
 
 #include <platform/config.h>
 #include <platform/log.h>
@@ -259,7 +260,8 @@ void stuffNative(win32::WinApplication* app, x86::CPU& cpu)
 }
 
 // Shadow: the native path runs into the real light contexts, then the guest body runs from the entry state into a
-// restored allocator and the difference is reported. The light arena the native path wrote is saved and compared.
+// restored allocator and the difference is reported: the registers and flags the callers read at the return
+// (retstate), the allocator cursor and the light arena the native path wrote, which is saved first.
 struct Shadow
 {
     uint32_t calls = 0, differing = 0, logged = 0;
@@ -290,6 +292,7 @@ void stuffScenery(win32::WinApplication* app, x86::CPU& cpu)
     {
         const x86::CPU entry = cpu;
         const reg32 cursorBefore = rc::ld32(FrameCursor);
+        const reg32 refusedBefore = rc::ld32(FrameRefused);
         stuffNative(app, cpu);
         const reg32 cursorAfter = rc::ld32(FrameCursor);
         std::vector<reg8> nativeFill(cursorAfter - cursorBefore);
@@ -298,16 +301,25 @@ void stuffScenery(win32::WinApplication* app, x86::CPU& cpu)
         const x86::CPU nativeCpu = cpu;
         rc::st32(FrameCursor, cursorBefore);
         rc::st32(FrameOverflow, 0);
+        rc::st32(FrameRefused, refusedBefore);
         x86::CPU guest = entry;
         sub_446730_guest(app, guest);
         ++s_shadow.calls;
         char text[160] = {};
-        bool same = guest.eax == nativeCpu.eax && guest.edx == nativeCpu.edx
-                    && rc::ld32(FrameCursor) == cursorAfter;
-        if (!same)
-            snprintf(text, sizeof(text), "return eax 0x%08x/0x%08x edx 0x%08x/0x%08x cursor 0x%08x/0x%08x",
-                     unsigned(nativeCpu.eax), unsigned(guest.eax), unsigned(nativeCpu.edx), unsigned(guest.edx),
-                     unsigned(cursorAfter), unsigned(rc::ld32(FrameCursor)));
+        char state[120];
+        bool same = true;
+        if (!retstate::sameRegisters(retstate::registers(0x446730), guest, nativeCpu, state, sizeof(state))
+            || !retstate::sameFlags(retstate::flags(0x446730), guest, nativeCpu, state, sizeof(state)))
+        {
+            same = false;
+            snprintf(text, sizeof(text), "return %s", state);
+        }
+        else if (rc::ld32(FrameCursor) != cursorAfter)
+        {
+            same = false;
+            snprintf(text, sizeof(text), "cursor guest 0x%08x native 0x%08x", unsigned(rc::ld32(FrameCursor)),
+                     unsigned(cursorAfter));
+        }
         for (reg32 i = 0; same && i < nativeFill.size(); ++i)
         {
             const reg8 g = rc::ld8(cursorBefore + i);
