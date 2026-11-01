@@ -33,6 +33,7 @@
 ## Requirements
 
 - Need for Speed Underground for PC, **version 1.4** (your own copy; other versions are refused)
+- The game's `Speed.exe` must have the **no-DVD patch** applied
 - PS Vita with HENkaku / Ensō and [VitaShell](https://github.com/TheOfficialFloW/VitaShell)
 - About 1.5 GB free on the memory card
 - Overclocking is mandatory, for example with [PSVshell](https://github.com/Electry/PSVshell)
