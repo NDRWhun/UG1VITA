@@ -20,6 +20,10 @@ bool enabled();
 // state the benchmark measures in).
 bool racing();
 
+// Game thread: the race coordinator's state and the current race's stage (3 the countdown, 4 racing), ~0 without a
+// coordinator or race.
+void raceState(x86::reg32* coordinatorState, x86::reg32* raceStage);
+
 // Before guest code runs: sets the game's skip-front-end race settings and hooks the track table loader.
 void configure(win32::WinApplication& app);
 

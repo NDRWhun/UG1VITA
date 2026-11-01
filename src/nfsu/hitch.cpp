@@ -23,10 +23,9 @@ namespace
 
 namespace perf = pf::perf;
 
-// Game flow state: 3 in the front end, 6 from the race's start to its end.
+// Game flow state: 3 in the front end, 6 from the track load's end to the race's end.
 const x86::reg32 GameFlowState = 0x0077A920;
 const uint32_t FlowFrontEnd = 3;
-const uint32_t FlowRace = 6;
 
 const uint32_t RecordSlots = 8;
 const uint32_t MaxBuffered = 64;
@@ -46,10 +45,12 @@ enum Cause
     CauseFileWait, CauseCritSecWait, CauseObjectWait, CauseSleep, CauseFrameSlot, CausePreempted, CauseReleasedOther,
     // Waits and load calls inside the phases.
     CauseD3dQueue, CauseUploadWait, CauseReadBack, CauseGuestBlocks, CauseJdlz, CauseTextureCreate, CauseSkin,
+    CauseGpuGrowth,
     // Writing hitch lines.
     CauseHitchLog,
-    // Render thread.
-    CauseRenderThread, CauseDisplayQueue,
+    // Render thread parts.
+    CauseResolve, CauseRenderPlan, CausePrograms, CauseListRecord, CauseListWait, CauseRenderUploadWait,
+    CauseScenes, CauseRenderOffCpu, CauseRenderThreadRest, CauseDisplayQueue,
     CauseCount,
     CauseUnclear = CauseCount,  // no cause over MinExcessUs
     CauseNoRecord,              // no game frame record: a layer present, or the record is gone
@@ -57,15 +58,18 @@ enum Cause
 };
 const int FirstRelease = CauseFileWait;
 const int FirstInside = CauseD3dQueue;
-const int LastInside = CauseSkin;
-const int FirstRender = CauseRenderThread;
+const int LastInside = CauseGpuGrowth;
+const int FirstRender = CauseResolve;
 
 const char* const CauseNames[CauseSlots] = {
     "physics", "mellow", "ai", "step_rest", "cameras", "sound", "streamer", "loading", "cull", "stuff", "flush",
     "flares", "cars", "particle_draw", "views_rest", "fe", "render_rest", "game_rest",
     "file_wait", "cs_wait", "object_wait", "sleep", "frame_slot", "preempted", "released_other",
-    "d3d_queue", "upload_wait", "read_back", "guest_blocks", "jdlz", "texture_create", "skin",
-    "hitch_log", "render_thread", "display_queue", "unclear", "no_game_record",
+    "d3d_queue", "upload_wait", "read_back", "guest_blocks", "jdlz", "texture_create", "skin", "gpu_growth",
+    "hitch_log",
+    "resolve", "render_plan", "programs", "list_record", "list_wait", "render_upload_wait", "scenes",
+    "render_off_cpu", "render_thread_rest", "display_queue",
+    "unclear", "no_game_record",
 };
 static_assert(sizeof(CauseNames) / sizeof(CauseNames[0]) == CauseSlots, "a name per cause");
 
@@ -98,6 +102,8 @@ struct Record
     bool racing = false;
     uint32_t raceUs = 0;        // since the race started, when racing
     uint32_t flow = 0;          // game flow state
+    uint32_t coordinator = 0;   // race coordinator state and race stage
+    uint32_t stage = 0;
     uint32_t phase[phases::Count] = {};
     perf::Totals delta = {};
     float excess[FirstRender] = {};     // over the running averages before this record
@@ -214,7 +220,28 @@ void gameCauses(const Record& r, float* v)
     v[CauseJdlz] = float(t.events[perf::EventJdlzUs]);
     v[CauseTextureCreate] = float(t.events[perf::EventTextureCreateUs]);
     v[CauseSkin] = float(t.events[perf::EventSkinUs]);
+    v[CauseGpuGrowth] = float(t.events[perf::EventGpuGrowthUs]);
     v[CauseHitchLog] = float(r.logUs);
+}
+
+// The render thread causes of a present (render, queue: its times; parts: its parts), from v[FirstRender].
+void renderCauses(uint32_t render, uint32_t queue, const uint32_t* parts, float* v)
+{
+    const uint32_t lists = parts[perf::RenderLists], listWait = parts[perf::RenderListWait];
+    const uint32_t uploadWait = parts[perf::RenderUploadWait];
+    v[CauseResolve] = float(parts[perf::RenderResolve]);
+    v[CauseRenderPlan] = float(parts[perf::RenderPlan]);
+    v[CausePrograms] = float(parts[perf::RenderPrograms]);
+    v[CauseListRecord] = float(rest(lists, listWait));
+    v[CauseListWait] = float(listWait);
+    v[CauseRenderUploadWait] = float(uploadWait);
+    v[CauseScenes] = float(parts[perf::RenderScenes]);
+    // Time the thread neither ran nor waited in one of the waits above.
+    v[CauseRenderOffCpu] = float(rest(rest(render, queue + listWait + uploadWait), parts[perf::RenderCpu]));
+    v[CauseRenderThreadRest] = float(rest(render, queue + parts[perf::RenderResolve] + parts[perf::RenderPlan]
+                                                 + parts[perf::RenderPrograms] + lists + uploadWait
+                                                 + parts[perf::RenderScenes]));
+    v[CauseDisplayQueue] = float(queue);
 }
 
 const Record* findRecord(uint32_t frame)
@@ -264,13 +291,30 @@ int dominant(const float* excess, float* largest)
     return best;
 }
 
-void appendWhen(Line& line, bool racing, uint32_t raceUs, uint32_t flow)
+void appendWhen(Line& line, bool racing, uint32_t raceUs, uint32_t flow, uint32_t coordinator, uint32_t stage)
 {
     if (racing)
         line.append("race %.2f s", double(raceUs) / 1000000.0);
+    else if (flow == FlowFrontEnd)
+        line.append("front end (flow 3)");
     else
-        line.append("flow %u%s", unsigned(flow), flow == FlowFrontEnd ? " (front end)"
-                                                 : flow == FlowRace ? " (race not running)" : "");
+        line.append("not racing (flow %d, race coordinator %d, race stage %d)", int(flow), int(coordinator),
+                    int(stage));
+}
+
+void appendRender(Line& line, const perf::SlowPresent& p)
+{
+    const uint32_t* q = p.parts;
+    const uint32_t* a = p.partAvgs;
+    line.append(" | frame %u interval %.1f ms, render %.1f (avg %.1f): resolve %.1f plan %.1f programs %.1f"
+                " (%u new %.1f) lists %.1f (wait %.1f) tex waits %.1f scenes %.1f queue %.1f, cpu %.1f (avg %.1f);"
+                " scenes %u draws %u (avg %u %u)",
+                unsigned(p.frame), ms(p.intervalUs), ms(p.renderUs), ms(p.renderAvgUs), ms(q[perf::RenderResolve]),
+                ms(q[perf::RenderPlan]), ms(q[perf::RenderPrograms]), unsigned(q[perf::RenderProgramCreates]),
+                ms(q[perf::RenderProgramCreateUs]), ms(q[perf::RenderLists]), ms(q[perf::RenderListWait]),
+                ms(q[perf::RenderUploadWait]), ms(q[perf::RenderScenes]), ms(p.queueUs), ms(q[perf::RenderCpu]),
+                ms(a[perf::RenderCpu]), unsigned(q[perf::RenderSceneCount]), unsigned(q[perf::RenderDrawCount]),
+                unsigned(a[perf::RenderSceneCount]), unsigned(a[perf::RenderDrawCount]));
 }
 
 void appendRecord(Line& line, const Record& r)
@@ -278,11 +322,9 @@ void appendRecord(Line& line, const Record& r)
     const perf::Totals& t = r.delta;
     const uint32_t* p = r.phase;
     const uint32_t slot = t.events[perf::EventSlotWaitUs];
-    const uint32_t others = t.held[perf::HolderTimer] + t.held[perf::HolderIo] + t.held[perf::HolderHelper]
-                          + t.held[perf::HolderMain];
+    const uint32_t others = t.held[perf::HolderTimer] + t.held[perf::HolderIo] + t.held[perf::HolderHelper];
     line.append(" | game %.1f ms in %u render%s, released %.1f (file %.1f cs %.1f wait %.1f sleep %.1f preempt %.1f"
-                " other %.1f; %u times, relock %.1f), frame slot %.1f (gpu fence %.1f), lock held by others %.1f,"
-                " preempt waits %u %.1f",
+                " other %.1f; %ux relock %.1f), slot %.1f (fence %.1f), others held %.1f, preempt waits %u %.1f",
                 ms(r.wallUs), unsigned(r.renders), r.renders == 1 ? "" : "s", ms(released(t)),
                 ms(t.blocked[perf::BlockFile]), ms(t.blocked[perf::BlockCritSec]), ms(t.blocked[perf::BlockWait]),
                 ms(t.blocked[perf::BlockSleep]), ms(t.blocked[perf::BlockPreempt]),
@@ -295,7 +337,7 @@ void appendRecord(Line& line, const Record& r)
         const uint32_t us = shown.id == phases::AiCar ? p[phases::AiCar] + p[phases::AiDriver] : p[shown.id];
         line.append(" %s %.1f", shown.name, ms(us));
     }
-    line.append(" | uploads %u %.0f KB (game waits %u %.1f, render waits %u %.1f), read-backs %u %.0f KB %.1f,"
+    line.append(" | uploads %u %.0f KB (waits game %u %.1f render %u %.1f), read-backs %u %.0f KB %.1f,"
                 " locks tex %u buf %u, guest blocks %u %.1f",
                 unsigned(t.uploads[perf::UploadLevels]), double(t.uploads[perf::UploadBytes]) / 1024.0,
                 unsigned(t.uploads[perf::UploadGameWaits]), ms(t.uploads[perf::UploadGameWaitUs]),
@@ -304,14 +346,17 @@ void appendRecord(Line& line, const Record& r)
                 ms(t.uploads[perf::UploadReadBackUs]), unsigned(t.events[perf::EventTextureLocks]),
                 unsigned(t.events[perf::EventBufferLocks]), unsigned(t.uploads[perf::UploadGuestBlocks]),
                 ms(t.uploads[perf::UploadGuestBlockUs]));
-    line.append(" | file reads %u %.0f KB %.1f | jdlz %u %.1f, texture creates %u %.1f, skins %u %.1f"
-                " | d3d queue waits %u %.1f, queue run %.1f",
+    line.append(" | file reads %u %.0f KB %.1f | jdlz %u %.1f, tex creates %u %.1f, skins %u %.1f"
+                " | d3d waits %u %.1f, queue run %.1f",
                 unsigned(t.events[perf::EventFileReads]), double(t.events[perf::EventFileBytes]) / 1024.0,
                 ms(t.events[perf::EventFileUs]), unsigned(t.events[perf::EventJdlz]), ms(t.events[perf::EventJdlzUs]),
                 unsigned(t.events[perf::EventTextureCreates]), ms(t.events[perf::EventTextureCreateUs]),
                 unsigned(t.events[perf::EventSkins]), ms(t.events[perf::EventSkinUs]),
                 unsigned(t.events[perf::EventDrainWaits]), ms(t.events[perf::EventDrainWaitUs]),
                 ms(t.events[perf::EventQueueRunUs]));
+    if (t.events[perf::EventGpuGrowths])
+        line.append(" | gpu grown %ux %u KB %.1f",unsigned(t.events[perf::EventGpuGrowths]),
+                    unsigned(t.events[perf::EventGpuGrowthKb]), ms(t.events[perf::EventGpuGrowthUs]));
     if (r.logUs)
         line.append(" | hitch log %.1f", ms(r.logUs));
 }
@@ -328,6 +373,9 @@ void write(const char* text, bool keep)
 
 void flush()
 {
+    if (!s_buffered)
+        return;
+    pf::logInfo("hitch: %u lines kept during the race:", unsigned(s_buffered));
     for (uint32_t i = 0; i < s_buffered; ++i)
         pf::logInfo("%s", s_lines[i]);
     s_buffered = 0;
@@ -338,9 +386,11 @@ void report(const perf::SlowPresent& present, const Record* r, bool keep)
     float excess[CauseCount] = {};
     if (r)
         memcpy(excess, r->excess, sizeof(r->excess));
-    excess[CauseRenderThread] = float(rest(present.renderUs, present.queueUs))
-                              - float(rest(present.renderAvgUs, present.queueAvgUs));
-    excess[CauseDisplayQueue] = float(present.queueUs) - float(present.queueAvgUs);
+    float value[CauseCount], average[CauseCount];
+    renderCauses(present.renderUs, present.queueUs, present.parts, value);
+    renderCauses(present.renderAvgUs, present.queueAvgUs, present.partAvgs, average);
+    for (int c = FirstRender; c < CauseCount; ++c)
+        excess[c] = value[c] - average[c];
     float largest = 0.0f;
     int cause = dominant(excess, &largest);
     if (!r && cause == CauseUnclear)
@@ -351,11 +401,17 @@ void report(const perf::SlowPresent& present, const Record* r, bool keep)
     Line line;
     line.append("hitch: ");
     if (r)
-        appendWhen(line, r->racing, r->raceUs, r->flow);
+    {
+        appendWhen(line, r->racing, r->raceUs, r->flow, r->coordinator, r->stage);
+    }
     else
-        appendWhen(line, s_racing, s_racing ? present.presentUs - s_raceStartUs : 0, guestDword(GameFlowState));
-    line.append(" | frame %u interval %.1f ms, render thread %.1f (display queue %.1f)", unsigned(present.frame),
-                ms(present.intervalUs), ms(present.renderUs), ms(present.queueUs));
+    {
+        x86::reg32 coordinator, stage;
+        bench::raceState(&coordinator, &stage);
+        appendWhen(line, s_racing, s_racing ? present.presentUs - s_raceStartUs : 0, guestDword(GameFlowState),
+                   coordinator, stage);
+    }
+    appendRender(line, present);
     if (r)
         appendRecord(line, *r);
     else
@@ -397,7 +453,8 @@ void frame(const uint32_t* phaseUs)
         s_lastEndUs = now;
         s_lastTotals = totals;
         s_lastFrame = pf::gxm::Device::get().lastBegunFrame();
-        pf::logInfo("hitch: hitch log on (hitch_log): one line per presented frame over %.1f ms", ms(perf::HitchUs));
+        pf::logInfo("hitch: hitch log on (hitch_log): one line per presented frame over %.1f ms; the lines of a race"
+                    " are written at its end", ms(perf::HitchUs));
         return;
     }
 
@@ -419,6 +476,7 @@ void frame(const uint32_t* phaseUs)
         c.racing = racing;
         c.raceUs = racing ? now - s_raceStartUs : 0;
         c.flow = guestDword(GameFlowState);
+        bench::raceState(&c.coordinator, &c.stage);
         float v[FirstRender];
         gameCauses(c, v);
         for (int i = 0; i < FirstRender; ++i)

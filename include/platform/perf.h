@@ -134,7 +134,28 @@ enum Event
     EventQueueRunUs,        // Direct3D queue run time (the queue thread, or the draining thread when inline)
     EventSlotWaitUs,        // game thread opening a frame: waiting for a free frame slot, the lock re-taken included
     EventFenceWaitUs,       // of it: waiting for the GPU to finish the slot's previous frame
+    EventGpuGrowths,        // GPU memory pools and heaps grown by a memory block, any thread
+    EventGpuGrowthKb,
+    EventGpuGrowthUs,       // allocation, mapping and the log line
     EventCount
+};
+
+// The render thread's work for one present, for the hitch log: wall times in microseconds unless a count.
+enum RenderPart
+{
+    RenderResolve,          // completing the recorded frame (Direct3D: resolveFrame)
+    RenderPlan,             // scene plan and draw sort
+    RenderPrograms,         // program lookup per draw, creations included
+    RenderProgramCreates,   // vertex and fragment programs created by the shader patcher (count)
+    RenderProgramCreateUs,
+    RenderLists,            // command list recording, the wait for the list workers included
+    RenderListWait,         // of it: waiting for the list workers to finish
+    RenderUploadWait,       // waiting for texture writes the frame reads
+    RenderScenes,           // scene submission (begin, lists or draws, end)
+    RenderCpu,              // the render thread's CPU time over its whole time for the present
+    RenderSceneCount,
+    RenderDrawCount,
+    RenderPartCount
 };
 
 // Sums since start-up, wrapping, counted while the hitch log is on: the difference of two snapshots is what
@@ -164,6 +185,8 @@ struct SlowPresent
     uint32_t queueUs;       // sceGxmDisplayQueueAddEntry
     uint32_t renderAvgUs;   // running averages over every present
     uint32_t queueAvgUs;
+    uint32_t parts[RenderPartCount];
+    uint32_t partAvgs[RenderPartCount];
 };
 
 extern bool g_enabled;
@@ -185,6 +208,11 @@ inline bool hitch() { return g_hitch; }
 inline bool timed() { return g_timed; }
 // Any thread: the sums at the moment (each field read on its own).
 void totals(Totals& out);
+// Render thread, while the hitch log is on: adds to a part of the present being made.
+void renderPart(RenderPart part, uint32_t value);
+// The execution lock holder kinds whose releases are the game thread's: guest threads with the game role and the
+// main thread, which runs the game loop.
+inline bool gameHolder(Holder holder) { return holder == HolderGame || holder == HolderMain; }
 // Game thread: the oldest slow present not taken yet, null if none; popSlowPresent removes it.
 const SlowPresent* peekSlowPresent();
 void popSlowPresent();

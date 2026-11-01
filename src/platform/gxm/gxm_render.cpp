@@ -58,6 +58,14 @@ uint32_t alignUp(uint32_t value, uint32_t alignment)
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+// Hitch log: a pool or heap grew by bytes in us.
+void growth(uint32_t bytes, uint32_t us)
+{
+    perf::event(perf::EventGpuGrowths, 1);
+    perf::event(perf::EventGpuGrowthKb, bytes / 1024);
+    perf::event(perf::EventGpuGrowthUs, us);
+}
+
 const uint32_t SlotVertexBytes = 4 * 1024 * 1024;
 const uint32_t SlotDraws = 16384;
 const uint32_t SlotConstants = 512 * 1024;      // floats
@@ -236,6 +244,8 @@ int FramePool::freeChunk(uint32_t minimum)
         }
     }
     const uint32_t size = alignUp(std::max(minimum, m_chunkSize), 4096);
+    const bool timed = perf::hitch();
+    const uint32_t start = timed ? perf::now() : 0;
     const SceUID uid = sceKernelAllocMemBlock(m_name, SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, size, nullptr);
     if (uid < 0)
         fatal("gxm: %s: out of memory for %u KB: 0x%08x", m_name, size / 1024, uid);
@@ -245,6 +255,8 @@ int FramePool::freeChunk(uint32_t minimum)
         fatal("gxm: %s: sceGxmMapMemory failed", m_name);
     m_chunks.push_back(Chunk{ uid, static_cast<uint8_t*>(base), size, 0, 0 });
     logInfo("gxm: %s pool +%u KB", m_name, size / 1024);
+    if (timed)
+        growth(size, perf::now() - start);
     return int(m_chunks.size() - 1);
 }
 
@@ -299,6 +311,8 @@ bool GpuHeap::addChunk(uint32_t minimum)
 {
     const uint32_t granularity = m_type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW ? 256 * 1024 : 4096;
     const uint32_t size = alignUp(std::max(minimum, m_chunkSize), granularity);
+    const bool timed = perf::hitch();
+    const uint32_t start = timed ? perf::now() : 0;
     const SceUID uid = sceKernelAllocMemBlock(m_name, m_type, size, nullptr);
     if (uid < 0)
         return false;
@@ -313,6 +327,8 @@ bool GpuHeap::addChunk(uint32_t minimum)
     c->holes[0] = size;
     m_chunks.push_back(c);
     logInfo("gxm: %s heap +%u KB", m_name, size / 1024);
+    if (timed)
+        growth(size, perf::now() - start);
     return true;
 }
 
@@ -1031,7 +1047,14 @@ const FrameRenderer::VertexEntry* FrameRenderer::vertexProgram(uint8_t program, 
     }
     SceGxmVertexStream stream = { layout.stride, SCE_GXM_INDEX_SOURCE_INDEX_16BIT };
     SceGxmVertexProgram* result = nullptr;
+    const bool timed = perf::hitch() && !m_loadingPrograms;
+    const uint32_t start = timed ? perf::now() : 0;
     const int error = sceGxmShaderPatcherCreateVertexProgram(m_patcher, p.id, attributes, count, &stream, 1, &result);
+    if (timed)
+    {
+        perf::renderPart(perf::RenderProgramCreates, 1);
+        perf::renderPart(perf::RenderProgramCreateUs, perf::now() - start);
+    }
     if (error < 0)
         fatal("gxm: vertex program %s for layout %u: 0x%08x", render::vertexProgram(render::VertexProgram(program)).name,
               layoutId, error);
@@ -1044,25 +1067,41 @@ const FrameRenderer::VertexEntry* FrameRenderer::vertexProgram(uint8_t program, 
     return &entry;
 }
 
+// Fragment program cache key: the programs, the variant, blending and the colour mask.
+static uint64_t fragmentKey(uint8_t vertexProgram, uint8_t fragmentProgram, uint32_t variant, bool blend, uint8_t mask,
+                            uint8_t srcBlend, uint8_t dstBlend)
+{
+    return uint64_t(vertexProgram) | uint64_t(fragmentProgram) << 8 | uint64_t(variant) << 16 | uint64_t(blend) << 19
+         | uint64_t(mask) << 20 | (blend ? uint64_t(srcBlend) << 24 | uint64_t(dstBlend) << 32 : 0);
+}
+
 const FrameRenderer::FragmentEntry* FrameRenderer::fragmentProgram(const render::DrawState& state)
 {
-    const bool blend = state.blendEnable != 0;
-    const uint8_t mask = state.colorMask;
-    const uint32_t v = variant(state);
-    const uint64_t key = uint64_t(state.vertexProgram) | uint64_t(state.fragmentProgram) << 8
-                       | uint64_t(v) << 16 | uint64_t(blend) << 19 | uint64_t(mask) << 20
-                       | (blend ? uint64_t(state.srcBlend) << 24 | uint64_t(state.dstBlend) << 32 : 0);
+    const uint64_t key = fragmentKey(state.vertexProgram, state.fragmentProgram, variant(state),
+                                     state.blendEnable != 0, state.colorMask, state.srcBlend, state.dstBlend);
     auto it = m_fragmentCache.find(key);
     if (it != m_fragmentCache.end())
         return &it->second;
-    const FragmentProgram& p = m_fragmentPrograms[state.fragmentProgram < render::FpCount ? state.fragmentProgram : 0][v];
+    return createFragment(key);
+}
+
+const FrameRenderer::FragmentEntry* FrameRenderer::createFragment(uint64_t key)
+{
+    const uint8_t vertexProgram = uint8_t(key);
+    const uint8_t fragmentProgram = uint8_t(key >> 8);
+    const uint32_t v = uint32_t(key >> 16) & 7;
+    const bool blend = (key >> 19) & 1;
+    // With blending the factors follow the mask's 4 bits.
+    const uint8_t mask = blend ? uint8_t(key >> 20) & 0xf : uint8_t(key >> 20);
+    const uint8_t srcBlend = uint8_t(key >> 24), dstBlend = uint8_t(key >> 32);
+    const FragmentProgram& p = m_fragmentPrograms[fragmentProgram < render::FpCount ? fragmentProgram : 0][v];
     SceGxmBlendInfo info;
     memset(&info, 0, sizeof(info));
     info.colorMask = uint8_t(((mask & 1) ? SCE_GXM_COLOR_MASK_R : 0) | ((mask & 2) ? SCE_GXM_COLOR_MASK_G : 0)
                            | ((mask & 4) ? SCE_GXM_COLOR_MASK_B : 0) | ((mask & 8) ? SCE_GXM_COLOR_MASK_A : 0));
     info.colorFunc = SCE_GXM_BLEND_FUNC_ADD;
     info.alphaFunc = SCE_GXM_BLEND_FUNC_ADD;
-    uint8_t src = blend ? state.srcBlend : 2, dst = blend ? state.dstBlend : 1;
+    uint8_t src = blend ? srcBlend : 2, dst = blend ? dstBlend : 1;
     if (src == 12 || src == 13)
     {
         // BOTHSRCALPHA, BOTHINVSRCALPHA.
@@ -1075,18 +1114,147 @@ const FrameRenderer::FragmentEntry* FrameRenderer::fragmentProgram(const render:
     info.alphaSrc = alphaFactor(colorSrc);
     info.alphaDst = alphaFactor(colorDst);
     const bool plain = !blend && mask == 0xf;
-    const SceGxmProgram* vertex = m_vertexPrograms[state.vertexProgram < render::VpCount ? state.vertexProgram : 0].program;
+    const SceGxmProgram* vertex = m_vertexPrograms[vertexProgram < render::VpCount ? vertexProgram : 0].program;
     SceGxmFragmentProgram* result = nullptr;
+    const bool timed = perf::hitch() && !m_loadingPrograms;
+    const uint32_t start = timed ? perf::now() : 0;
     const int error = sceGxmShaderPatcherCreateFragmentProgram(m_patcher, p.id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
                                                                SCE_GXM_MULTISAMPLE_NONE, plain ? nullptr : &info,
                                                                vertex, &result);
+    if (timed)
+    {
+        perf::renderPart(perf::RenderProgramCreates, 1);
+        perf::renderPart(perf::RenderProgramCreateUs, perf::now() - start);
+    }
     if (error < 0)
-        fatal("gxm: fragment program %u (vertex %u): 0x%08x", state.fragmentProgram, state.vertexProgram, error);
+        fatal("gxm: fragment program %u (vertex %u): 0x%08x", fragmentProgram, vertexProgram, error);
     FragmentEntry& entry = m_fragmentCache[key];
     entry.program = result;
     entry.stateSize = sceGxmGetPrecomputedFragmentStateSize(result);
     entry.uniformBytes = p.uniformBytes;
     return &entry;
+}
+
+namespace
+{
+
+// Program list file (loadPrograms, savePrograms): the header, the vertex entries, then the fragment cache keys.
+const char ProgramListMagic[4] = { 'G', 'X', 'P', 'L' };
+const uint32_t ProgramListVersion = 1;
+const uint32_t ProgramListMaxEntries = 4096;
+
+struct ProgramListHeader
+{
+    char        magic[4];
+    uint32_t    version;
+    uint32_t    vertexPrograms, fragmentPrograms, variants, layoutBytes;   // of the build that wrote it
+    uint32_t    vertexCount, fragmentCount;
+};
+
+struct ProgramListVertex
+{
+    uint8_t                 program;
+    uint8_t                 unused[3];
+    render::VertexLayout    layout;
+};
+
+}
+
+uint32_t FrameRenderer::loadPrograms(const char* path)
+{
+    FILE* file = fopen(path, "rb");
+    if (!file)
+        return 0;
+    ProgramListHeader h;
+    uint32_t created = 0;
+    if (fread(&h, sizeof(h), 1, file) != 1 || memcmp(h.magic, ProgramListMagic, 4) != 0
+        || h.version != ProgramListVersion || h.vertexPrograms != render::VpCount
+        || h.fragmentPrograms != render::FpCount || h.variants != Variants
+        || h.layoutBytes != sizeof(render::VertexLayout) || h.vertexCount > ProgramListMaxEntries
+        || h.fragmentCount > ProgramListMaxEntries)
+    {
+        logInfo("gxm: %s is not a program list of this build, not used", path);
+        fclose(file);
+        return 0;
+    }
+    m_loadingPrograms = true;
+    for (uint32_t i = 0; i < h.vertexCount; ++i)
+    {
+        ProgramListVertex e;
+        if (fread(&e, sizeof(e), 1, file) != 1)
+            break;
+        if (e.program >= render::VpCount || e.layout.count > render::MaxVertexElements)
+            continue;
+        const uint8_t layout = render::registerLayout(e.layout);
+        if (m_vertexCache.find(uint32_t(e.program) << 8 | layout) == m_vertexCache.end())
+        {
+            vertexProgram(e.program, layout);
+            ++created;
+        }
+    }
+    for (uint32_t i = 0; i < h.fragmentCount; ++i)
+    {
+        uint64_t key;
+        if (fread(&key, sizeof(key), 1, file) != 1)
+            break;
+        const uint8_t vertex = uint8_t(key), fragment = uint8_t(key >> 8);
+        const uint32_t v = uint32_t(key >> 16) & 7;
+        const bool blend = (key >> 19) & 1;
+        const uint8_t mask = blend ? uint8_t(key >> 20) & 0xf : uint8_t(key >> 20);
+        if (vertex >= render::VpCount || fragment >= render::FpCount || v >= Variants
+            || fragmentKey(vertex, fragment, v, blend, mask, uint8_t(key >> 24), uint8_t(key >> 32)) != key
+            || m_fragmentCache.find(key) != m_fragmentCache.end())
+            continue;
+        createFragment(key);
+        ++created;
+    }
+    m_loadingPrograms = false;
+    fclose(file);
+    return created;
+}
+
+void FrameRenderer::savePrograms(const char* path) const
+{
+    FILE* file = fopen(path, "wb");
+    if (!file)
+    {
+        logError("gxm: %s cannot be written", path);
+        return;
+    }
+    ProgramListHeader h = {};
+    memcpy(h.magic, ProgramListMagic, 4);
+    h.version = ProgramListVersion;
+    h.vertexPrograms = render::VpCount;
+    h.fragmentPrograms = render::FpCount;
+    h.variants = Variants;
+    h.layoutBytes = sizeof(render::VertexLayout);
+    h.vertexCount = uint32_t(std::min<size_t>(m_vertexCache.size(), ProgramListMaxEntries));
+    h.fragmentCount = uint32_t(std::min<size_t>(m_fragmentCache.size(), ProgramListMaxEntries));
+    bool ok = fwrite(&h, sizeof(h), 1, file) == 1;
+    uint32_t written = 0;
+    for (const auto& v : m_vertexCache)
+    {
+        if (written++ == h.vertexCount)
+            break;
+        ProgramListVertex e = {};
+        e.program = uint8_t(v.first >> 8);
+        e.layout = render::layout(uint8_t(v.first));
+        ok = ok && fwrite(&e, sizeof(e), 1, file) == 1;
+    }
+    written = 0;
+    for (const auto& f : m_fragmentCache)
+    {
+        if (written++ == h.fragmentCount)
+            break;
+        const uint64_t key = f.first;
+        ok = ok && fwrite(&key, sizeof(key), 1, file) == 1;
+    }
+    ok = fclose(file) == 0 && ok;
+    if (ok)
+        logInfo("gxm: %u vertex and %u fragment programs listed in %s", unsigned(h.vertexCount),
+                unsigned(h.fragmentCount), path);
+    else
+        logError("gxm: writing %s failed", path);
 }
 
 bool FrameRenderer::finished(void* self, uint32_t frameIndex)
@@ -1568,6 +1736,22 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
                                               SceGxmSyncObject* displaySync, bool stretchDirect)
 {
     Slot& slot = m_slots[frame.index % Slots];
+    // Hitch log: the time since the last mark goes to a part.
+    const bool parts = perf::hitch();
+    uint32_t mark = parts ? perf::now() : 0;
+    const auto lap = [parts, &mark](perf::RenderPart part)
+    {
+        if (!parts)
+            return;
+        const uint32_t now = perf::now();
+        perf::renderPart(part, now - mark);
+        mark = now;
+    };
+    if (parts)
+    {
+        perf::renderPart(perf::RenderSceneCount, frame.sceneCount);
+        perf::renderPart(perf::RenderDrawCount, frame.drawCount);
+    }
     planFrame(frame, stretchDirect);
     Shown shown = {};
     shown.presentScene = presentScene(frame);
@@ -1579,7 +1763,9 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
     shown.done = &slot.done;
     shown.vblanks = slot.vblanks;
     const uint32_t sceneCount = frame.sceneCount;
+    lap(perf::RenderPlan);
     preparePrograms(frame);
+    lap(perf::RenderPrograms);
     m_main.data.begin(frame.index, &finished, this);
     m_main.words.reset();
     m_main.precomputed = m_precomputed.load(std::memory_order_relaxed);
@@ -1652,9 +1838,12 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
             s = SortStats();
         }
     }
+    lap(perf::RenderPlan);
     const bool lists = recordLists(frame);
+    lap(perf::RenderLists);
     if (frame.uploads)
         waitFrameUploads(frame);
+    lap(perf::RenderUploadWait);
 
     for (uint32_t i = 0; i < sceneCount; ++i)
     {
@@ -1714,6 +1903,7 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
     // Unbinds the precomputed states.
     sceGxmSetPrecomputedVertexState(m_context, nullptr);
     sceGxmSetPrecomputedFragmentState(m_context, nullptr);
+    lap(perf::RenderScenes);
     return shown;
 }
 
@@ -1994,9 +2184,13 @@ bool FrameRenderer::recordLists(const render::Frame& frame)
     if (threads > 1)
         m_wake->post(int(threads - 1));
     runJobs(*m_workers[0]);
+    const bool timed = perf::hitch();
+    const uint32_t start = timed ? perf::now() : 0;
     LockGuard guard(*m_jobLock);
     while (m_doneJobs < m_jobs.size())
         m_jobsDone->wait();
+    if (timed)
+        perf::renderPart(perf::RenderListWait, perf::now() - start);
     return true;
 }
 

@@ -9,10 +9,12 @@
 #include <psp2/gxm.h>
 #include <psp2/display.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/threadmgr.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 // Embedded shader binaries (generated from shaders/*.cg, cmake/shaders.cmake).
@@ -280,6 +282,7 @@ struct Device::Impl
     uint32_t                endSceneTime = 0;
     uint32_t                presentIndex = 0;           // game presents shown so far
     uint32_t                queueUs = 0;                // render thread: display queue wait of the current present
+    std::string             programList;                // usePrograms path
     Present                 shown = {};                 // image last presented
 
     bool initCore();
@@ -505,6 +508,14 @@ bool Device::Impl::initBuffers()
 
 // ---- Render thread -------------------------------------------------------------------------------------------------
 
+// The calling thread's CPU time in microseconds.
+static uint64_t threadClocks()
+{
+    SceKernelThreadInfo info;
+    info.size = sizeof(info);
+    return sceKernelGetThreadInfo(sceKernelGetThreadId(), &info) < 0 ? 0 : info.runClocks;
+}
+
 int Device::Impl::threadEntry(void* self)
 {
     if (perf::enabled())
@@ -559,8 +570,14 @@ void Device::Impl::run()
         const uint32_t start = timed ? perf::now() : 0;
         const uint32_t index = frame ? frame->index : 0;
         queueUs = 0;
+        const bool parts = timed && perf::hitch();
+        const uint64_t cpuStart = parts ? threadClocks() : 0;
         if (frame && frame->resolve)
+        {
             frame->resolve(*frame);
+            if (parts)
+                perf::renderPart(perf::RenderResolve, perf::now() - start);
+        }
         uint32_t calls = 0, triangles = 0;
         if (frame && timed && perf::enabled())
         {
@@ -576,6 +593,8 @@ void Device::Impl::run()
             presentFrame(*frame, ++presentIndex);
         else
             present(image, queued ? ++presentIndex : 0);
+        if (parts)
+            perf::renderPart(perf::RenderCpu, uint32_t(threadClocks() - cpuStart));
         if (timed)
         {
             const uint32_t renderUs = perf::now() - start;
@@ -906,6 +925,8 @@ void Device::shutdown()
     }
     if (impl.patcher)
     {
+        if (!impl.programList.empty())
+            impl.frames.savePrograms(impl.programList.c_str());
         impl.frames.shutdown();
         if (impl.blitV) sceGxmShaderPatcherReleaseVertexProgram(impl.patcher, impl.blitV);
         if (impl.blitF) sceGxmShaderPatcherReleaseFragmentProgram(impl.patcher, impl.blitF);
@@ -1024,6 +1045,17 @@ uint32_t Device::completedFrame()
 uint32_t Device::lastBegunFrame() const
 {
     return m_impl->frames.lastIndex();
+}
+
+void Device::usePrograms(const char* path)
+{
+    Impl& impl = *m_impl;
+    impl.programList = path;
+    const uint32_t start = perf::now();
+    const uint32_t created = impl.frames.loadPrograms(path);
+    if (created)
+        logInfo("gxm: %u programs created from %s in %.1f ms", unsigned(created), path,
+                double(perf::now() - start) / 1000.0);
 }
 
 render::TextureStorage* Device::createTexture(const render::TextureDesc& desc)

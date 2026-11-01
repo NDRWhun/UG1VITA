@@ -130,6 +130,11 @@ public:
     void submitted(render::Frame* frame, uint32_t vblanks);
     uint32_t completedFrame();
     uint32_t lastIndex() const { return m_lastIndex; }
+    // Program list file: the vertex programs (with their layouts) and fragment programs created, so that a later run
+    // creates them before the game draws. Load: before the first frame, while no other thread draws or registers
+    // layouts; the number created. Save: after the render thread has stopped.
+    uint32_t loadPrograms(const char* path);
+    void savePrograms(const char* path) const;
     render::TextureStorage* createTexture(const render::TextureDesc& desc);
     void writeTexture(render::TextureStorage* texture, uint32_t face, uint32_t level, const void* data, uint32_t pitch);
     void readTexture(const render::TextureStorage* texture, uint32_t face, uint32_t level, void* data, uint32_t pitch);
@@ -318,6 +323,8 @@ private:
     void destroy(int kind, void* object);
     const VertexEntry* vertexProgram(uint8_t program, uint8_t layout);
     const FragmentEntry* fragmentProgram(const render::DrawState& state);
+    // Creates the fragment program of a cache key (fragmentKey) and adds it to the cache.
+    const FragmentEntry* createFragment(uint64_t key);
     SceGxmRenderTarget* renderTarget(uint32_t width, uint32_t height);
     static bool finished(void* self, uint32_t frameIndex);
     // Patched programs of every draw (render thread; creates them on first use).
@@ -365,6 +372,7 @@ private:
     FragmentProgram         m_fragmentPrograms[render::FpCount][Variants];
     std::unordered_map<uint32_t, VertexEntry>              m_vertexCache;
     std::unordered_map<uint64_t, FragmentEntry>            m_fragmentCache;
+    bool                    m_loadingPrograms = false;  // loadPrograms runs: creations are not render thread work
     std::map<uint32_t, SceGxmRenderTarget*>                 m_targets;
 
     // Render thread (and workers, read only while they record).
