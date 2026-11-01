@@ -946,16 +946,6 @@ render::BufferStorage* FrameRenderer::createBuffer(uint32_t size)
 
 // ---- Drawing (render thread) ---------------------------------------------------------------------------------------
 
-uint32_t FrameRenderer::vblanks(const render::Frame& frame) const
-{
-    return m_slots[frame.index % Slots].vblanks;
-}
-
-SceGxmNotification* FrameRenderer::doneNotification(const render::Frame& frame)
-{
-    return &m_slots[frame.index % Slots].done;
-}
-
 const SceGxmTexture* FrameRenderer::offscreen(const render::Frame& frame) const
 {
     const Slot& s = m_slots[frame.index % Slots];
@@ -1570,18 +1560,28 @@ void FrameRenderer::sortScene(const render::Frame& frame, uint32_t scene)
     }
 }
 
-void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync,
-                              bool stretchDirect)
+FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurface* display,
+                                              SceGxmSyncObject* displaySync, bool stretchDirect)
 {
     Slot& slot = m_slots[frame.index % Slots];
     planFrame(frame, stretchDirect);
+    Shown shown = {};
+    shown.presentScene = presentScene(frame);
+    if (const SceGxmTexture* texture = offscreen(frame))
+    {
+        shown.offscreen = true;
+        shown.texture = *texture;
+    }
+    shown.done = &slot.done;
+    shown.vblanks = slot.vblanks;
+    const uint32_t sceneCount = frame.sceneCount;
     preparePrograms(frame);
     m_main.data.begin(frame.index, &finished, this);
     m_main.words.reset();
     m_main.precomputed = m_precomputed.load(std::memory_order_relaxed);
     for (Worker* w : m_workers)
         w->recorder.precomputed = m_main.precomputed;
-    const bool lastWritesDone = !presentScene(frame);
+    const bool lastWritesDone = !shown.presentScene;
 
     // Where each scene draws, and its draws in order: the colour clears carried to it first.
     m_order.clear();
@@ -1652,7 +1652,7 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
     if (frame.uploads)
         waitFrameUploads(frame);
 
-    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    for (uint32_t i = 0; i < sceneCount; ++i)
     {
         const ScenePlan& p = m_plan[i];
         if (p.skipped)
@@ -1704,12 +1704,13 @@ void FrameRenderer::drawFrame(const render::Frame& frame, const SceGxmColorSurfa
             for (uint32_t n = 0; n < p.orderCount; ++n)
                 draw(m_main, frame, m_order[p.firstOrder + n]);
         }
-        const bool last = i + 1 == frame.sceneCount;
+        const bool last = i + 1 == sceneCount;
         sceGxmEndScene(m_context, nullptr, last && lastWritesDone ? &slot.done : nullptr);
     }
     // Unbinds the precomputed states.
     sceGxmSetPrecomputedVertexState(m_context, nullptr);
     sceGxmSetPrecomputedFragmentState(m_context, nullptr);
+    return shown;
 }
 
 void FrameRenderer::waitFrameUploads(const render::Frame& frame)

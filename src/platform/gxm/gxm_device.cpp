@@ -780,10 +780,11 @@ void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
         drawQuad(Rect{ 0, 0, DisplayWidth, DisplayHeight }, 0, 0, 0, 0, nullptr, false);
         sceGxmEndScene(context, nullptr, nullptr);
     }
-    frames.drawFrame(frame, &displaySurface[backBuffer], displaySync[backBuffer], stretched && gammaBits.load() == 0x3f800000);
-    if (frames.presentScene(frame))
+    // The frame is not read after drawFrame: its last scene may let the game thread reuse it.
+    const FrameRenderer::Shown drawn =
+        frames.drawFrame(frame, &displaySurface[backBuffer], displaySync[backBuffer], stretched && gammaBits.load() == 0x3f800000);
+    if (drawn.presentScene)
     {
-        const SceGxmTexture* offscreen = frames.offscreen(frame);
         sceGxmBeginScene(context, 0, displayTarget, nullptr, nullptr, displaySync[backBuffer], &displaySurface[backBuffer],
                          nullptr);
         sceGxmSetViewportEnable(context, SCE_GXM_VIEWPORT_ENABLED);
@@ -800,22 +801,22 @@ void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
         sceGxmReserveFragmentDefaultUniformBuffer(context, &uniforms);
         sceGxmSetUniformDataF(uniforms, clearColorParam, 0, 4, black);
         drawQuad(Rect{ 0, 0, DisplayWidth, DisplayHeight }, 0, 0, 0, 0, nullptr, false);
-        if (offscreen)
+        if (drawn.offscreen)
         {
             blitPrograms();
-            SceGxmTexture texture = *offscreen;
+            SceGxmTexture texture = drawn.texture;
             sceGxmTextureSetMinFilter(&texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
             sceGxmTextureSetMagFilter(&texture, SCE_GXM_TEXTURE_FILTER_LINEAR);
-            drawQuad(Device::windowRect(frame.width, frame.height), 0, 0, 1, 1, &texture, true);
+            drawQuad(box, 0, 0, 1, 1, &texture, true);
         }
-        sceGxmEndScene(context, nullptr, frames.doneNotification(frame));
+        sceGxmEndScene(context, nullptr, drawn.done);
     }
     if (perf::enabled())
         endSceneTime = perf::now();
     shown = Present{};
     if (ime::prepareFrame())
         ime::drawFrame(displayData[backBuffer], DisplayWidth, DisplayHeight, DisplayStride, displaySync[backBuffer]);
-    queueDisplay(frames.vblanks(frame), frameIndex);
+    queueDisplay(drawn.vblanks, frameIndex);
 }
 
 void Device::Impl::queueDisplay(uint32_t vblanks, uint32_t frameIndex)

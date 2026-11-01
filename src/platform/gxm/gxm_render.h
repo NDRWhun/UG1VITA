@@ -152,15 +152,20 @@ public:
 
     // Render thread. Back buffer scenes go to the display surface when the frame's back buffer has the display
     // size, or when stretchDirect (the back buffer fills the display, no gamma) and none of them uses depth;
-    // else to the slot's offscreen target. presentScene(): the caller must add a scene that shows the frame
-    // (the offscreen target scaled, or black when nothing drew the display); that scene then writes the done
-    // notification, else the frame's last scene does. Both hold after drawFrame.
-    bool presentScene(const render::Frame& frame) const;
-    const SceGxmTexture* offscreen(const render::Frame& frame) const;
-    void drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync,
-                   bool stretchDirect);
-    SceGxmNotification* doneNotification(const render::Frame& frame);
-    uint32_t vblanks(const render::Frame& frame) const;
+    // else to the slot's offscreen target. Shown::presentScene: the caller must add a scene that shows the frame
+    // (the offscreen target scaled, or black when nothing drew the display); that scene then writes Shown::done,
+    // else the frame's last scene does. Shown is read before the frame's scenes are submitted: once the last one
+    // writes the done notification, the game thread may reuse the slot and its frame.
+    struct Shown
+    {
+        bool                presentScene;
+        bool                offscreen;      // texture holds the offscreen back buffer
+        SceGxmTexture       texture;
+        SceGxmNotification* done;
+        uint32_t            vblanks;
+    };
+    Shown drawFrame(const render::Frame& frame, const SceGxmColorSurface* display, SceGxmSyncObject* displaySync,
+                    bool stretchDirect);
 
 private:
     struct Slot
@@ -192,6 +197,9 @@ private:
         uint32_t                    firstJob, jobCount;
     };
     void planFrame(const render::Frame& frame, bool stretchDirect);
+    // After planFrame.
+    bool presentScene(const render::Frame& frame) const;
+    const SceGxmTexture* offscreen(const render::Frame& frame) const;
     // Moves the alpha-tested draws of a scene's order after the opaque draws that follow them up to the next draw
     // that is not depth-tested LESS/LESSEQUAL with depth write, full colour mask and no blend (setting alpha_draw_order).
     void sortScene(const render::Frame& frame, uint32_t scene);
