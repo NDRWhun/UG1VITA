@@ -10,7 +10,7 @@
   <b>Need for Speed Underground, on the PS Vita</b>
   <br />
   <br />
-  A fan port of the PC version of Need for Speed Underground (2003, US and European versions): native widescreen, Vita controls, 30 fps.
+  A fan port of the PC version of Need for Speed Underground (2003, US and European versions)
   <br />
   <br />
   <a href="#install">Install</a>
