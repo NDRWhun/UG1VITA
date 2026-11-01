@@ -32,7 +32,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           . ./tools/env.ps1
           $env:NFSU_LLVM = Get-Dependency 'llvm'
-          cmake -S . -B build-check -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vita-clang.cmake -DCMAKE_BUILD_TYPE=Release -DNFSU_RUNTIME_CHECK=ON
+          cmake -S . -B build-check -G Ninja '-DCMAKE_TOOLCHAIN_FILE=cmake/vita-clang.cmake' '-DCMAKE_BUILD_TYPE=Release' '-DNFSU_RUNTIME_CHECK=ON'
           if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
           cmake --build build-check
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
