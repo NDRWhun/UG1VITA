@@ -796,8 +796,8 @@ void sub_4f5730(win32::WinApplication* app, x86::CPU& cpu)
 }
 
 // Draws the polygons of an FE render object (FERenderObject in the argument, its FEObject at +8) through the 2D
-// polygon routine 0x40BEF0. In a menu flush the menu layout places it (menuPlace). With anchoring: full-width objects
-// are stretched, HUD objects go to their place. A movie covering the 640x480 space gets black side bars
+// polygon routine 0x40BEF0. In a menu flush the menu layout places it (menuPlace). With anchoring: movies stay
+// centred, other full-width objects are stretched, HUD objects go to their place. A movie covering the 640x480 space gets black side bars
 // (drawMovieBars): the full-screen effect pass the game draws before it copies a render target that holds an old
 // picture there.
 static void placeAndDraw(win32::WinApplication* app, x86::CPU& cpu);
@@ -829,12 +829,12 @@ static void placeAndDraw(win32::WinApplication* app, x86::CPU& cpu)
         setPlace(Place::Centre);
         return;
     }
-    if (!anchoring())
+    const x86::reg32 renderObject = argument(cpu, 0);
+    if (!anchoring() || rc::ld32(rc::ld32(renderObject + 8) + FEObjectType) == TypeMovie)
     {
         drawObject(app, cpu);
         return;
     }
-    const x86::reg32 renderObject = argument(cpu, 0);
     const Span span = renderSpan(renderObject);
     Place place = Place::Centre;
     if (!span.empty() && fullWidth(span))
