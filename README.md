@@ -1,108 +1,159 @@
+<a id="readme-top"></a>
+
 <div align="center">
 
 <img src="assets/logo.png" alt="NFSUG1VITA" width="128" height="128">
 
-<h3>NFSUG1VITA</h3>
+<h3 align="center">NFSUG1VITA</h3>
 
-<b>Need for Speed Underground on the PS Vita</b>
+<p align="center">
+  <b>Need for Speed Underground, on the PS Vita</b>
+  <br />
+  <br />
+  A fan port of the PC version of Need for Speed Underground (2003): native widescreen, Vita controls, 30 fps.
+  <br />
+  <br />
+  <a href="#install">Install</a>
+  &nbsp;·&nbsp;
+  <a href="#controls">Controls</a>
+  &nbsp;·&nbsp;
+  <a href="#settings">Settings</a>
+  &nbsp;·&nbsp;
+  <a href="../../issues">Report Bug</a>
+</p>
 
-A fan port of the PC version of Need for Speed Underground (2003): native widescreen, Vita controls, 30 fps.
+[![issues][issues-shield]][issues-url]&nbsp;[![last commit][commit-shield]][commit-url]
+
+[![platform][platform-shield]][platform-url]&nbsp;[![resolution][resolution-shield]][resolution-url]&nbsp;[![renderer][renderer-shield]][renderer-url]&nbsp;[![license][license-shield]][license-url]
 
 </div>
 
-> **Work in progress.** The game is playable. Expect bugs; please report them on the
-> [issues page](../../issues). There are no official downloads yet, so you build the game yourself (see
-> [Building](#building)).
+> **Status: playable, in development.** Expect bugs; please report them on the [issues page](../../issues).
+> There is no official download yet, so you build the VPK yourself (see [Build](#build)).
 
-## What you need
+## Requirements
 
-- A PS Vita with custom firmware (HENkaku / Ensō) and [VitaShell](https://github.com/TheOfficialFloW/VitaShell).
-- `NFSUG1VITA.vpk`, which you build yourself for now (see [Building](#building)).
-- Optional: if you like, an overclocking plugin such as [PSVshell](https://github.com/Electry/PSVshell) can help the
-  game run more smoothly. Whether you use one is entirely up to you.
-- Optional: [CapUnlocker](https://github.com/GrapheneCt/CapUnlocker), which lets the game use one more CPU core.
-- Your own copy of **Need for Speed Underground for PC, version 1.4**. Other versions are refused.
-- About 1.5 GB of free space on the memory card.
+- Need for Speed Underground for PC, **version 1.4** (your own copy; other versions are refused)
+- PS Vita with HENkaku / Ensō and [VitaShell](https://github.com/TheOfficialFloW/VitaShell)
+- About 1.5 GB free on the memory card
+- Optional: [CapUnlocker](https://github.com/GrapheneCt/CapUnlocker), which lets the game use one more CPU core
+- Optional: if you like, an overclocking plugin such as [PSVshell](https://github.com/Electry/PSVshell) can help
+  the game run more smoothly. Whether you use one is entirely up to you.
 
-## Installing
+## Install
 
 1. Install `NFSUG1VITA.vpk` with VitaShell.
-2. In VitaShell, create the folder `ux0:data/NFSUG1VITA/` (or start the game once; it creates the folder and
-   closes).
-3. On your PC, open the folder where the game is installed (the one with `Speed.exe`).
-4. Copy **everything inside that folder** to `ux0:data/NFSUG1VITA/` on the Vita (VitaShell's FTP or USB mode works).
-   `Speed.exe` must end up directly at `ux0:data/NFSUG1VITA/Speed.exe`.
-5. Start the game from the home screen.
+2. Create the folder `ux0:data/NFSUG1VITA/` in VitaShell (or start the game once; it creates the folder and closes).
+3. On your PC, open the game folder (the one with `Speed.exe`) and copy **everything inside it** to
+   `ux0:data/NFSUG1VITA/` (VitaShell's FTP or USB mode works). `Speed.exe` must end up at
+   `ux0:data/NFSUG1VITA/Speed.exe`.
+4. Start the game from the home screen.
 
-If the game closes right away, check `ux0:data/NFSUG1VITA/nfsug1vita.log`: it says what is missing.
+If the game closes right away, `ux0:data/NFSUG1VITA/nfsug1vita.log` says what is missing.
 
 ## Controls
 
-| Driving | | Menus | |
-|---|---|---|---|
-| Left stick / D-pad left-right | Steer | D-pad | Move |
-| R | Accelerate | ✕ | Select |
-| L | Brake / reverse | ○ | Back |
-| ✕ | Nitrous | △ | Extra option on the screen (Customize, Stock, …) |
-| □ | Handbrake | START | Start / skip |
-| ○ | Look back | | |
-| △ | Change camera | | |
-| D-pad up / down, or rear touch right / left | Shift up / down | | |
-| SELECT | Reset car to the track | | |
-| SELECT + △ | On-screen keyboard | | |
-| START | Pause | | |
+### Menus
 
-To quit, use the PS button.
+| Button | Action |
+|--------|--------|
+| <img src="assets/icons/dpad-up.svg" width="20" alt="D-pad"> | Move |
+| <img src="assets/icons/cross.svg" width="20" alt="Cross"> | Select |
+| <img src="assets/icons/circle.svg" width="20" alt="Circle"> | Back |
+| <img src="assets/icons/triangle.svg" width="20" alt="Triangle"> | Extra option on the screen (Customize, Stock, …) |
+| <img src="assets/icons/start.svg" width="20" alt="Start"> | Start, skip movie |
+
+### Driving
+
+| Button | Action |
+|--------|--------|
+| <img src="assets/icons/r.svg" width="20" alt="R"> | Accelerate |
+| <img src="assets/icons/l.svg" width="20" alt="L"> | Brake / reverse |
+| <img src="assets/icons/lstick.svg" width="20" alt="Left stick"> <img src="assets/icons/dpad-left.svg" width="20" alt="D-pad left"> <img src="assets/icons/dpad-right.svg" width="20" alt="D-pad right"> | Steer |
+| <img src="assets/icons/cross.svg" width="20" alt="Cross"> | Nitrous |
+| <img src="assets/icons/square.svg" width="20" alt="Square"> | Handbrake |
+| <img src="assets/icons/circle.svg" width="20" alt="Circle"> | Look back |
+| <img src="assets/icons/triangle.svg" width="20" alt="Triangle"> | Change camera |
+| <img src="assets/icons/dpad-up.svg" width="20" alt="D-pad up"> / <img src="assets/icons/dpad-down.svg" width="20" alt="D-pad down"> | Shift up / down |
+| Rear touch, right / left | Shift up / down |
+| <img src="assets/icons/select.svg" width="20" alt="Select"> | Reset car to the track |
+| <img src="assets/icons/start.svg" width="20" alt="Start"> | Pause |
+
+Text fields open the Vita keyboard (or <img src="assets/icons/select.svg" width="20" alt="Select"> +
+<img src="assets/icons/triangle.svg" width="20" alt="Triangle">). To quit, use the PS button.
 
 ## Settings
 
-Settings are optional. Create a text file `ux0:data/NFSUG1VITA/nfsug1vita.cfg` with one setting per line (make sure it is not saved as
-`nfsug1vita.cfg.txt`), for example:
+Settings are optional. Create a text file `ux0:data/NFSUG1VITA/nfsug1vita.cfg` (not `nfsug1vita.cfg.txt`) with one
+setting per line, for example:
 
 ```
 menu_widescreen=off
 ```
 
 | Setting | Values | What it does |
-|---|---|---|
+|---------|--------|--------------|
 | `widescreen` | `on` (default), `off` | Full 16:9 picture, or the original 4:3 one |
+| `fit_4_3` | `stretch` (default), `pillarbox` | With `widescreen=off`: stretch the 4:3 picture, or keep it with black bars |
 | `menu_widescreen` | `on` (default), `off` | Menus laid out for the wide screen, or centred at 4:3 |
 | `hud_widescreen` | `on` (default), `off` | Race HUD at the screen edges, or centred at 4:3 |
 | `button_prompts` | `vita` (default), `pc` | Vita buttons on screen, or the original PC keys |
 | `rear_touch` | `on` (default), `off` | Gear shifting on the rear touch pad |
-| `fit_4_3` | `stretch` (default), `pillarbox` | With `widescreen=off`: stretch the 4:3 picture, or keep it with black bars |
 | `car_reflection_interval` | `1` (default) to `6` | Higher values update the car reflections less often, for more speed |
 
 ## Known issues
 
 - A few frames drop below 30 fps in busy moments of a race.
 - The 3D garage behind some menus can look washed out.
-- Online and LAN play are not available.
+- No online or LAN play.
 
-## Building
+## Build
 
-You need [VitaSDK](https://vitasdk.org), [LLVM](https://github.com/llvm/llvm-project/releases) (clang and lld),
-Python 3 and PowerShell, plus your own game folder (the code is generated from your `Speed.exe`). Set `VITASDK` and
-`NFSU_LLVM` to their folders (in the environment, or in `tools/env.local.ps1`), then run:
+Requirements: [VitaSDK](https://vitasdk.org) (`VITASDK`), [LLVM](https://github.com/llvm/llvm-project/releases)
+with clang and lld (`NFSU_LLVM`), Python 3, PowerShell. Variables can also go in `tools/env.local.ps1`.
 
 ```powershell
-tools/build.ps1 -Game "<your game folder>"
+tools/build.ps1 -Game "<folder with Speed.exe>"   # -> build-release-clang/NFSUG1VITA.vpk
 ```
 
-The VPK is written to `build-release-clang/NFSUG1VITA.vpk`. The options are described at the top of
-`tools/build.ps1`.
+- The recompiled code is generated from your own `Speed.exe`; no game code or data is in this repository.
+- Shaders ship prebuilt in `shaders/gxp/`.
+- The build options are described at the top of `tools/build.ps1`.
+
+| Path | Contents |
+|------|----------|
+| `include/` | virtual x86 CPU, runtime, Win32 and platform headers |
+| `src/lib/` | runtime: guest memory, threads, Win32, C runtime, Direct3D 9 and D3DX |
+| `src/platform/` | Vita backend: GXM renderer, audio, input, sync, logging |
+| `src/nfsu/` | entry point, native replacements of game functions |
+| `shaders/` | Cg shaders and compiled binaries |
+| `tools/` | recompiler and build scripts |
 
 ## Credits
 
-- [Grarak](https://github.com/Grarak) — [psp2-tooling](https://github.com/Grarak/psp2-tooling) for profiling on the
-  Vita, and [mh3-wii](https://github.com/Grarak/mh3-wii), which set the performance goal for this port.
-- [GrapheneCt](https://github.com/GrapheneCt) — CapUnlocker.
-- EA Black Box — the original *Need for Speed Underground*.
+- [Grarak](https://github.com/Grarak): [psp2-tooling](https://github.com/Grarak/psp2-tooling) and
+  [mh3-wii](https://github.com/Grarak/mh3-wii)
+- [GrapheneCt](https://github.com/GrapheneCt): CapUnlocker
+- EA Black Box: *Need for Speed Underground*
 
 ## License
 
-The port's own code is MIT (see [LICENSE](LICENSE)); third-party parts keep their own licenses
-([THIRD_PARTY.md](THIRD_PARTY.md)). The game itself is not included.
+MIT for the port's own code ([LICENSE](LICENSE)); third-party parts: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 Unofficial, non-commercial fan port, not affiliated with or endorsed by Electronic Arts. *Need for Speed* is a
-trademark of Electronic Arts. You must own the game to play.
+trademark of Electronic Arts. You must own the game.
+
+<!-- BADGES -->
+
+[issues-shield]: https://img.shields.io/github/issues/NDRWhun/UG1VITA?label=issues&style=for-the-badge&labelColor=1a1f3d&color=2f7bff&logo=github&logoColor=white
+[issues-url]: ../../issues
+[commit-shield]: https://img.shields.io/github/last-commit/NDRWhun/UG1VITA?label=updated&style=for-the-badge&labelColor=1a1f3d&color=ff3b5c
+[commit-url]: ../../commits/main
+[platform-shield]: https://img.shields.io/badge/PS%20Vita-native-2f7bff?style=for-the-badge&labelColor=1a1f3d&logo=playstation&logoColor=white
+[platform-url]: https://vitasdk.org
+[resolution-shield]: https://img.shields.io/badge/960x544-native-b44dff?style=for-the-badge&labelColor=1a1f3d
+[resolution-url]: #settings
+[renderer-shield]: https://img.shields.io/badge/renderer-sceGxm-ff3b5c?style=for-the-badge&labelColor=1a1f3d
+[renderer-url]: #build
+[license-shield]: https://img.shields.io/badge/license-MIT-ff3b5c?style=for-the-badge&labelColor=1a1f3d
+[license-url]: LICENSE
