@@ -57,6 +57,10 @@ public:
     uint32_t completedFrame();
     // Index of the newest frame begun (render::Frame::index), 0 before the first.
     uint32_t lastBegunFrame() const;
+    // Program list: after init, before the game draws or registers vertex layouts. Creates the shader programs listed
+    // in path (written by an earlier run) now instead of at their first draw, and lists every program created in
+    // path at shutdown.
+    void usePrograms(const char* path);
     bool busy(const render::Resource& resource) { return resource.lastUse > completedFrame(); }
 
     // Null when out of memory. Target textures are rendered to and sampled; the others are written by

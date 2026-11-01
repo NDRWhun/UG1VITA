@@ -324,6 +324,14 @@ bool racing()
     return coordinator && race && dword(coordinator) == 4 && dword(race) == 4;
 }
 
+void raceState(x86::reg32* coordinatorState, x86::reg32* raceStage)
+{
+    const x86::reg32 coordinator = dword(RaceCoordinator);
+    const x86::reg32 race = dword(CurrentRace);
+    *coordinatorState = coordinator ? dword(coordinator) : ~0u;
+    *raceStage = race ? dword(race) : ~0u;
+}
+
 bool enabled()
 {
     return s_enabled;

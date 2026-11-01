@@ -77,9 +77,17 @@ std::atomic<uint32_t> s_slowDropped{0};
 uint32_t s_hitchLastPresent = 0;
 uint32_t s_renderAvgUs = 0;
 uint32_t s_queueAvgUs = 0;
+uint32_t s_parts[RenderPartCount] = {};
+uint32_t s_partAvgs[RenderPartCount] = {};
 
-// Render thread: queues the present if its interval is over HitchUs and updates the running averages (1/16 of each
-// new value).
+// Moves average 1/16 of the way to value.
+inline void average(uint32_t& avg, uint32_t value)
+{
+    avg = uint32_t(int32_t(avg) + (int32_t(value) - int32_t(avg)) / 16);
+}
+
+// Render thread: queues the present if its interval is over HitchUs, updates the running averages and starts the
+// next present's parts.
 void hitchPresent(uint32_t frame, uint32_t time, uint32_t renderUs, uint32_t queueUs)
 {
     const uint32_t last = s_hitchLastPresent;
@@ -93,13 +101,23 @@ void hitchPresent(uint32_t frame, uint32_t time, uint32_t renderUs, uint32_t que
         }
         else
         {
-            s_slowPresents[written % SlowPresentSlots] = SlowPresent{ frame, time, time - last, renderUs, queueUs,
-                                                                      s_renderAvgUs, s_queueAvgUs };
+            SlowPresent& p = s_slowPresents[written % SlowPresentSlots];
+            p = SlowPresent{ frame, time, time - last, renderUs, queueUs, s_renderAvgUs, s_queueAvgUs, {}, {} };
+            for (int i = 0; i < RenderPartCount; ++i)
+            {
+                p.parts[i] = s_parts[i];
+                p.partAvgs[i] = s_partAvgs[i];
+            }
             s_slowWritten.store(written + 1, std::memory_order_release);
         }
     }
-    s_renderAvgUs = uint32_t(int32_t(s_renderAvgUs) + (int32_t(renderUs) - int32_t(s_renderAvgUs)) / 16);
-    s_queueAvgUs = uint32_t(int32_t(s_queueAvgUs) + (int32_t(queueUs) - int32_t(s_queueAvgUs)) / 16);
+    average(s_renderAvgUs, renderUs);
+    average(s_queueAvgUs, queueUs);
+    for (int i = 0; i < RenderPartCount; ++i)
+    {
+        average(s_partAvgs[i], s_parts[i]);
+        s_parts[i] = 0;
+    }
 }
 
 // Execution lock holders by name.
@@ -382,6 +400,11 @@ void add(Counter counter, uint32_t microseconds)
 void eventSlow(Event event, uint32_t value)
 {
     hitchAdd(s_hitch.events[event], value);
+}
+
+void renderPart(RenderPart part, uint32_t value)
+{
+    s_parts[part] += value;
 }
 
 void totals(Totals& out)

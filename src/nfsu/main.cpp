@@ -290,6 +290,8 @@ int main(int, char**)
         pf::fatal("the game executable is missing or not the supported version (see the log)");
     if (!pf::gxm::Device::get().init())
         pf::fatal("graphics initialisation failed");
+    if (pf::Config::getBool("gxm_program_list", true))
+        pf::gxm::Device::get().usePrograms(dataPath("gxm_programs.bin").c_str());
 
     win32::File::setDataDirectory((s_dataDirectory + "/").c_str());
     win32::File::setCdDirectory((s_dataDirectory + "/").c_str());

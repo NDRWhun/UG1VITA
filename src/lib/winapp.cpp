@@ -451,7 +451,7 @@ void WinApplication::lockContext(const x86::CPU& cpu)
     {
         const uint32_t acquired = pf::perf::now();
         s_heldSince = acquired;
-        if (s_gameReleased && scheduler::holder(control) == pf::perf::HolderGame)
+        if (s_gameReleased && pf::perf::gameHolder(scheduler::holder(control)))
         {
             s_gameReleased = false;
             pf::perf::gameBlocked(pf::perf::Block(s_gameBlock), acquired - s_gameReleasedAt, acquired - start);
@@ -471,7 +471,7 @@ void WinApplication::unlockContext(const x86::CPU& cpu)
             ThreadControl* control = getMemory<ThreadControl*>(cpu.efs + ThreadControlOffset);
             const pf::perf::Holder holder = scheduler::holder(control);
             pf::perf::held(holder, scheduler::holderSlot(control), released - s_heldSince);
-            if (holder == pf::perf::HolderGame)
+            if (pf::perf::gameHolder(holder))
             {
                 s_gameReleased = true;
                 s_gameReleasedAt = released;
