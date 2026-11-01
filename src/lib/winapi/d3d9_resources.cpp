@@ -840,8 +840,6 @@ enum : BYTE
     D3DDECLTYPE_UNUSED = 17
 };
 
-const uint8_t s_typeSize[] = { 4, 8, 12, 16, 4, 4, 4, 8, 4 };
-
 void add(render::VertexLayout& layout, uint8_t usage, uint8_t type, uint16_t offset)
 {
     if (layout.count < render::MaxVertexElements)

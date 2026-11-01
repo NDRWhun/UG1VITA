@@ -37,7 +37,7 @@ enum Set : reg8 { Key32, Key16, Key8, Tt21, Tt14 };
 // Character codes of the glyphs (bytes the language tables pass through unchanged).
 const reg8 Cross = 0x81, Circle = 0x82, Square = 0x83, Triangle = 0x84, ShoulderL = 0x86, ShoulderR = 0x87,
            Start = 0x88, Select = 0x89, DpadUp = 0x8B, DpadDown = 0x8C, DpadLeft = 0x8D, DpadRight = 0x8E,
-           LeftStick = 0x8F, RightStick = 0x90, RearLeft = 0x91, RearRight = 0x93, DpadLeftRight = 0x94;
+           LeftStick = 0x8F, RightStick = 0x90, RearLeft = 0x91, RearRight = 0x93;
 
 struct Glyph
 {

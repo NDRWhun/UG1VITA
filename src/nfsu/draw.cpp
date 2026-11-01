@@ -105,7 +105,6 @@ inline sreg32 ld16s(reg32 address) { return sreg32(sreg16(rc::ld16(address))); }
 inline reg32 bits(float value) { reg32 r; memcpy(&r, &value, 4); return r; }
 inline float asFloat(reg32 value) { float f; memcpy(&f, &value, 4); return f; }
 inline const float* guestFloats(reg32 address) { return reinterpret_cast<const float*>(rc::host(address)); }
-inline const DWORD* guestWords(reg32 address) { return reinterpret_cast<const DWORD*>(rc::host(address)); }
 inline void loadMatrix(reg32 address, float* m) { memcpy(m, rc::host(address), 64); }
 
 struct Settings

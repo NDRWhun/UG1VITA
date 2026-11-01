@@ -62,7 +62,6 @@ static const HANDLE CurrentThreadHandle = 0xfffffffe;
 // The executable's module handle: its image base (Speed.exe has no relocations, so it always loads there).
 static const HMODULE ExecutableHandle = 0x400000;
 
-static const DWORD WAIT_FAILED = 0xffffffff;
 static const DWORD MEM_COMMIT = 0x1000;
 static const DWORD MEM_RELEASE = 0x8000;
 static const DWORD HEAP_ZERO_MEMORY = 0x8;

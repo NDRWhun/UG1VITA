@@ -22,7 +22,7 @@
   <a href="../../issues">Report Bug</a>
 </p>
 
-[![issues][issues-shield]][issues-url]&nbsp;[![last commit][commit-shield]][commit-url]
+[![build][build-shield]][build-url]&nbsp;[![issues][issues-shield]][issues-url]&nbsp;[![last commit][commit-shield]][commit-url]
 
 [![platform][platform-shield]][platform-url]&nbsp;[![resolution][resolution-shield]][resolution-url]&nbsp;[![renderer][renderer-shield]][renderer-url]&nbsp;[![license][license-shield]][license-url]
 
@@ -145,6 +145,8 @@ trademark of Electronic Arts. You must own the game.
 
 <!-- BADGES -->
 
+[build-shield]: https://img.shields.io/github/actions/workflow/status/NDRWhun/UG1VITA/build.yml?branch=main&label=build&style=for-the-badge&labelColor=1a1f3d&logo=githubactions&logoColor=white
+[build-url]: ../../actions/workflows/build.yml
 [issues-shield]: https://img.shields.io/github/issues/NDRWhun/UG1VITA?label=issues&style=for-the-badge&labelColor=1a1f3d&color=2f7bff&logo=github&logoColor=white
 [issues-url]: ../../issues
 [commit-shield]: https://img.shields.io/github/last-commit/NDRWhun/UG1VITA?label=updated&style=for-the-badge&labelColor=1a1f3d&color=ff3b5c

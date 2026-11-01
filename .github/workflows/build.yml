@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  runtime:
+    name: Runtime and shaders
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache VitaSDK and LLVM
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ hashFiles('tools/deps.py') }}
+
+      - name: Check the recompiler scripts
+        shell: pwsh
+        run: python -I -m compileall -q tools
+
+      - name: Compile the runtime and shaders
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./tools/env.ps1
+          $env:NFSU_LLVM = Get-Dependency 'llvm'
+          cmake -S . -B build-check -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vita-clang.cmake -DCMAKE_BUILD_TYPE=Release -DNFSU_RUNTIME_CHECK=ON
+          if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
+          cmake --build build-check
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }

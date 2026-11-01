@@ -9,9 +9,8 @@
 namespace win32
 {
 
-Renderer::Renderer(WinApplication* application, Window *window)
+Renderer::Renderer(WinApplication* application, Window*)
     :   m_application(application)
-    ,   m_window(window)
     ,   m_videoMemory(new MemMap(pf::gxm::MaxWindowWidth * pf::gxm::MaxWindowHeight * 2 * 2)) // double buffer 16 bits
     ,   m_currentBuffer(0)
     ,   m_width(640)

@@ -36,7 +36,6 @@ private:
 
 private:
     WinApplication*         m_application;
-    Window*                 m_window;
     MemMap*                 m_videoMemory;
     x86::reg32              m_currentBuffer;
     x86::reg32              m_width;
