@@ -422,18 +422,21 @@ def cg_rcr(ctx, dst, cnt):
 
 # ---- bit scans ------------------------------------------------------------------------------------------------
 
-def cg_bsf(ctx, dst, src):
+def _bit_scan(ctx, dst, src, index):
+    """dst = the bit index when the source is not 0, else its old value (written either way, as cmovcc)."""
+    bits = dst.size * 8
     lines = ['const x86::reg32 s = %s;' % ctx.val(src, 32)]
     lines += ctx.set_flags({'zf': '(s == 0)'})
-    lines += ['if (s != 0)', '{'] + ['    ' + l for l in ctx.put(dst, '%s(__builtin_ctz(s))' % T(dst.size * 8))] + ['}']
+    lines += ctx.put(dst, 's != 0 ? %s(%s) : %s' % (T(bits), index, ctx.val(dst, bits)))
     return block(lines)
+
+
+def cg_bsf(ctx, dst, src):
+    return _bit_scan(ctx, dst, src, '__builtin_ctz(s)')
 
 
 def cg_bsr(ctx, dst, src):
-    lines = ['const x86::reg32 s = %s;' % ctx.val(src, 32)]
-    lines += ctx.set_flags({'zf': '(s == 0)'})
-    lines += ['if (s != 0)', '{'] + ['    ' + l for l in ctx.put(dst, '%s(31 - __builtin_clz(s))' % T(dst.size * 8))] + ['}']
-    return block(lines)
+    return _bit_scan(ctx, dst, src, '31 - __builtin_clz(s)')
 
 
 # ---- bit tests: CF = the selected bit; the other flags are left as they were -------------------------------
