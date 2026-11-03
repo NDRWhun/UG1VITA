@@ -105,6 +105,7 @@ menu_widescreen=off
 - A few frames drop below 30 fps in busy moments of a race.
 - The 3D garage behind some menus can look washed out.
 - No online or LAN play.
+- There are some issues with EU Region versions due to shifted addresses. It's being investigated now. 
 
 ## Build
 
