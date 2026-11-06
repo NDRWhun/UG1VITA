@@ -349,6 +349,8 @@ struct MenuElement
 };
 std::vector<MenuElement> s_menu;    // by object while a menu flush runs
 bool s_menuFlush = false, s_menuAllLeft = false, s_menuFixed = false;
+// A menu package flush with menu_widescreen=off on the wide screen: objects wholly outside x 0..640 stay off it.
+bool s_menuCentredFlush = false;
 
 size_t clusterOf(size_t i)
 {
@@ -825,12 +827,13 @@ void sub_4f5730(win32::WinApplication* app, x86::CPU& cpu)
     const bool hud = isHudPackage(package);
     s_anchorFlush = hud && anchoring();
     s_menuFlush = !hud && menuWidescreen();
+    s_menuCentredFlush = !hud && s_hudWidth < 1.0 && !s_menuFlush;
     if (s_anchorFlush)
         placeElements(rc::ld32(cpu.ecx + 0xc));
     else if (s_menuFlush)
         placeMenuElements(rc::ld32(cpu.ecx + 0xc), package);
     sub_4f5730_guest(app, cpu);
-    s_anchorFlush = s_menuFlush = false;
+    s_anchorFlush = s_menuFlush = s_menuCentredFlush = false;
 }
 
 // Draws the polygons of an FE render object (FERenderObject in the argument, its FEObject at +8) through the 2D
@@ -868,6 +871,17 @@ static void placeAndDraw(win32::WinApplication* app, x86::CPU& cpu)
         return;
     }
     const x86::reg32 renderObject = argument(cpu, 0);
+    if (s_menuCentredFlush)
+    {
+        const Span x = renderSpan(renderObject);
+        if (!x.empty() && (x.x1 <= 0.0f || x.x0 >= 640.0f))
+        {
+            setMapping(0, 4);
+            drawObject(app, cpu);
+            setPlace(Place::Centre);
+            return;
+        }
+    }
     if (!anchoring() || rc::ld32(rc::ld32(renderObject + 8) + FEObjectType) == TypeMovie)
     {
         drawObject(app, cpu);
