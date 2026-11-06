@@ -7,6 +7,7 @@
 #include <platform/config.h>
 #include <platform/log.h>
 #include <platform/perf.h>
+#include <recomp.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -260,6 +261,10 @@ void sub_4483c0(win32::WinApplication* app, x86::CPU& cpu)
 void sub_409580(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::Views);
+    // Its first clear test (0x4098A2, PATCHES in generate.py) reads [0x6D3A00], zero padding past the envmap rows in
+    // .rdata: the game's clear flag [0x73645C], or 0 while the magazine screen is shown ([0x735768]) so the background
+    // its FE view cleared and drew stays (native.cpp sub_409cd0).
+    rc::st32(0x6d3a00, rc::ld8(0x735768) ? 0 : rc::ld32(0x73645c));
     sub_409580_guest(app, cpu);
 }
 

@@ -31,6 +31,7 @@ void sub_4086b0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_4f5730_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_514b90_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_58e810_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_409cd0_guest(win32::WinApplication* app, x86::CPU& cpu);
 
 namespace native
 {
@@ -623,6 +624,15 @@ bool menuPlace(x86::reg32 renderObject)
         setMapping(0.0, 4.0);
         return true;
     }
+    // A picture over the whole 640x480 space, a screen backdrop (the magazine screen's, x -50..690 y -50..530): its
+    // 640 wide middle across the screen. The layout keeps it as a centred object.
+    const x86::reg32 type = rc::ld32(object + FEObjectType);
+    if ((type == TypeImage || type == TypeColoredImage) && x.x0 <= 0.0f && x.x1 >= 640.0f && box.y0 <= 0.0f &&
+        box.y1 >= 480.0f)
+    {
+        setMapping(1.0 / 320.0, 1.0);
+        return true;
+    }
     // An object first drawn this frame is placed by its own extent.
     const MenuElement* element = findMenuElement(object);
     const bool known = element && !element->box.x.empty();
@@ -946,6 +956,28 @@ void sub_4f3030(win32::WinApplication*, x86::CPU& cpu)
     rc::st32(LastX, x);
     rc::st32(LastY, y);
     cpu.esp += 4;
+}
+
+// Background FE view (cdecl argument != 0: view 0x71AA4C, else 0x71AA30). The PC game draws the magazine screen's
+// background without a clear (0x409CE9 pushes 0) and then the 3D pass clears it away: a black magazine. While the
+// magazine is shown ([0x735768], set by MagazineScreen) this pass is cleared first (0x40ABD0, esi = view, cdecl clear
+// flag 1) and the 3D pass skips its clear (PATCHES 0x4098A2 in generate.py, phases.cpp sub_409580).
+void sub_409cd0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    if (rc::ld8(0x735768) && argument(cpu, 0))
+    {
+        const x86::reg32 eax = cpu.eax, ebx = cpu.ebx, ecx = cpu.ecx, edx = cpu.edx, esi = cpu.esi, edi = cpu.edi,
+                         ebp = cpu.ebp, esp = cpu.esp;
+        cpu.esp -= 4;
+        rc::st32(cpu.esp, 1);
+        cpu.esi = 0x71aa4c;
+        ::native::callGuest(app, cpu, 0x40abd0);
+        if (cpu.terminate)
+            return;
+        cpu.eax = eax, cpu.ebx = ebx, cpu.ecx = ecx, cpu.edx = edx, cpu.esi = esi, cpu.edi = edi, cpu.ebp = ebp;
+        cpu.esp = esp;
+    }
+    sub_409cd0_guest(app, cpu);
 }
 
 // D3DX: the port's effect layer and matrix helpers (src/lib/winapi/d3dx9), stdcall like the guest's.

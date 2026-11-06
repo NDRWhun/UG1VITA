@@ -58,6 +58,7 @@ NATIVE_OVERRIDES = [
     0x514b90,   # FE render object draw: its polygons at the object's place (centred, screen edge or full width)
     0x58e810,   # track map draw: the whole map at its place
     0x4f3030,   # FE mouse pointer draw: keeps the pointer state, draws nothing (no pointer on the Vita)
+    0x409cd0,   # FE background view: cleared first on the magazine screen
     # D3DX (include/winapi/d3dx9.h): effects without the guest HLSL compiler; the math entries are jumps through
     # the PSGP dispatch table.
     0x5af9e5,   # D3DXCreateEffectPool
@@ -192,6 +193,9 @@ PATCHES = [
     # [0x702AC0] are read from a copy at 0x6D3800 / 0x6D3810 (nfsu::envmap, car_reflection_interval).
     (0x40af38, 'f7348dac2a7000', 'f7348d00386d00'),
     (0x40af64, '8d04c5c02a7000', '8d04c510386d00'),
+    # Magazine screen: the 3D pass clear test 0x4098A2 reads a copy at 0x6D3A00 of [0x73645C], 0 while the magazine is
+    # shown (phases.cpp sub_409580), so the background the FE view cleared and drew stays (native.cpp sub_409cd0).
+    (0x4098a2, '833d5c64730001', '833d003a6d0001'),
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
