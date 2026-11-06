@@ -193,7 +193,7 @@ static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Conve
 // nitrous, Square the handbrake, Triangle the camera, Circle looks back, d-pad up/down and the rear touch halves
 // shift. Menus: Cross accepts (20), Circle goes back (23), Start is the game's Start (25, also "button 2"), Square
 // "button 3" (26), L / R the triggers (27 / 28), d-pad and hat navigate; Triangle presses the menu bar's extra
-// item (src/nfsu/prompts.cpp, button_prompts=vita).
+// item (src/nfsu/prompts.cpp, button_prompts=vita), on the vinyl layer screen it opens the vinyl colours (21).
 static const x86::reg32 s_raceActions[16] = { 10, 9, 6, 5, 8, 7, 2, 1, 14, 12, 0, 0, 7, 4, 8, 3 };
 static const x86::reg32 s_menuActions[16] = { 0, 23, 20, 26, 0, 0, 27, 28, 0, 25, 0, 0, 16, 19, 17, 18 };
 static const x86::reg32 s_raceHat[4] = { 0, 0, 3, 4 };
@@ -229,6 +229,9 @@ static void reportPools()
 // The game's defaults for the EMS product (entry 0x00704258: GUID, 16 race, 16 menu actions) become the port's.
 static void setPadBindings()
 {
+    // Input scanner of action 21 (entry 0x007039C0, event at +8): FENG_BUTTON1 (24), which the screens receive as
+    // PAD_BUTTON1, instead of FENG_SELECT_ALTERNATE (30).
+    guestDword(0x007039C8) = 0x18;
     for (x86::reg32 i = 0; i < 16; ++i)
     {
         guestDword(0x00704268 + 4 * i) = s_raceActions[i];
@@ -296,6 +299,21 @@ static void pollTextField()
 // map: race actions while driving, menu actions in menus; in the front end the race table stays (it has no
 // consumers there and the controls screen shows it). Saved pad bindings are overridden. Inputs held across a
 // change stay hidden until released, as the keyboard's map change releases its keys.
+// The current screen's package name is at 0x0072CDD0; on MU_GarageVinylLayerV2.fng Triangle sends action 21.
+static bool vinylLayerScreen()
+{
+    static const char name[] = "mu_garagevinyllayerv2.fng";
+    for (x86::reg32 i = 0; i < sizeof(name); ++i)
+    {
+        char c = char(win32::g_guestBase[0x0072CDD0 + i]);
+        if (c >= 'A' && c <= 'Z')
+            c = char(c - 'A' + 'a');
+        if (c != name[i])
+            return false;
+    }
+    return true;
+}
+
 static void padPollHook(x86::reg32* buttons, int* pov)
 {
     pollTextField();
@@ -306,6 +324,7 @@ static void padPollHook(x86::reg32* buttons, int* pov)
     const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
     const bool race = driving || frontEnd;
     const bool menu = !driving;
+    const bool vinylColours = menu && vinylLayerScreen();
     for (x86::reg32 slot = slots; slot < slots + slotCount * slotSize; slot += slotSize)
     {
         // Channel 0 (the pad), a controller type (0x13 is the keyboard).
@@ -314,7 +333,7 @@ static void padPollHook(x86::reg32* buttons, int* pov)
         for (x86::reg32 i = 0; i < 16; ++i)
         {
             guestDword(slot + 0x18 + 4 * i) = race ? s_raceActions[i] : 0;
-            guestDword(slot + 0x98 + 4 * i) = menu ? s_menuActions[i] : 0;
+            guestDword(slot + 0x98 + 4 * i) = !menu ? 0 : vinylColours && i == 0 ? 21 : s_menuActions[i];
         }
         for (x86::reg32 i = 0; i < 16; ++i)
         {
@@ -343,7 +362,7 @@ static void padPollHook(x86::reg32* buttons, int* pov)
     static x86::reg32 s_previous = 0;
     const x86::reg32 pressed = *buttons & ~s_previous;
     s_previous = *buttons;
-    if (menu && (pressed & 1u))
+    if (menu && !vinylColours && (pressed & 1u))
         nfsu::prompts::menuTriangle();
 }
 
