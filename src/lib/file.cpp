@@ -245,6 +245,7 @@ File::File(const File& other)
     :   m_file(open(other.m_filename.c_str(), O_RDONLY, 0664))
     ,   m_filename(other.m_filename)
     ,   m_readFilter(other.m_readFilter)
+    ,   m_readOnly(true)
 {
     pf::logDebug("opening file %s for Map", m_filename.c_str());
 }
@@ -284,6 +285,7 @@ File::File(const char* path, x86::reg32 mode, x86::reg32 flags, x86::reg32 creat
         openFlags |= O_CREAT;
 
     m_file = open(m_filename.c_str(), openFlags, 0664);
+    m_readOnly = !writes;
     // The game probes files that do not exist (NFSUNDER\ZDIR.BIN, Config.bin): not an error.
     if (m_file == -1)
     {
@@ -326,8 +328,10 @@ x86::reg32 File::seek(x86::reg32 mode, x86::sreg32 offset)
         RC_ASSERT(false);
         break;
     }
-    x86::reg32 result = x86::reg32(lseek(m_file, offset, seekMode));
-    return result;
+    const off_t position = lseek(m_file, offset, seekMode);
+    if (position >= 0)
+        m_position = position;
+    return x86::reg32(position);
 }
 
 x86::reg32 File::read(void* buffer, x86::reg32 max, x86::reg32* totalRead)
@@ -339,9 +343,39 @@ x86::reg32 File::read(void* buffer, x86::reg32 max, x86::reg32* totalRead)
     }
     const off_t offset = m_readFilter ? lseek(m_file, 0, SEEK_CUR) : 0;
     *totalRead = x86::reg32(::read(m_file, buffer, max));
+    // A read cut short by the system (the game suspended with the PS button while the read waited, the memory card
+    // busy) fails at once; the game then drops what it was loading or streaming (the menu music stopped). The file is
+    // opened again at the same position and the read done once more.
+    if (*totalRead == x86::reg32(-1) && m_readOnly)
+    {
+        const int error = errno;
+        const bool reopened = reopenAt(m_position);
+        pf::logError("file %s: read of %u bytes at %ld failed (errno %d)%s", m_filename.c_str(), unsigned(max),
+                     long(m_position), error, reopened ? ", opened again" : ", not opened again");
+        if (reopened)
+            *totalRead = x86::reg32(::read(m_file, buffer, max));
+    }
+    if (*totalRead != x86::reg32(-1))
+        m_position += off_t(*totalRead);
     if (m_readFilter && offset >= 0 && *totalRead != x86::reg32(-1))
         m_readFilter(x86::reg32(offset), static_cast<x86::reg8*>(buffer), *totalRead);
     return *totalRead != x86::reg32(-1);
+}
+
+bool File::reopenAt(off_t position)
+{
+    const int file = open(m_filename.c_str(), O_RDONLY, 0664);
+    if (file < 0)
+        return false;
+    if (lseek(file, position, SEEK_SET) != position)
+    {
+        close(file);
+        return false;
+    }
+    if (m_file >= 0)
+        close(m_file);
+    m_file = file;
+    return true;
 }
 
 x86::reg32 File::write(const void* buffer, x86::reg32 max, x86::reg32* totalWritten)

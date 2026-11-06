@@ -104,6 +104,10 @@ private:
     int m_file;
     std::string m_filename;
     ReadFilter m_readFilter;
+    bool m_readOnly = false;    // opened for reading only: a failed read opens it again (reopenAt)
+    off_t m_position = 0;       // file position after the last seek or read of a read-only file
+
+    bool reopenAt(off_t position);
 };
 
 }
