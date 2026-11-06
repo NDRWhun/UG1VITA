@@ -428,8 +428,9 @@ float endWeight(const MenuElement& fill, float x, float band, float side, bool* 
     {
         if (!other.onScreen || other.stretch || &other == &fill)
             continue;
+        // Objects above or below that only share an edge with the fill (the career garage's top bar) don't count.
         const Box& o = other.box;
-        if (x < o.x.x0 - 4.0f || x > o.x.x1 + 4.0f || !(o.y0 < fill.box.y1 && fill.box.y0 < o.y1))
+        if (x < o.x.x0 - 4.0f || x > o.x.x1 + 4.0f || std::min(o.y1, fill.box.y1) - std::max(o.y0, fill.box.y0) < 1.0f)
             continue;
         const float d = x >= o.x.x0 && x <= o.x.x1 ? 0.0f : std::min(std::fabs(o.x.x0 - x), std::fabs(o.x.x1 - x));
         if (d < distance || (d == distance && std::fabs(other.weight) > strength))
