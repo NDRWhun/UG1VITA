@@ -157,7 +157,7 @@ uint32_t buttonMask(Input input)
     return mask;
 }
 
-// The adapter's four axes: X, Y (left stick), Z (combined pedal, held centred) and Rz (right stick Y).
+// The adapter's four axes: X, Y (left stick), Z (combined pedal) and Rz (right stick Y).
 bool axisPresent(Axis axis)
 {
     return axis == AxisX || axis == AxisY || axis == AxisZ || axis == AxisRz;
@@ -219,15 +219,35 @@ static const PadButton s_padButtons[] =
 };
 
 static bool s_touchReady = false;
-static bool s_rearTouch = true;
+static bool s_rearTouch = false;
+static bool s_waitForRearRelease = false;
 
-// Setting rear_touch (on by default) turns the rear touch inputs off.
+// Rear touch is opt-in; the d-pad's up/down buttons already shift without it.
 static void initTouch()
 {
     s_touchReady = true;
-    s_rearTouch = pf::Config::getBool("rear_touch", true);
+    s_rearTouch = pf::Config::getBool("rear_touch", false);
     if (s_rearTouch)
         sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
+}
+
+bool rearTouchEnabled()
+{
+    if (!s_touchReady)
+        initTouch();
+    return s_rearTouch;
+}
+
+bool setRearTouchEnabled(bool enabled)
+{
+    if (rearTouchEnabled() == enabled)
+        return true;
+    if (sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, enabled ? SCE_TOUCH_SAMPLING_STATE_START
+                                                           : SCE_TOUCH_SAMPLING_STATE_STOP) < 0)
+        return false;
+    s_rearTouch = enabled;
+    s_waitForRearRelease = enabled;
+    return true;
 }
 
 static float stickValue(unsigned char raw)
@@ -258,8 +278,11 @@ PadSample readPad()
     SceTouchData touch;
     if (s_rearTouch && sceTouchPeek(SCE_TOUCH_PORT_BACK, &touch, 1) >= 0)
     {
-        for (SceUInt32 i = 0; i < touch.reportNum && i < SCE_TOUCH_MAX_REPORT; ++i)
-            sample.inputs |= bit(touch.report[i].x < s_panelCentreX ? RearLeft : RearRight);
+        if (touch.reportNum == 0)
+            s_waitForRearRelease = false;
+        if (!s_waitForRearRelease)
+            for (SceUInt32 i = 0; i < touch.reportNum && i < SCE_TOUCH_MAX_REPORT; ++i)
+                sample.inputs |= bit(touch.report[i].x < s_panelCentreX ? RearLeft : RearRight);
     }
     return sample;
 }
@@ -336,7 +359,7 @@ State Mapper::update(const PadSample& pad, uint64_t nowUs)
 
     state.axes[AxisX] = pad.sticks[0];
     state.axes[AxisY] = pad.sticks[1];
-    state.axes[AxisZ] = 0.0f;
+    state.axes[AxisZ] = pad.sticks[2];
     state.axes[AxisRz] = pad.sticks[3];
 
     // Hat 0 follows the d-pad: hundredths of a degree clockwise from up, -1 when centred.
@@ -366,6 +389,49 @@ void shapeStick(float x, float y, uint32_t deadZone, uint32_t saturation, float*
     const float scale = (s_stickLinear * t + (1.0f - s_stickLinear) * t * t * t) / magnitude;
     *outX = std::fmax(-1.0f, std::fmin(1.0f, x * scale));
     *outY = std::fmax(-1.0f, std::fmin(1.0f, y * scale));
+}
+
+CameraState garageCamera(float x, float y)
+{
+    shapeStick(x, y, 0, 10000, &x, &y);
+    const float amounts[CameraDirectionCount] = { -y, y, -x, x };
+    CameraState state = {};
+    for (int direction = 0; direction < CameraDirectionCount; ++direction)
+    {
+        const float amount = std::fmax(0.0f, std::fmin(1.0f, amounts[direction]));
+        // 208 / 128 = 1.625: 62.5% faster than the first camera build, with the same dead zone and curve.
+        state.strength[direction] = uint8_t(std::lround(amount * 208.0f));
+        if (state.strength[direction])
+            state.buttons |= 1u << CameraButtons[direction];
+    }
+    return state;
+}
+
+uint8_t steeringValue(float x, float y)
+{
+    shapeStick(x, y, 0, 10000, &x, &y);
+    return uint8_t(128 + std::lround(x * (x < 0 ? 128.0f : 127.0f)));
+}
+
+void LayoutFilter::update(bool race, bool menu, uint32_t* buttons, int* pov)
+{
+    constexpr uint32_t Hat = 1u << 31;
+    // L/R pedals and d-pad left/right steering. Accept/back, pause, shifts and other menu presses still wait
+    // for release, including Cross used to select Resume (which would otherwise activate nitrous).
+    constexpr uint32_t Continuous = (1u << 6) | (1u << 7) | (1u << 13) | (1u << 15) | Hat;
+    const uint32_t held = *buttons | (*pov >= 0 ? Hat : 0);
+    const int layout = (race ? 1 : 0) | (menu ? 2 : 0);
+    if (layout != m_layout)
+    {
+        m_hidden = m_layout < 0 ? 0 : held;
+        if (race && !menu)
+            m_hidden &= ~Continuous;
+        m_layout = layout;
+    }
+    m_hidden &= held;
+    *buttons &= ~m_hidden;
+    if (m_hidden & Hat)
+        *pov = -1;
 }
 
 }}

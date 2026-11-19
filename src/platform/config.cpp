@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>
+#include <string>
 
 namespace pf
 {
@@ -23,6 +24,7 @@ const char* const Known[] =
 {
     // Player settings.
     "widescreen", "hud_widescreen", "menu_widescreen", "button_prompts", "fit_4_3", "frame_rate", "car_reflection_interval", "rear_touch",
+    "garage_camera",
     // Cores, logs and the benchmark.
     "use_core3", "core3_tasks", "timing_log", "timing_phases", "hitch_log", "console_log",
     "benchmark", "benchmark_exit", "benchmark_seconds", "benchmark_laps", "benchmark_opponents", "benchmark_track",
@@ -56,6 +58,7 @@ struct Entry
 
 Entry s_entries[MaxEntries];
 int   s_count = 0;
+std::string s_path;
 
 const char* find(const char* key)
 {
@@ -106,6 +109,7 @@ bool readLine(FILE* file, char* line, int size, bool* tooLong)
 void Config::load(const char* path)
 {
     s_count = 0;
+    s_path = path;
     FILE* file = fopen(path, "rt");
     if (!file)
         return;
@@ -161,6 +165,82 @@ void Config::load(const char* path)
             logError("config: unknown setting '%s'", entry.key);
     }
     fclose(file);
+}
+
+bool Config::setBool(const char* key, bool value)
+{
+    if (s_path.empty() || !isKnown(key) || strlen(key) >= MaxKey)
+        return false;
+    int index = 0;
+    while (index < s_count && strcmp(s_entries[index].key, key) != 0)
+        ++index;
+    if (index == MaxEntries)
+        return false;
+    std::string input;
+    if (FILE* file = fopen(s_path.c_str(), "rb"))
+    {
+        char block[4096];
+        size_t length;
+        while ((length = fread(block, 1, sizeof(block), file)) != 0)
+            input.append(block, length);
+        const bool failed = ferror(file);
+        fclose(file);
+        if (failed)
+            return false;
+    }
+    else if (errno != ENOENT)
+        return false;
+
+    const char* text = value ? "on" : "off";
+    std::string output;
+    bool found = false;
+    for (size_t at = 0; at < input.size();)
+    {
+        const size_t newline = input.find('\n', at);
+        const size_t end = newline == std::string::npos ? input.size() : newline + 1;
+        const size_t separator = input.find('=', at);
+        std::string name = separator < end ? input.substr(at, separator - at) : "";
+        if (at == 0 && name.compare(0, 3, "\xef\xbb\xbf") == 0)
+            name.erase(0, 3);
+        if (separator < end && strcmp(trim(&name[0]), key) == 0)
+        {
+            output.append(input, at, separator + 1 - at);
+            output += text;
+            if (end > at && input[end - 1] == '\n')
+                output += end > at + 1 && input[end - 2] == '\r' ? "\r\n" : "\n";
+            found = true;
+        }
+        else
+            output.append(input, at, end - at);
+        at = end;
+    }
+    if (!found)
+    {
+        if (!output.empty() && output.back() != '\n')
+            output += '\n';
+        output += std::string(key) + "=" + text + "\n";
+    }
+    const std::string temporary = s_path + ".tmp";
+    FILE* file = fopen(temporary.c_str(), "wb");
+    if (!file)
+        return false;
+    bool ok = fwrite(output.data(), 1, output.size(), file) == output.size();
+    if (fflush(file) != 0)
+        ok = false;
+    if (fclose(file) != 0)
+        ok = false;
+    if (!ok || rename(temporary.c_str(), s_path.c_str()) != 0)
+    {
+        remove(temporary.c_str());
+        logError("config: could not save %s", key);
+        return false;
+    }
+    if (index == s_count)
+        ++s_count;
+    strcpy(s_entries[index].key, key);
+    strcpy(s_entries[index].value, text);
+    logInfo("config saved %s=%s", key, text);
+    return true;
 }
 
 bool Config::tryGetBool(const char* key, bool* value)

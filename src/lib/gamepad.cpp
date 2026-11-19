@@ -350,8 +350,8 @@ x86::reg32 Gamepad::getDeviceType8() const
     return 0x0215;
 }
 
-// The left stick is shaped as a whole with the properties of lX, the right stick's Rz on its own; absent axes and
-// lZ read centred.
+// The left stick is shaped as a whole with the properties of X, the right stick's Rz on its own. The game's poll
+// hook consumes horizontal right-stick input for the garage and centres Z before the combined pedal is reported.
 void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov)
 {
     controls::State state;
@@ -360,6 +360,8 @@ void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCo
         pump();
         state = s_state;
     }
+    if (s_pollHook)
+        s_pollHook(&state.buttons, &state.pov, state.axes);
     float shaped[controls::AxisCount] = {};
     const AxisProperties& left = m_axisProperties[controls::AxisX];
     controls::shapeStick(state.axes[controls::AxisX], state.axes[controls::AxisY], left.deadZone, left.saturation,
@@ -370,8 +372,6 @@ void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCo
                          &shaped[controls::AxisRz], &unused);
     *pov = state.pov;
     *buttons = state.buttons;
-    if (s_pollHook)
-        s_pollHook(buttons, pov);
     for (int axis = 0; axis < controls::AxisCount; ++axis)
     {
         const AxisProperties& properties = m_axisProperties[axis];

@@ -76,9 +76,9 @@ public:
     // Joystick buttons and axes now, axes shaped with this device's properties and scaled to their ranges.
     void getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov);
 
-    // Game code run at each getState on the guest thread (execution lock held) with the buttons and hat about to
-    // be reported; it may change them. Set once before the game starts.
-    typedef void (*PollHook)(x86::reg32* buttons, int* pov);
+    // Game code run at each getState on the guest thread (execution lock held), before shaping and scaling axes.
+    // It may change the buttons, hat and normalized axes. Set once before the game starts.
+    typedef void (*PollHook)(x86::reg32* buttons, int* pov, float* axes);
     static void setPollHook(PollHook hook);
 
     // Input pump: reads the pad, posts the key changes as window messages and runs the on-screen keyboard. Called

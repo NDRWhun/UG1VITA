@@ -109,6 +109,8 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/prep.cpp
   src/nfsu/phases.cpp
   src/nfsu/prompts.cpp
+  src/nfsu/controls_menu.cpp
+  src/nfsu/driving_input.cpp
   src/nfsu/particles.cpp
   src/nfsu/native.cpp
 )

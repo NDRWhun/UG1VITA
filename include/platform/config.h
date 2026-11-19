@@ -10,6 +10,9 @@ class Config
 {
 public:
     static void load(const char* path);
+    // Atomically updates the loaded file and the in-memory value, preserving unrelated lines. False leaves
+    // the existing file/value unchanged (for example, when storage is full).
+    static bool setBool(const char* key, bool value);
     // False if the key is missing or its value invalid (logged); value is then unchanged.
     // Booleans: on/off, true/false, yes/no, 1/0 in any case. Integers: decimal.
     static bool tryGetBool(const char* key, bool* value);

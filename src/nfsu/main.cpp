@@ -1,5 +1,7 @@
 #include "bankcode.h"
 #include "bench.h"
+#include "controls_menu.h"
+#include "driving_input.h"
 #include "phases.h"
 #include "prompts.h"
 #include "region.h"
@@ -314,7 +316,7 @@ static bool vinylLayerScreen()
     return true;
 }
 
-static void padPollHook(x86::reg32* buttons, int* pov)
+static void padPollHook(x86::reg32* buttons, int* pov, float* axes)
 {
     pollTextField();
     nfsu::bench::poll();
@@ -322,6 +324,20 @@ static void padPollHook(x86::reg32* buttons, int* pov)
     const x86::reg32 slots = 0x0078DAA8, slotSize = 0x270, slotCount = 6;
     const bool driving = win32::g_guestBase[0x007041C4] == 0;
     const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
+    static const bool garageCamera = pf::Config::getBool("garage_camera", true);
+    const bool orbit = garageCamera && frontEnd && !driving && !guestDword(0x007363A8);
+    namespace controls = win32::controls;
+    nfsu::driving_input::poll(axes[controls::AxisX], axes[controls::AxisY], driving);
+    const controls::CameraState camera = controls::garageCamera(orbit ? axes[controls::AxisZ] : 0.0f,
+                                                               orbit ? axes[controls::AxisRz] : 0.0f);
+    // Existing scanner configs: up/down/left/right events 0x3C/0x3D/0x3A/0x3B, action bits 29..32. The byte
+    // at +0x14 is the held-event strength; updating it also emits a new event when a held stick changes speed.
+    for (int direction = 0; direction < controls::CameraDirectionCount; ++direction)
+        win32::g_guestBase[0x00703B74 + 0x20 * direction] = camera.strength[direction];
+    if (frontEnd)
+        *buttons = (*buttons & ~controls::CameraButtonMask) | camera.buttons;
+    // Z is the race's combined pedal, not the garage-camera action. Never forward right stick X to that pedal.
+    axes[controls::AxisZ] = 0.0f;
     const bool race = driving || frontEnd;
     const bool menu = !driving;
     const bool vinylColours = menu && vinylLayerScreen();
@@ -333,7 +349,12 @@ static void padPollHook(x86::reg32* buttons, int* pov)
         for (x86::reg32 i = 0; i < 16; ++i)
         {
             guestDword(slot + 0x18 + 4 * i) = race ? s_raceActions[i] : 0;
-            guestDword(slot + 0x98 + 4 * i) = !menu ? 0 : vinylColours && i == 0 ? 21 : s_menuActions[i];
+            x86::reg32 menuAction = !menu ? 0 : vinylColours && i == 0 ? 21 : s_menuActions[i];
+            if (orbit)
+                for (int direction = 0; direction < controls::CameraDirectionCount; ++direction)
+                    if (i == x86::reg32(controls::CameraButtons[direction]))
+                        menuAction = 29 + direction;
+            guestDword(slot + 0x98 + 4 * i) = menuAction;
         }
         for (x86::reg32 i = 0; i < 16; ++i)
         {
@@ -342,20 +363,8 @@ static void padPollHook(x86::reg32* buttons, int* pov)
         }
     }
 
-    const x86::reg32 hatBit = x86::reg32(1) << 31;
-    const x86::reg32 held = *buttons | (*pov >= 0 ? hatBit : 0);
-    static int s_layout = -1;
-    static x86::reg32 s_hidden = 0;
-    const int layout = (race ? 1 : 0) | (menu ? 2 : 0);
-    if (layout != s_layout)
-    {
-        s_hidden = s_layout < 0 ? 0 : held;
-        s_layout = layout;
-    }
-    s_hidden &= held;
-    *buttons &= ~s_hidden;
-    if (s_hidden & hatBit)
-        *pov = -1;
+    static controls::LayoutFilter layoutFilter;
+    layoutFilter.update(race, menu, buttons, pov);
     *buttons |= nfsu::bench::heldButtons();
 
     // Menus: Triangle (button 0) gives the menu bar the key of the screen's extra item.
@@ -418,6 +427,8 @@ int main(int, char**)
         win32::MemMap::addReport(reportPools);
         setEnvmapSchedule();
         nfsu::prompts::configure();
+        nfsu::controls_menu::configure(app);
+        nfsu::driving_input::configure(app);
         nfsu::bench::configure(app);
         nfsu::phases::configure();
         win32::Gamepad::setPollHook(padPollHook);

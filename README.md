@@ -97,8 +97,61 @@ menu_widescreen=off
 | `menu_widescreen` | `on` (default), `off` | Menus laid out for the wide screen, or centred at 4:3 |
 | `hud_widescreen` | `on` (default), `off` | Race HUD at the screen edges, or centred at 4:3 |
 | `button_prompts` | `vita` (default), `pc` | Vita buttons on screen, or the original PC keys |
-| `rear_touch` | `on` (default), `off` | Gear shifting on the rear touch pad |
+| `rear_touch` | `off` (default), `on` | Enable the rear touch pad for shifting; D-pad up/down still shifts with it off |
+| `garage_camera` | `on` (default), `off` | Map the right stick to the car-orbit controls in Customize Ride and car-selection menus |
 | `car_reflection_interval` | `1` (default) to `6` | Higher values update the car reflections less often, for more speed |
+
+### This fork's control changes
+
+Rear touch is disabled by default. D-pad **up** shifts up and **down** shifts down in drag races and with manual
+transmission. D-pad navigation in menus is unchanged. **Options → Controller** has a **Rear Touch Pad** row below
+Vibration. Select it with up/down, then use left/right to switch **On/Off**, just like Vibration. It uses an existing
+native option row's font, arrows and selection styling, applies immediately, and saves `rear_touch` in
+`nfsug1vita.cfg` without changing other settings. Enabling touch waits for fingers to lift before accepting a shift.
+The row works with either PC or Vita button prompts. Square does not toggle rear touch.
+Other settings are read at startup; the game's controls screen does not save custom pad bindings in this port.
+
+Left-stick driving uses the Vita's calibrated analog value directly for the game's analog-steering event, with
+an 8% radial dead zone and proportional response across the full range. D-pad steering retains its digital
+priority. Returning from pause immediately accepts held throttle, brake and steering; menu confirmation, pause
+and shift buttons still wait for release to prevent unintended actions.
+
+A ready-to-copy [settings file](examples/nfsug1vita.cfg) disables rear touch. Copy it to
+`ux0:data/NFSUG1VITA/nfsug1vita.cfg`, or merge its settings into an existing file without duplicating keys.
+
+The right stick is mapped to the game's existing four car-orbit actions in the front end. It has a radial dead
+zone and proportional speed (62.5% faster than the first camera test), and releasing the stick sends a stop event. The camera mapping is disabled during
+races, pause menus and text entry; the race's combined-pedal axis stays centred. Set `garage_camera=off` to
+disable stick-controlled orbiting. The first build's orbit controls were confirmed working on the Vita;
+the increased speed still needs a device check.
+
+Control checks on macOS/Linux: `sh tools/test-controls.sh` (set `VITASDK` if the SDK is not in `.deps/vitasdk`).
+These simulate pad/touch samples and check D-pad shifts, live rear-touch changes, config persistence and failure,
+camera directions and speed, the native third row and arrows, and preservation of the existing two row handlers.
+`python3 tests/camera_game_test.py binaries/Speed.exe` also exercises the original game's joystick-mask builder
+and camera event scanners using your own executable (requires `unicorn==2.1.4`, which can be installed into
+`.pydeps`). It checks all four directions, proportional movement, diagonal input and release events.
+`python3 tests/controls_menu_game_test.py binaries/Speed.exe` executes the original Controller entry route,
+row visibility/enabling helpers, arrow helpers, and Options notification dispatch for all three rows.
+`python3 tests/driving_game_test.py binaries/Speed.exe` checks all 256 steering levels in the original driver,
+fractional steering angles, d-pad priority, and the held-throttle event on return from a menu.
+Before releasing a custom VPK, test garage rotation in both
+directions, neutral-stick drift, race/pause transitions, D-pad shifts in a drag race, and the native row's
+appearance and saved on/off state after a restart on the Vita.
+
+Control feature requests and PS Vita hardware testing: [KoreanSeats1](https://github.com/KoreanSeats1).
+
+### Corrupted car reflections
+
+This branch includes upstream's `d1a482f` fix from
+[playtest-hotfix](https://github.com/NDRWhun/UG1VITA/releases/tag/playtest-hotfix). It corrects the GPU offsets for the
+single-level cube texture used by car reflections.
+
+The [current Vita Alive entry](https://github.com/VegettoSan/PSVitaAlive/blob/main/apps/need-for-speed-underground.json)
+distributes Hotfix 2. Its downloaded `eboot.bin` and `glyphs.bin` match the official Hotfix 2 release byte-for-byte
+(checked November 19, 2026). Updating to the current Vita Alive version resolved the reported purple/white car
+reflections during races and customization. No additional renderer change is needed for that report. The
+washed-out garage background is a separate known issue.
 
 ## Known issues
 

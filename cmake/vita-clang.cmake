@@ -71,7 +71,9 @@ set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES "${NFSU_CXX_INCLUDE_DIR}" "${NFSU_CXX
 # VitaSDK gcc's ABI: Thumb-2, small enums, no PIC, emulated TLS.
 set(NFSU_TOOLCHAIN_FLAGS "-mthumb -fshort-enums -fno-pic -fno-pie -femulated-tls -D__vita__=1")
 set(CMAKE_C_FLAGS   "${NFSU_TOOLCHAIN_FLAGS}" CACHE STRING "C flags" FORCE)
-set(CMAKE_CXX_FLAGS "${NFSU_TOOLCHAIN_FLAGS}" CACHE STRING "C++ flags" FORCE)
+# Use only the VitaSDK libstdc++ include directories above. Homebrew clang otherwise also adds its host libc++
+# headers, mixing two C++ standard libraries in a cross build.
+set(CMAKE_CXX_FLAGS "${NFSU_TOOLCHAIN_FLAGS} -nostdinc++" CACHE STRING "C++ flags" FORCE)
 set(CMAKE_ASM_FLAGS "${NFSU_TOOLCHAIN_FLAGS}" CACHE STRING "assembler flags" FORCE)
 set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG" CACHE STRING "C release flags")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "C++ release flags")

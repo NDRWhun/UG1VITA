@@ -6,7 +6,6 @@
 // memory and esp results as the translated body, and the x87 stack depth unchanged.
 
 #include <lib/winapp.h>
-#include <recomp.h>
 #include <cstring>
 
 namespace x86
