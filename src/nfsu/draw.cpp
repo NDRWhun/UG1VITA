@@ -302,15 +302,16 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
     float a[16], b[16], m[16];
     if (kind == 5 && rc::ld32(EffectMatricesOn))
     {
-        loadMatrix(world, a);
-        loadMatrix(record, b);
         const reg32 g = rc::ld32(CurrentGroup);
         if (defer)
         {
-            calls.setMatrixProduct(rc::ld32(g + 0x18), rc::ld32(g + 0x24), a, b, nullptr);
+            calls.setMatrixProduct(rc::ld32(g + 0x18), rc::ld32(g + 0x24), guestFloats(world), guestFloats(record),
+                                   nullptr);
         }
         else
         {
+            loadMatrix(world, a);
+            loadMatrix(record, b);
             bridge::matrixMultiply(a, b, m);
             calls.setMatrix(rc::ld32(g + 0x18), rc::ld32(g + 0x24), m);
         }
@@ -325,17 +326,17 @@ void worldNative(WinApplication* app, x86::CPU& cpu)
     reg32 eax = on, ecx = group;
     if (on)
     {
-        loadMatrix(world, a);
-        loadMatrix(record + 0x80, b);
         const reg32 g = rc::ld32(CurrentGroup);
         const reg32 effect = rc::ld32(g + 0x18);
         ecx = rc::ld32(g + 0x1c);
         if (defer)
         {
-            eax = calls.setMatrixProduct(effect, ecx, a, b, nullptr);
+            eax = calls.setMatrixProduct(effect, ecx, guestFloats(world), guestFloats(record + 0x80), nullptr);
         }
         else
         {
+            loadMatrix(world, a);
+            loadMatrix(record + 0x80, b);
             bridge::matrixMultiply(a, b, m);
             eax = calls.setMatrix(effect, ecx, m);
         }
@@ -768,18 +769,19 @@ void reflectionNative(WinApplication* app, x86::CPU& cpu)
     float bias[16];
     memcpy(bias, biasWords, sizeof(bias));
     float a[16], b[16], m[16];
-    loadMatrix(world, a);
-    loadMatrix(viewProjection, b);
     const reg32 group = rc::ld32(CurrentGroup);
     bridge::CallGroup calls(app, cpu);
     if (rc::ld32(group + 0xc) == 0)
     {
         if (settings().defer)
         {
-            calls.setMatrixProduct(rc::ld32(group + 0x18), rc::ld32(group + 0x38), a, b, bias);
+            calls.setMatrixProduct(rc::ld32(group + 0x18), rc::ld32(group + 0x38), guestFloats(world),
+                                   guestFloats(viewProjection), bias);
         }
         else
         {
+            loadMatrix(world, a);
+            loadMatrix(viewProjection, b);
             bridge::matrixMultiply(a, b, m);
             bridge::matrixMultiply(m, bias, m);
             calls.setMatrix(rc::ld32(group + 0x18), rc::ld32(group + 0x38), m);

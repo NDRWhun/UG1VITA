@@ -628,8 +628,10 @@ void sub_654050(win32::WinApplication* app, x86::CPU& cpu)
     app->getMemory<win32::Mutex*>(slot) = lock;
     if (timed)
     {
+        const uint32_t elapsed = pf::perf::now() - start;
         pf::perf::audio(pf::perf::AudioLoopsUnlocked, 1);
-        pf::perf::audio(pf::perf::AudioLoopUnlockedUs, pf::perf::now() - start);
+        pf::perf::audio(pf::perf::AudioLoopUnlockedUs, elapsed);
+        pf::perf::audioMax(pf::perf::AudioLoopMaxUs, elapsed);
     }
     app->lockContext(cpu);
 }

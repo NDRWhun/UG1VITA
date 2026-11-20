@@ -8,6 +8,7 @@
 // The outputs are guest memory, esp, the x87 stack and the registers the callers read: eax, ecx and edx of
 // 0x440a40, ecx and the upper half of eax of 0x4400e0, ecx and edx of 0x4407b0. Runs on the calling thread.
 
+#include "cars.h"
 #include "retstate.h"
 
 #include <platform/config.h>
@@ -1024,6 +1025,8 @@ using coll::settings;
 // Ground height under a point (guest 0x440a40).
 void sub_440a40(win32::WinApplication* app, x86::CPU& cpu)
 {
+    if (cars::tap(0x440a40, app, cpu, &sub_440a40))
+        return;
     const auto body = [&]
     {
         const coll::Settings& s = settings();

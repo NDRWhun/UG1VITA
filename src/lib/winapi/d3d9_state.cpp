@@ -2,6 +2,10 @@
 
 #include <winapi/d3d9_internal.h>
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 namespace win32 { namespace d3d9
 {
 
@@ -238,15 +242,38 @@ void multiply(const float* a, const float* b, float* out)
     memcpy(out, r, sizeof(r));
 }
 
+void multiplyFast(const float* a, const float* b, float* out)
+{
+#if defined(__ARM_NEON)
+    const uint32_t FpscrModes = 0x03c00000u, RunFast = 0x03000000u;
+    if ((readFpscr() & FpscrModes) == RunFast)
+    {
+        const float32x4_t b0 = vld1q_f32(b), b1 = vld1q_f32(b + 4), b2 = vld1q_f32(b + 8), b3 = vld1q_f32(b + 12);
+        float32x4_t r[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            float32x4_t row = vmulq_n_f32(b0, a[i * 4]);
+            row = vaddq_f32(row, vmulq_n_f32(b1, a[i * 4 + 1]));
+            row = vaddq_f32(row, vmulq_n_f32(b2, a[i * 4 + 2]));
+            r[i] = vaddq_f32(row, vmulq_n_f32(b3, a[i * 4 + 3]));
+        }
+        for (int i = 0; i < 4; ++i)
+            vst1q_f32(out + 4 * i, r[i]);
+        return;
+    }
+#endif
+    multiply(a, b, out);
+}
+
 void matrixProduct(const float* matrices, uint32_t count, uint32_t fpscr, float* out)
 {
     const uint32_t previous = readFpscr();
     if (previous != fpscr)
         writeFpscr(fpscr);
     float r[16];
-    multiply(matrices, matrices + 16, r);
+    multiplyFast(matrices, matrices + 16, r);
     for (uint32_t i = 2; i < count; ++i)
-        multiply(r, matrices + 16 * i, r);
+        multiplyFast(r, matrices + 16 * i, r);
     if (previous != fpscr)
         writeFpscr(previous);
     memcpy(out, r, sizeof(r));

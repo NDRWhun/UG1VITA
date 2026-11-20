@@ -151,7 +151,7 @@ const FragmentProgramInfo& fragmentProgram(FragmentProgram program)
 
 const char* factorSuffix(FactorOutput output)
 {
-    static const char* const s_suffixes[FactorCount] = { "", "_bfcolor", "_bfalpha", "_bfscale" };
+    static const char* const s_suffixes[FactorCount] = { "", "_bfcolor", "_bfalpha", "_bfscale", "_bfmask" };
     return output < FactorCount ? s_suffixes[output] : "";
 }
 

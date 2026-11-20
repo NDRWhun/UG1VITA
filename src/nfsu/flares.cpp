@@ -11,6 +11,7 @@
 // and ebp and pop the return address; ecx, edx and the flags are not set.
 
 #include "flares.h"
+#include "cars.h"
 #include "cull.h"
 #include "phases.h"
 #include "retstate.h"
@@ -1087,6 +1088,8 @@ void sub_544f30(win32::WinApplication* app, x86::CPU& cpu)
 
 void sub_5447c0(win32::WinApplication* app, x86::CPU& cpu)
 {
+    if (cars::tap(0x5447c0, app, cpu, &sub_5447c0))
+        return;
     flares::lightFlare(app, cpu);
 }
 

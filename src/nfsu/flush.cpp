@@ -4,6 +4,7 @@
 // of an empty pool, the texture swaps 0x53f540 / 0x53f500) run as guest code on the caller's CPU state, with the
 // registers and stack arguments the guest gives them.
 
+#include "cars.h"
 #include "draw.h"
 #include "retstate.h"
 #include "phases.h"
@@ -305,6 +306,12 @@ void enqueueNative(WinApplication* app, x86::CPU& cpu)
 // The flush keeps the guest's stack frame: f = esp after its prologue, f + 0xc the node, f + 0x10 the mesh,
 // f + 0x14 the list head, f + 0x18 the group + 0x18, f + 0x1c Begin's pass count.
 
+// Starts loading the guest cache line at address.
+inline void prefetch(reg32 address)
+{
+    __builtin_prefetch(rc::host(address));
+}
+
 // Indexed packet: bone palette, stream and indices when they changed, a DrawIndexedPrimitive per pass.
 bool drawIndexed(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 f)
 {
@@ -456,6 +463,10 @@ bool drawPacket(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 f)
     app->allowPreemption(cpu);
     r.esi = rc::ld32(r.eax);
     r.eax = rc::ld32(r.esi);
+    prefetch(r.eax);
+    prefetch(r.eax + 0x20);
+    prefetch(rc::ld32(r.esi + 0x24));
+    prefetch(rc::ld32(r.esi + 0x10));
     r.ecx = rc::ld32(r.esi + 4);
     store(r.ecx, r.eax);
     store(r.eax + 4, r.ecx);
@@ -509,6 +520,9 @@ bool drawNode(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 f)
     app->allowPreemption(cpu);
     r.ecx = rc::ld32(r.esi + 4);
     r.eax = rc::ld32(r.esi);
+    prefetch(r.eax);
+    prefetch(rc::ld32(r.esi + 0x18));
+    prefetch(rc::ld32(r.esi + 0x10));
     store(r.ecx, r.eax);
     store(r.eax + 4, r.ecx);
     increment(NodesDrawn);
@@ -776,6 +790,8 @@ void submitNative(WinApplication* app, x86::CPU& cpu)
             {
                 app->allowPreemption(cpu);
                 r.esi = rc::ld32(cpu.ebp + 0x14) + rc::ld32(f + 0x14);
+                prefetch(r.esi + 2 * 0x3c);
+                prefetch(r.esi + 2 * 0x3c + 0x20);
                 bool visible = true;
                 if (r.ebx == 0 && !(rc::ld8(r.esi + 0x38) & 1))
                 {
@@ -1263,6 +1279,9 @@ void sub_40f1e0(win32::WinApplication* app, x86::CPU& cpu)
 
 void sub_40c910(win32::WinApplication* app, x86::CPU& cpu)
 {
+    if (cars::tap(0x40c910, app, cpu, &sub_40c910))
+        return;
+    phases::Scope scope(phases::Submit);
     const draw::Settings& s = draw::settings();
     if (!s.native)
     {

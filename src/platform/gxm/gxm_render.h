@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -295,26 +296,25 @@ private:
         uint32_t                frame = 0;      // frame its pools were begun for
         Thread*                 thread = nullptr;
         uint8_t                 index = 0;      // in m_workers
-        std::atomic<bool>       abandon{false}; // the job it records was finished by another recorder: stop
+        uint8_t                 core = 1;
     };
-    enum JobState : uint8_t
-    {
-        JobFree,
-        JobClaimed,     // a worker records it
-        JobDone
-    };
-    // A range of a scene's draws recorded into one command list.
+    // A range of a scene's draws recorded into one command list, by the worker that claims it and perhaps by the
+    // render thread too (recording 0 and 1); the first recording finished is used.
     struct Job
     {
         uint32_t                scene, begin, end;  // m_order range
-        bool                    ok;
-        SceGxmCommandList       list;
-        JobState                state;
-        uint8_t                 worker;             // the claiming worker
+        SceGxmCommandList       lists[2];
+        bool                    ok[2];
+        std::atomic<int8_t>     used{-1};           // the recording used, -1 while none is finished
+        std::atomic<bool>       abandon{false};     // a recording is finished: the other one stops
     };
+    // m_claim: the next job to claim (bits 0-9), the job count (10-19) and the recordLists call (20-31).
     enum : uint32_t
     {
-        NoJob = 0xffffffffu
+        MaxJobs = 511,
+        ClaimCountShift = 10,
+        ClaimGenerationShift = 20,
+        ClaimIndexMask = (1u << ClaimCountShift) - 1
     };
 
     // A queued write (from null) or copy.
@@ -337,6 +337,8 @@ private:
     void destroy(int kind, void* object);
     const VertexEntry* vertexProgram(uint8_t program, uint8_t layout);
     const FragmentEntry* fragmentProgram(const render::DrawState& state);
+    // The draw runs world_half_f (particle_precision=half).
+    bool halfPrecision(const render::DrawState& state) const;
     // Creates the fragment program of a cache key (fragmentKey) and adds it to the cache.
     const FragmentEntry* createFragment(uint64_t key);
     SceGxmRenderTarget* renderTarget(uint32_t width, uint32_t height);
@@ -362,14 +364,16 @@ private:
     static void* fragmentMemory(void* worker, SceSize requested, SceSize* size);
     bool recordLists(const render::Frame& frame);
     void runJobs(Worker& worker);
-    // Records a job into list; stops early (the list is not used) when the worker's abandon flag is set.
+    // Records a job into list; stops early (the list is not used) when the job's abandon flag is set.
     bool recordJob(Worker& worker, const render::Frame& frame, const Job& job, SceGxmCommandList* list);
     void beginWorkerFrame(Worker& worker, const render::Frame& frame);
-    // A recorder ended job index of generation: the first to end it gives the job its list.
-    void finishJob(Worker& worker, uint32_t generation, uint32_t index, bool ok, const SceGxmCommandList& list);
-    // Render thread: records claimed jobs the workers have not finished, until every job is done.
+    // A recorder ended its recording of a job; true when it is the one used.
+    static bool finishJob(Job& job, uint32_t recording, bool ok, const SceGxmCommandList& list);
+    // Render thread: records the jobs the workers have not finished, until every job is done.
     void stealJobs(const render::Frame& frame);
-    // Waits until no recorder reads a frame's draws any more.
+    // A helper thread leaves runJobs; wakes waitRecorders when it was the last.
+    void leaveRecording();
+    // Waits until no helper thread reads a frame's draws any more.
     void waitRecorders();
 
     SceGxmContext*          m_context = nullptr;
@@ -392,6 +396,8 @@ private:
 
     VertexProgram           m_vertexPrograms[render::VpCount];
     FragmentProgram         m_fragmentPrograms[render::FpCount][Variants];
+    SceGxmShaderPatcherId   m_worldHalf = nullptr;      // world_half_f, registered with particle_precision=half
+    bool                    m_particleHalf = false;     // setting particle_precision is half
     std::unordered_map<uint32_t, VertexEntry>              m_vertexCache;
     std::unordered_map<uint64_t, FragmentEntry>            m_fragmentCache;
     bool                    m_loadingPrograms = false;  // loadPrograms runs: creations are not render thread work
@@ -405,21 +411,31 @@ private:
     std::vector<ScenePlan>      m_plan;
     std::vector<uint32_t>       m_order;                // draw indices of the scenes, carried clears first
     bool                        m_drawSort = true;      // setting alpha_draw_order
-    std::vector<uint32_t>       m_held;                 // sortScene: alpha-tested draws not placed yet
+    bool                        m_sceneLog = false;     // setting gpu_scene_log
+    // sortScene: an alpha-tested draw not placed yet.
+    struct HeldDraw
+    {
+        const void*             vertices;
+        const uint16_t*         indices;
+        uint32_t                count;
+        uint32_t                index;
+    };
+    std::vector<HeldDraw>       m_held;
     SortStats                   m_sortStats;
 
     // Command lists. m_workers[0] is the render thread's own deferred context.
     std::vector<Worker*>        m_workers;
-    Mutex*                      m_jobLock = nullptr;
-    CondVar*                    m_jobsDone = nullptr;
+    Mutex*                      m_jobLock = nullptr;    // waitRecorders sleeps on m_recordersDone with it
+    CondVar*                    m_recordersDone = nullptr;
     Semaphore*                  m_wake = nullptr;
-    std::vector<Job>            m_jobs;                 // guarded by m_jobLock while workers run
+    std::unique_ptr<Job[]>      m_jobs;                 // MaxJobs; written by the render thread while none is claimable
+    uint32_t                    m_jobCount = 0;
     const render::Frame*        m_jobFrame = nullptr;
-    uint32_t                    m_nextJob = 0, m_doneJobs = 0;
+    std::atomic<uint32_t>       m_claim{0};
     uint32_t                    m_jobGeneration = 0;    // counts recordLists calls
-    uint32_t                    m_recording = 0;        // recorders inside recordJob
-    uint32_t                    m_stealing = NoJob;     // the job the render thread records for a worker
-    bool                        m_stop = false;
+    std::atomic<uint32_t>       m_recording{0};         // helper threads inside runJobs
+    std::atomic<uint32_t>       m_recorderWaiters{0};   // threads inside waitRecorders
+    std::atomic<bool>           m_stop{false};
 };
 
 }}

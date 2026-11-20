@@ -69,7 +69,9 @@ private:
 // DirectSound-style ring buffer in guest memory. While playing, the mixer reads it from the play
 // cursor at the buffer's frequency, resampled to the output rate: a looping buffer wraps until it is
 // stopped, any other buffer stops at its end and rewinds. A primary buffer not written for a whole
-// lap plays silence. Volume and pan are in hundredths of a decibel.
+// lap plays silence. Volume and pan are in hundredths of a decibel. The play cursor the game reads
+// moves through each mixed block in real time, from the block's start at its mix to its end one
+// block duration later, so it never passes what the mixer has read.
 class AudioBuffer : public GenericResource
 {
     friend class AudioDevice;
@@ -94,7 +96,8 @@ public:
     x86::reg32 lock() const;
     // The game has written new data.
     void unlock();
-    // Byte offset of the next frame the mixer reads; everything before it has been mixed.
+    // Byte offset of the play cursor: within the last mixed block by the time since its mix; everything
+    // before it has been mixed.
     x86::reg32 position() const;
     void setPosition(x86::reg32 offset);
 
@@ -117,7 +120,11 @@ private:
     MemMap*             m_memmap;
     const x86::reg8*    m_data;
     AudioFormat         m_format;
-    x86::reg32          m_position;     // play cursor in bytes, frame aligned
+    x86::reg32          m_position;     // next frame the mixer reads, in bytes, frame aligned
+    x86::reg32          m_blockIndex;   // frame index at the start of the last mixed block
+    x86::reg32          m_blockFrames;  // source frames of that block, 0 when there is none
+    x86::reg32          m_blockUs;      // its output duration
+    uint64_t            m_blockStartUs; // time of its mix
     x86::reg32          m_staleFrames;  // frames mixed since the last unlock, up to one lap
     x86::reg32          m_phase;        // fraction of the current source frame, 16 bits
     x86::reg32          m_frequency;

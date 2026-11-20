@@ -134,6 +134,7 @@ private:
     const render::TextureStorage*   m_lastTexture = nullptr;    // stage 0 of the last fixed-function draw
     uint32_t                        m_lastEffect = 0;
     bool                            m_keyValid = false;
+    bool                            m_motionBlurEnhanced = false;   // Stream::motionBlurEnhanced of the frame
     ConstantsKey                    m_key = {};
     uint32_t                        m_vertexConstants = render::NoConstants;
     uint32_t                        m_fragmentConstants = render::NoConstants;
@@ -369,6 +370,9 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
         state.srcBlend = uint8_t(factor.src);
         state.dstBlend = uint8_t(factor.dst);
         state.factorOutput = factor.output;
+        if (factor.output == render::FactorAlpha && state.fragmentProgram == render::FpFilter1
+            && m_motionBlurEnhanced)
+            state.factorOutput = render::FactorAlphaMask;
     }
 
     ConstantsKey key;
@@ -410,8 +414,8 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
     {
         render::FixedVertexConstants& v = *reinterpret_cast<render::FixedVertexConstants*>(vc);
         float wv[16];
-        multiply(m_state.transforms[TransformWorld].m, m_state.transforms[TransformView].m, wv);
-        multiply(wv, m_state.transforms[TransformProjection].m, v.wvp);
+        multiplyFast(m_state.transforms[TransformWorld].m, m_state.transforms[TransformView].m, wv);
+        multiplyFast(wv, m_state.transforms[TransformProjection].m, v.wvp);
         // Window coordinates of the viewport to clip space.
         const D3DVIEWPORT9& vp = m_state.viewport;
         const float w = float(vp.Width ? vp.Width : 1), h = float(vp.Height ? vp.Height : 1);
@@ -454,11 +458,13 @@ bool Resolver::fillState(render::Frame& f, const DrawRecord& record, render::Dra
 void Resolver::resolve(render::Frame& f)
 {
     m_keyValid = false;
+    m_motionBlurEnhanced = s_streams[f.index % StreamCount].motionBlurEnhanced;
     bool full = false;
     const uint32_t* w = f.commands;
     const uint32_t* end = w + f.commandCount;
     while (w < end)
     {
+        __builtin_prefetch(w + 64);
         const uint32_t header = *w++;
         const uint32_t a = (header >> 8) & 0xff, b = header >> 16;
         switch (Command(header & 0xff))
@@ -524,6 +530,7 @@ void Resolver::resolve(render::Frame& f)
             memcpy(&r, w, sizeof(r));
             w += sizeof(r) / 4;
             render::DrawCall& d = f.draws[r.draw];
+            __builtin_prefetch(&d + 2, 1);
             if (!full && !fillState(f, r, d))
             {
                 pf::logError("d3d9: frame %u: constant arena full, draws dropped", f.index);

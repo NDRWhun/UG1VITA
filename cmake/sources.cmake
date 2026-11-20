@@ -93,20 +93,28 @@ set(NFSU_WINAPI_SOURCES
 
 # Port code that works with guest addresses of Speed.exe.
 set(NFSU_GAME_PORT_SOURCES
+  src/nfsu/anim.cpp
   src/nfsu/audio_mixer.cpp
   src/nfsu/bankcode.cpp
   src/nfsu/bench.cpp
+  src/nfsu/cars.cpp
+  src/nfsu/aiplan.cpp
   src/nfsu/coll.cpp
   src/nfsu/cull.cpp
+  src/nfsu/display.cpp
   src/nfsu/flares.cpp
   src/nfsu/flush.cpp
   src/nfsu/draw.cpp
+  src/nfsu/gjk.cpp
   src/nfsu/region.cpp
   src/nfsu/hitch.cpp
+  src/nfsu/lights.cpp
   src/nfsu/mathfn.cpp
   src/nfsu/load.cpp
+  src/nfsu/movie_decode.cpp
   src/nfsu/movie_yuv.cpp
   src/nfsu/prep.cpp
+  src/nfsu/physics.cpp
   src/nfsu/phases.cpp
   src/nfsu/prompts.cpp
   src/nfsu/particles.cpp

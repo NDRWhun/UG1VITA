@@ -171,7 +171,7 @@ struct Tracked
     SceUID thread;
     uint64_t lastClocks;    // updated by the log
 };
-const int TrackedCount = 6;
+const int TrackedCount = 8;
 Tracked s_tracked[TrackedCount];
 std::atomic<int> s_trackedCount{0};
 
@@ -305,9 +305,9 @@ void logHolders(uint32_t elapsed, uint32_t frames)
 }
 
 // Fifth log line, per interval: EA SND voice renders without and with the execution lock (count, ms per frame,
-// why the lock was kept, for the tick parts too), the render loop without the lock (runs, ms per frame, the parts
-// that took it again), the bank routines (runs, ms per frame, translated and interpreted runs, instructions
-// interpreted, decodes) and the SND output module's 16-bit saturation.
+// why the lock was kept, for the tick parts too), the render loop without the lock (runs, ms per frame, ms per run
+// and the longest run, the parts that took it again), the bank routines (runs, ms per frame, translated and
+// interpreted runs, instructions interpreted, decodes) and the SND output module's 16-bit saturation.
 void logAudio(uint32_t frames)
 {
     uint32_t a[AudioCount];
@@ -330,8 +330,10 @@ void logAudio(uint32_t frames)
                     unsigned(locked.address.load(std::memory_order_relaxed)), unsigned(count));
         first = false;
     }
-    line.append(") | loop unlocked %u %.2f ms, locked ticks %u callbacks %u notifications %u library calls %u",
-                unsigned(a[AudioLoopsUnlocked]), msPerFrame(a[AudioLoopUnlockedUs], frames),
+    line.append(") | loop unlocked %u %.2f ms (%.2f ms per run, max %.2f), locked ticks %u callbacks %u notifications %u"
+                " library calls %u", unsigned(a[AudioLoopsUnlocked]), msPerFrame(a[AudioLoopUnlockedUs], frames),
+                a[AudioLoopsUnlocked] ? double(a[AudioLoopUnlockedUs]) / 1000.0 / a[AudioLoopsUnlocked] : 0.0,
+                double(a[AudioLoopMaxUs]) / 1000.0,
                 unsigned(a[AudioTicksLocked]), unsigned(a[AudioCallbacksLocked]),
                 unsigned(a[AudioNotificationsLocked]), unsigned(a[AudioLibraryLocked]));
     line.append(" | bank code %u runs %.2f ms (%u native %u interpreted) %u instructions %u decodes | output %u"
@@ -545,6 +547,14 @@ void guestBlock(Alloc kind, uint32_t bytes, uint32_t microseconds, uint32_t sear
 void audio(Audio counter, uint32_t value)
 {
     s_audio[counter].fetch_add(value, std::memory_order_relaxed);
+}
+
+void audioMax(Audio counter, uint32_t value)
+{
+    uint32_t current = s_audio[counter].load(std::memory_order_relaxed);
+    while (current < value && !s_audio[counter].compare_exchange_weak(current, value, std::memory_order_relaxed))
+    {
+    }
 }
 
 // The audio thread only.

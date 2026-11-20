@@ -17,8 +17,8 @@ const GUID        JoystickProduct    = { 0x00030B43, 0x0000, 0x0000, { 0, 0, 'P'
 
 // ---- Layout ----
 
-// Joystick buttons by DirectInput index, in the adapter's PlayStation order. src/nfsu/main.cpp sets the race and menu
-// actions of these indices (per input map, at each poll). The game's original EMS table: 0 camera / back, 1 look back,
+// Joystick buttons by DirectInput index, in the adapter's PlayStation order. src/nfsu/main.cpp sets the default race
+// actions and the menu actions of these indices. The game's original EMS table: 0 camera / back, 1 look back,
 // 2 throttle / select, 3 brake / customise, 4 / 5 shift down / up, 6 nitrous, 7 handbrake, 9 pause,
 // 12-15 steer and menu up, right, down, left. Select is a tap (button 8, respot): see the Mapper.
 struct ButtonMapping
@@ -85,6 +85,9 @@ static const uint64_t s_tapUs = 100000;
 static const float s_stickDeadZone   = 0.08f;
 static const float s_stickSaturation = 0.94f;
 static const float s_stickLinear     = 0.6f;
+
+// Right stick deflection at which hat 1 reports a direction.
+static const float s_rightHatThreshold = 0.5f;
 
 // Horizontal centre of the rear panel (1920x890 starting at y 108).
 static const int s_panelCentreX = 960;
@@ -346,6 +349,16 @@ State Mapper::update(const PadSample& pad, uint64_t nowUs)
     const int dx = (right ? 1 : 0) - (left ? 1 : 0);
     static const int s_angles[3][3] = { { 31500, 0, 4500 }, { 27000, -1, 9000 }, { 22500, 18000, 13500 } };
     state.pov = s_angles[dy + 1][dx + 1];
+
+    // Hat 1 follows the right stick: the nearest of 8 directions past half deflection.
+    const float rx = pad.sticks[2], ry = pad.sticks[3];
+    state.rightPov = -1;
+    if (rx * rx + ry * ry > s_rightHatThreshold * s_rightHatThreshold)
+    {
+        const float degrees = std::atan2(rx, -ry) * 57.29578f;
+        const int sector = int(std::lround(degrees / 45.0f) + 8) % 8;
+        state.rightPov = sector * 4500;
+    }
     return state;
 }
 

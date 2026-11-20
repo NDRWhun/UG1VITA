@@ -3,7 +3,9 @@
 // run in the guest's order on the calling thread. Shadow mode compares the result against the guest body.
 
 #include "prep.h"
+#include "display.h"
 #include "flares.h"
+#include "lights.h"
 #include "draw.h"
 #include "mathfn.h"
 #include "particles.h"
@@ -357,6 +359,7 @@ void stuffScenery(win32::WinApplication* app, x86::CPU& cpu)
 
 void frame(win32::WinApplication* app, x86::CPU& cpu)
 {
+    display::frame();
     {
         phases::Scope scope(phases::Render);
         sub_40a580_guest(app, cpu);
@@ -374,6 +377,7 @@ void frame(win32::WinApplication* app, x86::CPU& cpu)
     if (s.native && s.shadow)
         pf::logInfo("shadow_prep: %u calls compared, %u differ", unsigned(s_shadow.calls), unsigned(s_shadow.differing));
     flares::report(s_frames);
+    lights::report(s_frames);
     particles::report(s_frames);
     draw::logUsage(s_frames);
     s_perf = PerfSums();

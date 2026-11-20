@@ -508,14 +508,6 @@ bool Device::Impl::initBuffers()
 
 // ---- Render thread -------------------------------------------------------------------------------------------------
 
-// The calling thread's CPU time in microseconds.
-static uint64_t threadClocks()
-{
-    SceKernelThreadInfo info;
-    info.size = sizeof(info);
-    return sceKernelGetThreadInfo(sceKernelGetThreadId(), &info) < 0 ? 0 : info.runClocks;
-}
-
 int Device::Impl::threadEntry(void* self)
 {
     if (perf::enabled())
@@ -571,7 +563,6 @@ void Device::Impl::run()
         const uint32_t index = frame ? frame->index : 0;
         queueUs = 0;
         const bool parts = timed && perf::hitch();
-        const uint64_t cpuStart = parts ? threadClocks() : 0;
         if (frame && frame->resolve)
         {
             frame->resolve(*frame);
@@ -593,8 +584,6 @@ void Device::Impl::run()
             presentFrame(*frame, ++presentIndex);
         else
             present(image, queued ? ++presentIndex : 0);
-        if (parts)
-            perf::renderPart(perf::RenderCpu, uint32_t(threadClocks() - cpuStart));
         if (timed)
         {
             const uint32_t renderUs = perf::now() - start;

@@ -194,10 +194,13 @@ static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Conve
 // shift. Menus: Cross accepts (20), Circle goes back (23), Start is the game's Start (25, also "button 2"), Square
 // "button 3" (26), L / R the triggers (27 / 28), d-pad and hat navigate; Triangle presses the menu bar's extra
 // item (src/nfsu/prompts.cpp, button_prompts=vita), on the vinyl layer screen it opens the vinyl colours (21).
+// Hat 1 (the right stick) orbits the front end's car camera in menus (29-32: orbit up, down, left, right; stick left
+// sends orbit right, which turns the view left) and has no race actions.
 static const x86::reg32 s_raceActions[16] = { 10, 9, 6, 5, 8, 7, 2, 1, 14, 12, 0, 0, 7, 4, 8, 3 };
 static const x86::reg32 s_menuActions[16] = { 0, 23, 20, 26, 0, 0, 27, 28, 0, 25, 0, 0, 16, 19, 17, 18 };
 static const x86::reg32 s_raceHat[4] = { 0, 0, 3, 4 };
 static const x86::reg32 s_menuHat[4] = { 17, 16, 18, 19 };
+static const x86::reg32 s_menuRightHat[4] = { 30, 29, 32, 31 };
 
 static x86::reg32& guestDword(x86::reg32 address)
 {
@@ -292,13 +295,32 @@ static void pollTextField()
     s_editing = true;
 }
 
-// The game builds each device's action mask from both tables of its slot (0x004071B8), whatever map is active, and
-// loads the slot tables from the profile (0x0041CDA0; 0x004064D0 then puts the generic menu actions on buttons
-// 0-4). The keyboard instead gets one map at a time: 0x004057C0 picks the race map ([0x007041C4] = 0) only while
-// a race is driven, the menu map otherwise. At each pad poll the pad's slot is set to the port's layout for that
-// map: race actions while driving, menu actions in menus; in the front end the race table stays (it has no
-// consumers there and the controls screen shows it). Saved pad bindings are overridden. Inputs held across a
-// change stay hidden until released, as the keyboard's map change releases its keys.
+// Device slots: 6 at 0x0078DAA8, 0x270 bytes each. +0x130 the channel, +0x134 the controller type (0x13 the
+// keyboard), +0x18 the race actions of the 16 buttons and +0x58 of the 4 hats' 4 directions, +0x98 and +0xD8 the
+// menu actions of the same, +0x23C the action the controls screen is assigning (0: none).
+// The race tables are the player's: the controls screen assigns them (0x00406E10), the profile's <name>.cfg in the
+// save folder keeps them (written by 0x0041C7A0, read by 0x0041CDA0 at a profile load and when the pad is attached;
+// the defaults of 0x004060A0 when the file has none).
+// The menu tables are not saved: 0x004064D0 puts the generic menu actions on buttons 0-4 after each load.
+const x86::reg32 PadSlots = 0x0078DAA8, PadSlotSize = 0x270, PadSlotCount = 6;
+const x86::reg32 RaceButtons = 0x18, RaceHats = 0x58, MenuButtons = 0x98, MenuHats = 0xD8, AssignedAction = 0x23C;
+
+static bool padSlot(x86::reg32 slot)
+{
+    return guestDword(slot + 0x130) == 0 && guestDword(slot + 0x134) != 0x13;
+}
+
+// The pad's slot, 0 when there is none.
+static x86::reg32 findPadSlot()
+{
+    for (x86::reg32 slot = PadSlots; slot < PadSlots + PadSlotCount * PadSlotSize; slot += PadSlotSize)
+    {
+        if (padSlot(slot))
+            return slot;
+    }
+    return 0;
+}
+
 // The current screen's package name is at 0x0072CDD0; on MU_GarageVinylLayerV2.fng Triangle sends action 21.
 static bool vinylLayerScreen()
 {
@@ -314,36 +336,130 @@ static bool vinylLayerScreen()
     return true;
 }
 
-static void padPollHook(x86::reg32* buttons, int* pov)
+// The game builds each device's action mask from both tables of its slot (0x004071B8), whatever map is active. The
+// keyboard instead gets one map at a time: 0x004057C0 picks the race map ([0x007041C4] = 0) only while a race is
+// driven, the menu map otherwise. The pad follows that map: race actions while driving, menu actions in menus; in
+// the front end the race actions stay too. Inputs held across a change stay hidden until released, as the
+// keyboard's map change releases its keys.
+struct PadMap
+{
+    bool race;
+    bool menu;
+    bool vinylColours;
+};
+
+static PadMap padMap()
+{
+    const bool driving = win32::g_guestBase[0x007041C4] == 0;
+    const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
+    PadMap map;
+    map.race = driving || frontEnd;
+    map.menu = !driving;
+    map.vinylColours = map.menu && vinylLayerScreen();
+    return map;
+}
+
+// The slot's tables outside the read: the player's race actions, except that the right stick (hat 1) has none and
+// a race table without any action gets the port's defaults; the port's menu actions.
+static void setPadTables(x86::reg32 slot)
+{
+    bool bound = false;
+    for (x86::reg32 i = 0; i < 32; ++i)
+        bound = bound || guestDword(slot + RaceButtons + 4 * i) != 0;
+    for (x86::reg32 i = 0; i < 16; ++i)
+    {
+        if (!bound)
+        {
+            guestDword(slot + RaceButtons + 4 * i) = s_raceActions[i];
+            guestDword(slot + RaceHats + 4 * i) = s_raceHat[i % 4];
+        }
+        if (i / 4 == 1)
+            guestDword(slot + RaceHats + 4 * i) = 0;
+        guestDword(slot + MenuButtons + 4 * i) = s_menuActions[i];
+        guestDword(slot + MenuHats + 4 * i) = i / 4 == 1 ? s_menuRightHat[i % 4] : s_menuHat[i % 4];
+    }
+    if (!bound)
+        pf::logInfo("input: the pad has no race actions, the default layout is set");
+}
+
+namespace nfsu
+{
+
+void sub_4070a0_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_41c7a0(win32::WinApplication* app, x86::CPU& cpu);
+
+namespace native
+{
+
+// The game writes the profile's .cfg when the player leaves the options with changed profile data, at profile
+// changes and when it exits; a changed race table alone is not saved before the exit, which the Vita does not
+// reach (the process ends). So when the pad's race tables differ from the ones last seen and no action is being
+// assigned, the .cfg of the current profile is written (0x0041C7A0: nothing without a profile, path at 0x00736230).
+static void savePadTables(win32::WinApplication* app, x86::CPU& cpu, x86::reg32 slot)
+{
+    static x86::reg32 s_seen[32];
+    static bool s_haveSeen = false;
+    if (guestDword(slot + AssignedAction) != 0)
+        return;
+    const x86::reg8* race = win32::g_guestBase + slot + RaceButtons;
+    if (s_haveSeen && memcmp(s_seen, race, sizeof(s_seen)) == 0)
+        return;
+    const bool changed = s_haveSeen;
+    memcpy(s_seen, race, sizeof(s_seen));
+    s_haveSeen = true;
+    if (!changed || !win32::g_guestBase[0x00736230])
+        return;
+    // At the read's entry eax, ecx and edx hold nothing the read uses; the writer keeps the other registers.
+    cpu.esp -= 4;
+    sub_41c7a0(app, cpu);
+    pf::logInfo("input: race controls changed, saved to %s",
+                reinterpret_cast<const char*>(win32::g_guestBase + 0x00736230));
+}
+
+// Device read (slot in esi): the action mask from the device's state and the slot's tables. For the pad the tables
+// of the map that is not active are empty during the read, and on the vinyl layer screen Triangle (button 0) sends
+// action 21; afterwards the slot holds its own tables again.
+void sub_4070a0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const x86::reg32 slot = cpu.esi;
+    if (!padSlot(slot))
+    {
+        sub_4070a0_guest(app, cpu);
+        return;
+    }
+    setPadTables(slot);
+    savePadTables(app, cpu, slot);
+    const PadMap map = padMap();
+    x86::reg32 race[32];
+    memcpy(race, win32::g_guestBase + slot + RaceButtons, sizeof(race));
+    if (!map.race)
+        memset(win32::g_guestBase + slot + RaceButtons, 0, sizeof(race));
+    if (!map.menu)
+        memset(win32::g_guestBase + slot + MenuButtons, 0, 32 * 4);
+    if (map.vinylColours)
+        guestDword(slot + MenuButtons) = 21;
+    sub_4070a0_guest(app, cpu);
+    memcpy(win32::g_guestBase + slot + RaceButtons, race, sizeof(race));
+    setPadTables(slot);
+}
+
+}}
+
+static void padPollHook(x86::reg32* buttons, int* pov, int* rightPov)
 {
     pollTextField();
     nfsu::bench::poll();
     nfsu::prompts::poll();
-    const x86::reg32 slots = 0x0078DAA8, slotSize = 0x270, slotCount = 6;
-    const bool driving = win32::g_guestBase[0x007041C4] == 0;
-    const bool frontEnd = guestDword(0x0077A920) == 3;   // GAMEFLOW_STATE_IN_FRONTEND
-    const bool race = driving || frontEnd;
-    const bool menu = !driving;
-    const bool vinylColours = menu && vinylLayerScreen();
-    for (x86::reg32 slot = slots; slot < slots + slotCount * slotSize; slot += slotSize)
-    {
-        // Channel 0 (the pad), a controller type (0x13 is the keyboard).
-        if (guestDword(slot + 0x130) != 0 || guestDword(slot + 0x134) == 0x13)
-            continue;
-        for (x86::reg32 i = 0; i < 16; ++i)
-        {
-            guestDword(slot + 0x18 + 4 * i) = race ? s_raceActions[i] : 0;
-            guestDword(slot + 0x98 + 4 * i) = !menu ? 0 : vinylColours && i == 0 ? 21 : s_menuActions[i];
-        }
-        for (x86::reg32 i = 0; i < 16; ++i)
-        {
-            guestDword(slot + 0x58 + 4 * i) = race ? s_raceHat[i % 4] : 0;
-            guestDword(slot + 0xD8 + 4 * i) = menu ? s_menuHat[i % 4] : 0;
-        }
-    }
+    const PadMap map = padMap();
+    const bool race = map.race, menu = map.menu, vinylColours = map.vinylColours;
+    // While the controls screen assigns an action the right stick is not reported, so it gets no race action.
+    const x86::reg32 slot = findPadSlot();
+    const bool assigning = slot && guestDword(slot + AssignedAction) != 0;
 
-    const x86::reg32 hatBit = x86::reg32(1) << 31;
-    const x86::reg32 held = *buttons | (*pov >= 0 ? hatBit : 0);
+    if (!menu || assigning)
+        *rightPov = -1;
+    const x86::reg32 hatBit = x86::reg32(1) << 31, rightHatBit = x86::reg32(1) << 30;
+    const x86::reg32 held = *buttons | (*pov >= 0 ? hatBit : 0) | (*rightPov >= 0 ? rightHatBit : 0);
     static int s_layout = -1;
     static x86::reg32 s_hidden = 0;
     const int layout = (race ? 1 : 0) | (menu ? 2 : 0);
@@ -356,13 +472,16 @@ static void padPollHook(x86::reg32* buttons, int* pov)
     *buttons &= ~s_hidden;
     if (s_hidden & hatBit)
         *pov = -1;
+    if (s_hidden & rightHatBit)
+        *rightPov = -1;
     *buttons |= nfsu::bench::heldButtons();
 
-    // Menus: Triangle (button 0) gives the menu bar the key of the screen's extra item.
+    // Menus: Triangle (button 0) gives the menu bar the key of the screen's extra item, unless the controls screen
+    // is assigning an action.
     static x86::reg32 s_previous = 0;
     const x86::reg32 pressed = *buttons & ~s_previous;
     s_previous = *buttons;
-    if (menu && !vinylColours && (pressed & 1u))
+    if (menu && !vinylColours && !assigning && (pressed & 1u))
         nfsu::prompts::menuTriangle();
 }
 

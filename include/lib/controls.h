@@ -94,6 +94,7 @@ struct State
     float       axes[AxisCount];    // -1..1, absent axes 0; not shaped yet (shapeStick)
     uint32_t    keys;               // bit per Key held
     int         pov;                // hat 0 in hundredths of a degree, -1 centred
+    int         rightPov;           // hat 1, from the right stick: the same units
     bool        openIme;            // the on-screen keyboard chord was pressed
 };
 

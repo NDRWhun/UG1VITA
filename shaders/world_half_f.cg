@@ -1,0 +1,10 @@
+// world_f in half precision: texture * colour * 2 with a half texture fetch, colour and product. Same texture unit
+// as world_f, no uniforms.
+
+half4 main(
+    half4 vColor : COLOR0,
+    float2 vTex0 : TEXCOORD0,
+    uniform sampler2D uTex0) : COLOR
+{
+    return tex2D<half4>(uTex0, vTex0) * vColor * (half)2.0;
+}

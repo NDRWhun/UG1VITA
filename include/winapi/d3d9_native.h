@@ -35,6 +35,9 @@ using x86::reg32;
 
 // debug_frame_dump=on (development): true while the frame being recorded is written to the log draw by draw.
 bool dumpingFrame();
+// Game thread: the frames opened from now on draw the motion blur enhanced (Device::motionBlurQuad) or as the PC
+// does.
+void setMotionBlurEnhanced(bool on);
 
 // ---- IDirect3DDevice9 ----
 
@@ -75,9 +78,13 @@ HRESULT present(WinApplication* app, x86::CPU& cpu, reg32 device, const void* so
 HRESULT passDrawIndexed(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass, reg32 device, DWORD type,
                         LONG baseVertex, UINT minIndex, UINT vertices, UINT startIndex, UINT count);
 
+class CallGroup;
+// The group whose record in the queue is open (CallGroup::queue closes it).
+extern CallGroup* g_openGroup;
+
 // Device and effect calls in order: inside a window collected and queued as one record (queue(), or when a call has
-// to be made at once), returning D3D_OK; else made at once, returning their results. Calls made another way while a
-// group has collected calls must follow a queue().
+// to be made at once), returning D3D_OK; else made at once, returning their results. The entries are written into
+// a record reserved in the queue; another record, a publish or a drain closes it first.
 class CallGroup
 {
     static const HRESULT D3D_OK = 0;
@@ -190,16 +197,16 @@ public:
         KindInt, KindFloat, KindVector, KindVectorArray, KindMatrix, KindProduct, KindEffectTexture, KindRenderState,
         KindDeviceTexture, KindTransform
     };
-    enum { MaxWords = 1024 };
+    enum { ReserveWords = 128 };
 
 private:
     uint32_t* entry(Kind kind, reg32 target, reg32 index, uint32_t words)
     {
         if (__builtin_expect(!m_queued, 0))
             return nullptr;
-        if (__builtin_expect(m_size + 3 + words > MaxWords, 0))
-            queue();
-        uint32_t* e = m_words + m_size;
+        if (__builtin_expect(m_size + 3 + words > m_capacity, 0))
+            open(3 + words);
+        uint32_t* e = m_ring + m_size;
         e[0] = kind | words << 8;
         e[1] = target;
         e[2] = index;
@@ -207,6 +214,8 @@ private:
         ++m_count;
         return e + 3;
     }
+    // Closes the open record and reserves one of at least words payload words.
+    void open(uint32_t words);
     uint32_t* effectEntry(Kind kind, reg32 effect, reg32 handle, uint32_t words)
     {
         return handle < 0x10000 ? entry(kind, effect, handle, words) : nullptr;
@@ -230,7 +239,8 @@ private:
     uint32_t m_fpscr;
     uint32_t m_size = 0;
     uint32_t m_count = 0;   // entries
-    uint32_t m_words[MaxWords];
+    uint32_t* m_ring = nullptr;     // payload of the reserved record
+    uint32_t m_capacity = 0;        // its words
 };
 
 // ---- ID3DXEffect ----

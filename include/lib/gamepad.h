@@ -73,12 +73,13 @@ public:
     // Guest threads with the execution lock held.
     AxisProperties& axisProperties(controls::Axis axis) { return m_axisProperties[axis]; }
 
-    // Joystick buttons and axes now, axes shaped with this device's properties and scaled to their ranges.
-    void getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov);
+    // Joystick buttons, axes and hats 0 and 1 now, axes shaped with this device's properties and scaled to their
+    // ranges.
+    void getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov, int* rightPov);
 
-    // Game code run at each getState on the guest thread (execution lock held) with the buttons and hat about to
+    // Game code run at each getState on the guest thread (execution lock held) with the buttons and hats about to
     // be reported; it may change them. Set once before the game starts.
-    typedef void (*PollHook)(x86::reg32* buttons, int* pov);
+    typedef void (*PollHook)(x86::reg32* buttons, int* pov, int* rightPov);
     static void setPollHook(PollHook hook);
 
     // Input pump: reads the pad, posts the key changes as window messages and runs the on-screen keyboard. Called

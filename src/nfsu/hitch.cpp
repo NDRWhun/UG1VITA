@@ -28,8 +28,8 @@ const x86::reg32 GameFlowState = 0x0077A920;
 const uint32_t FlowFrontEnd = 3;
 
 const uint32_t RecordSlots = 8;
-const uint32_t LineSize = 1024;
-// Kept lines: about 280 at most; written in one block (a line written on its own costs about 20 ms of file I/O).
+const uint32_t LineSize = 2048;
+// Kept lines: about 170 at most; written in one block (a line written on its own costs about 20 ms of file I/O).
 const uint32_t KeptBytes = 256 * 1024;
 const char LinePrefix[] = "[info] ";
 // No cause is named below this excess over the running average.
@@ -40,9 +40,9 @@ const float AverageWeight = 1.0f / 32.0f;
 enum Cause
 {
     // Game thread phases, each without the phases timed inside it.
-    CausePhysics, CauseMellow, CauseAi, CauseStepRest, CauseCameras, CauseSound, CauseStreamer, CauseLoading,
-    CauseCull, CauseStuff, CauseFlush, CauseFlares, CauseCars, CauseParticleDraw, CauseViewsRest, CauseFe,
-    CauseRenderRest, CauseGameRest,
+    CausePhysics, CauseMellow, CauseAi, CauseCollide, CauseStepParts, CauseStepRest, CauseCameras, CauseSound,
+    CauseStreamer, CauseLoading, CauseCull, CauseStuff, CauseFlush, CauseFlares, CauseCars, CauseParticleDraw,
+    CauseViewsRest, CauseFe, CauseRenderRest, CauseGameRest,
     // Game thread lock releases by reason.
     CauseFileWait, CauseCritSecWait, CauseObjectWait, CauseSleep, CauseFrameSlot, CausePreempted, CauseReleasedOther,
     // Waits and load calls inside the phases.
@@ -52,7 +52,7 @@ enum Cause
     CauseHitchLog,
     // Render thread parts.
     CauseResolve, CauseRenderPlan, CausePrograms, CauseListRecord, CauseListWait, CauseRenderUploadWait,
-    CauseScenes, CauseRenderOffCpu, CauseRenderThreadRest, CauseDisplayQueue,
+    CauseScenes, CauseRenderThreadRest, CauseDisplayQueue,
     CauseCount,
     CauseUnclear = CauseCount,  // no cause over MinExcessUs
     CauseNoRecord,              // no game frame record: a layer present, or the record is gone
@@ -64,29 +64,43 @@ const int LastInside = CauseGpuGrowth;
 const int FirstRender = CauseResolve;
 
 const char* const CauseNames[CauseSlots] = {
-    "physics", "mellow", "ai", "step_rest", "cameras", "sound", "streamer", "loading", "cull", "stuff", "flush",
-    "flares", "cars", "particle_draw", "views_rest", "fe", "render_rest", "game_rest",
+    "physics", "mellow", "ai", "collide", "step_parts", "step_rest", "cameras", "sound", "streamer", "loading", "cull",
+    "stuff", "flush", "flares", "cars", "particle_draw", "views_rest", "fe", "render_rest", "game_rest",
     "file_wait", "cs_wait", "object_wait", "sleep", "frame_slot", "preempted", "released_other",
     "d3d_queue", "upload_wait", "read_back", "guest_blocks", "jdlz", "texture_create", "skin", "gpu_growth",
     "hitch_log",
     "resolve", "render_plan", "programs", "list_record", "list_wait", "render_upload_wait", "scenes",
-    "render_off_cpu", "render_thread_rest", "display_queue",
+    "render_thread_rest", "display_queue",
     "unclear", "no_game_record",
 };
 static_assert(sizeof(CauseNames) / sizeof(CauseNames[0]) == CauseSlots, "a name per cause");
 
-// Phases in the order of the log line; ai is AiCar and AiDriver together.
+// Phases in the order of the log line; ai is AiDriver (AiCar runs inside it).
 struct ShownPhase
 {
     phases::Id id;
     const char* name;
 };
 const ShownPhase ShownPhases[] = {
-    {phases::Step, "step"}, {phases::PhysicsMove, "physics"}, {phases::MellowMove, "mellow"}, {phases::AiCar, "ai"},
+    {phases::Step, "step"}, {phases::PhysicsMove, "physics"}, {phases::MellowMove, "mellow"}, {phases::AiDriver, "ai"},
+    {phases::Move, "move"}, {phases::Collide, "collide"}, {phases::Predict, "predict"},
+    {phases::Witnesses, "witnesses"}, {phases::ContactTest, "contact_test"},
+    {phases::ContactResolve, "contact_resolve"}, {phases::Gjk, "gjk"}, {phases::SimplexDistance, "simplex"},
+    {phases::Impulse, "impulse"},
+    {phases::Topology, "topology"}, {phases::Avoidables, "avoidables"}, {phases::RideInfo, "ride_info"},
+    {phases::Draft, "draft"}, {phases::CarForces, "car_forces"}, {phases::BeginMove, "begin_move"},
+    {phases::FinishMove, "finish_move"}, {phases::Smokeables, "smokeables"}, {phases::CarEvents, "car_events"},
+    {phases::TerrainEffects, "terrain_effects"}, {phases::Skids, "skids"}, {phases::EventManager, "event_manager"},
+    {phases::PlayerState, "player_state"}, {phases::SpaceNodes, "space_nodes"}, {phases::RaceUpdate, "race_update"},
     {phases::Cameras, "cameras"}, {phases::Sound, "sound"}, {phases::Streamer, "streamer"},
     {phases::Loading, "loading"}, {phases::Render, "render"}, {phases::Views, "views"}, {phases::Cull, "cull"},
     {phases::Stuff, "stuff"}, {phases::Flush, "flush"}, {phases::Flares, "flares"}, {phases::Cars, "cars"},
-    {phases::ParticleDraw, "particle_draw"}, {phases::FrontEnd, "fe"},
+    {phases::ParticleDraw, "particle_draw"}, {phases::FrontEnd, "fe"}, {phases::ParticleUpdate, "particles"},
+    {phases::Clans, "clans"}, {phases::WorldModels, "world_models"}, {phases::CarReflections, "car_reflections"},
+    {phases::MiniWorld, "mini_world"}, {phases::CarFlares, "car_flares"},
+    {phases::CarRender, "car_render"}, {phases::CarShadow, "car_shadow"}, {phases::PartCull, "car_part_cull"},
+    {phases::LightContext, "light_context"}, {phases::LightClone, "light_clone"}, {phases::WorldModel, "world_model"},
+    {phases::SpaceNode, "space_node"}, {phases::Submit, "submit"},
 };
 
 const uint32_t TotalsWords = sizeof(perf::Totals) / sizeof(uint32_t);
@@ -185,11 +199,20 @@ void gameCauses(const Record& r, float* v)
 {
     const uint32_t* p = r.phase;
     const perf::Totals& t = r.delta;
-    const uint32_t ai = p[phases::AiCar] + p[phases::AiDriver];
+    const uint32_t ai = p[phases::AiDriver];
+    const uint32_t movers = p[phases::PhysicsMove] + p[phases::MellowMove];
+    const uint32_t collide = p[phases::Collide] + p[phases::Predict];
+    const uint32_t parts = rest(p[phases::Move], movers) + p[phases::Topology] + p[phases::Avoidables]
+                         + p[phases::RideInfo] + p[phases::Draft] + p[phases::CarForces] + p[phases::BeginMove]
+                         + p[phases::FinishMove] + p[phases::Smokeables] + p[phases::CarEvents]
+                         + p[phases::TerrainEffects] + p[phases::Skids] + p[phases::EventManager]
+                         + p[phases::PlayerState] + p[phases::SpaceNodes] + p[phases::RaceUpdate];
     v[CausePhysics] = float(p[phases::PhysicsMove]);
     v[CauseMellow] = float(p[phases::MellowMove]);
     v[CauseAi] = float(ai);
-    v[CauseStepRest] = float(rest(p[phases::Step], p[phases::PhysicsMove] + p[phases::MellowMove] + ai));
+    v[CauseCollide] = float(collide);
+    v[CauseStepParts] = float(parts);
+    v[CauseStepRest] = float(rest(p[phases::Step], movers + ai + collide + parts));
     v[CauseCameras] = float(p[phases::Cameras]);
     v[CauseSound] = float(p[phases::Sound]);
     v[CauseStreamer] = float(p[phases::Streamer]);
@@ -240,8 +263,6 @@ void renderCauses(uint32_t render, uint32_t queue, const uint32_t* parts, float*
     v[CauseListWait] = float(listWait);
     v[CauseRenderUploadWait] = float(uploadWait);
     v[CauseScenes] = float(parts[perf::RenderScenes]);
-    // Time the thread neither ran nor waited in one of the waits above.
-    v[CauseRenderOffCpu] = float(rest(rest(render, queue + listWait + uploadWait), parts[perf::RenderCpu]));
     v[CauseRenderThreadRest] = float(rest(render, queue + parts[perf::RenderResolve] + parts[perf::RenderPlan]
                                                  + parts[perf::RenderPrograms] + lists + uploadWait
                                                  + parts[perf::RenderScenes]));
@@ -311,14 +332,14 @@ void appendRender(Line& line, const perf::SlowPresent& p)
     const uint32_t* q = p.parts;
     const uint32_t* a = p.partAvgs;
     line.append(" | frame %u interval %.1f ms, render %.1f (avg %.1f): resolve %.1f plan %.1f programs %.1f"
-                " (%u new %.1f) lists %.1f (wait %.1f, steals %u won %u) tex waits %.1f scenes %.1f queue %.1f,"
-                " cpu %.1f (avg %.1f); scenes %u draws %u (avg %u %u)",
+                " (%u new %.1f) lists %.1f (wait %.1f, steals %u won %u) tex waits %.1f scenes %.1f queue %.1f;"
+                " scenes %u draws %u (avg %u %u)",
                 unsigned(p.frame), ms(p.intervalUs), ms(p.renderUs), ms(p.renderAvgUs), ms(q[perf::RenderResolve]),
                 ms(q[perf::RenderPlan]), ms(q[perf::RenderPrograms]), unsigned(q[perf::RenderProgramCreates]),
                 ms(q[perf::RenderProgramCreateUs]), ms(q[perf::RenderLists]), ms(q[perf::RenderListWait]),
                 unsigned(q[perf::RenderListSteals]), unsigned(q[perf::RenderListStealsWon]),
-                ms(q[perf::RenderUploadWait]), ms(q[perf::RenderScenes]), ms(p.queueUs), ms(q[perf::RenderCpu]),
-                ms(a[perf::RenderCpu]), unsigned(q[perf::RenderSceneCount]), unsigned(q[perf::RenderDrawCount]),
+                ms(q[perf::RenderUploadWait]), ms(q[perf::RenderScenes]), ms(p.queueUs),
+                unsigned(q[perf::RenderSceneCount]), unsigned(q[perf::RenderDrawCount]),
                 unsigned(a[perf::RenderSceneCount]), unsigned(a[perf::RenderDrawCount]));
 }
 
@@ -339,8 +360,7 @@ void appendRecord(Line& line, const Record& r)
     line.append(" | phases");
     for (const ShownPhase& shown : ShownPhases)
     {
-        const uint32_t us = shown.id == phases::AiCar ? p[phases::AiCar] + p[phases::AiDriver] : p[shown.id];
-        line.append(" %s %.1f", shown.name, ms(us));
+        line.append(" %s %.1f", shown.name, ms(p[shown.id]));
     }
     line.append(" | uploads %u %.0f KB (waits game %u %.1f render %u %.1f), read-backs %u %.0f KB %.1f,"
                 " locks tex %u buf %u, guest blocks %u %.1f",

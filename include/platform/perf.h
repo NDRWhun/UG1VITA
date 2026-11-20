@@ -91,6 +91,7 @@ enum Audio
     AudioRenderLockedUs,
     AudioLoopsUnlocked,         // runs of the render loop 0x654050 without the execution lock
     AudioLoopUnlockedUs,        // their time, the parts that took the lock again included
+    AudioLoopMaxUs,             // the longest of them (audioMax)
     AudioTicksLocked,           // SND ticks (0x64E330) that took the lock again (the audit failed)
     AudioCallbacksLocked,       // millisecond callback walks (0x64E2F0) that took the lock again
     AudioNotificationsLocked,   // stream notification deliveries (0x655880) that took the lock again
@@ -158,7 +159,6 @@ enum RenderPart
     RenderListStealsWon,    // of them, finished before the worker (count)
     RenderUploadWait,       // waiting for texture writes the frame reads
     RenderScenes,           // scene submission (begin, lists or draws, end)
-    RenderCpu,              // the render thread's CPU time over its whole time for the present
     RenderSceneCount,
     RenderDrawCount,
     RenderPartCount
@@ -271,6 +271,8 @@ void upload(Upload counter, uint32_t value);
 void guestBlock(Alloc kind, uint32_t bytes, uint32_t microseconds, uint32_t searchUs);
 // Any thread: adds to an audio counter.
 void audio(Audio counter, uint32_t value);
+// Any thread: raises an audio counter to value when it is below.
+void audioMax(Audio counter, uint32_t value);
 // Audio thread: a voice render or a part of the SND tick kept the execution lock, with the failed audit check (a
 // string literal) and the guest address it failed on.
 void audioLocked(const char* reason, uint32_t address);

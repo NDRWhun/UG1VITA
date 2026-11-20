@@ -51,7 +51,7 @@ const controls::KeyCode KeyEnd = { 0x23, 0x4F, true };
 // The pump runs on the message thread, at frames and in polls; s_mutex guards everything below.
 pf::LwMutex             s_mutex("input");
 controls::Mapper        s_mapper;
-controls::State         s_state;
+controls::State         s_state = [] { controls::State s = {}; s.pov = s.rightPov = -1; return s; }();
 uint32_t                s_keysDown;         // controls::Key bits posted down
 bool                    s_imeOpen;          // on-screen keyboard requested or shown
 bool                    s_imeForField;      // ... for s_field
@@ -234,7 +234,7 @@ void pump()
     {
         state.buttons = 0;
         state.keys = 0;
-        state.pov = -1;
+        state.pov = state.rightPov = -1;
         memset(state.axes, 0, sizeof(state.axes));
     }
     postKeys(state.keys);
@@ -352,7 +352,7 @@ x86::reg32 Gamepad::getDeviceType8() const
 
 // The left stick is shaped as a whole with the properties of lX, the right stick's Rz on its own; absent axes and
 // lZ read centred.
-void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov)
+void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov, int* rightPov)
 {
     controls::State state;
     {
@@ -369,9 +369,10 @@ void Gamepad::getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCo
     controls::shapeStick(state.axes[controls::AxisRz], 0.0f, right.deadZone, right.saturation,
                          &shaped[controls::AxisRz], &unused);
     *pov = state.pov;
+    *rightPov = state.rightPov;
     *buttons = state.buttons;
     if (s_pollHook)
-        s_pollHook(buttons, pov);
+        s_pollHook(buttons, pov, rightPov);
     for (int axis = 0; axis < controls::AxisCount; ++axis)
     {
         const AxisProperties& properties = m_axisProperties[axis];

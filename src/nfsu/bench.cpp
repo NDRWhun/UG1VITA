@@ -1,8 +1,15 @@
 #include "bench.h"
 
+#include "aiplan.h"
+#include "cars.h"
+#include "gjk.h"
 #include "hitch.h"
+#include "lights.h"
+#include "phases.h"
+#include "physics.h"
 
 #include <lib/controls.h>
+#include <lib/guest.h>
 #include <lib/memmap.h>
 #include <platform/config.h>
 #include <platform/log.h>
@@ -12,9 +19,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <strings.h>
 #include <vector>
 
-namespace nfsu { namespace bench {
+namespace nfsu {
+
+// The translated guest bodies of the overridden functions (generated).
+void sub_4322a0_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_425150_guest(win32::WinApplication* app, x86::CPU& cpu);
+
+namespace bench {
 
 namespace
 {
@@ -35,6 +49,14 @@ const x86::reg8 DragTrackMapMode = 6;
 // 0x00420B40 (world step) gives player 0's car this control mode each step when nonzero; 3 is the AI controller.
 const x86::reg32 OverridePlayerControl = 0x00736208;
 const x86::reg32 AiControl = 3;
+const x86::reg32 HumanControl = 1;
+// Display setting LIGHTSTREAKS (the settings table at 0x00700F60 names it).
+const x86::reg32 LightStreaks = 0x00700E9C;
+// Display setting MOTIONBLUR.
+const x86::reg32 MotionBlur = 0x00700E98;
+// benchmark_crashes: in each period of the race the player's car drives itself for CrashUs from CrashStartUs with
+// full throttle and full lock, alternating left and right.
+const uint32_t CrashPeriodUs = 8000000, CrashStartUs = 5000000, CrashUs = 2500000;
 const x86::reg32 RandomSeed = 0x006F227C;
 // Track table: entries of 0xFC bytes, the track number a 16-bit value at 0x6C, the point-to-point byte at 0x69;
 // loader of chunk 0x34201.
@@ -64,6 +86,32 @@ const x86::reg32 PlayerFinishTime = 0x58;
 const x86::reg32 CarRide = 0x10;                    // ride info: the car type first
 const x86::reg32 Quit = 0x00736124;
 
+// Race parameters' driver list entry (0x005809C0 builds it, 0x004322A0 adds it): the type at +4 (1 human, 2 AI
+// opponent, 3 traffic), the ride copied in at +0x10.
+const x86::reg32 DriverType = 0x04;
+const x86::reg32 DriverRide = 0x10;
+const x86::reg32 HumanDriver = 1, AiDriverType = 2;
+// Ride: the car type at 0, physics upgrade levels at +8 (9 categories, levels 1-3 used, 0 stock; 0x004BC830 and
+// 0x00575960), part pointers per part slot at +0x44C (0x78 slots) and a change count per slot at +0x62C (0x0057EA50).
+const x86::reg32 RideUpgrades = 0x08;
+const int UpgradeCategories = 9;
+const x86::reg32 MaxUpgradeLevel = 3;
+const x86::reg32 RideParts = 0x44C;
+const x86::reg32 RidePartChanges = 0x62C;
+const int PartSlots = 0x78;
+// Slots whose parts are filed under a shared name, not the car's (0x004B26F0, 0x0057D340).
+const int BrakeSlot = 0x10;         // BRAKES
+const int WindowTintSlot = 0x73;    // WINDOW_TINTS
+const int NeonSlot = 0x74;          // NEON (the _KIT%02d_NEON slot of the kit table at 0x00706534)
+// Car part database: a list of part packs headed at 0x0073AD40 (the head is the end), a pack's parts at +0xC and
+// their count at +0x10; a part is 0x30 bytes: the car name hash at +4, the slot (signed) at +0x10, the level at +0x11.
+const x86::reg32 CarPartPacks = 0x0073AD40;
+const x86::reg32 PackParts = 0x0C, PackPartCount = 0x10;
+const x86::reg32 CarPartSize = 0x30, PartCarHash = 0x04, PartSlot = 0x10, PartLevel = 0x11;
+const x86::reg32 CarTypeHashName = 0x20;    // the name 0x00504630 hashes for the car's parts
+const x86::reg32 UpdatePartsEnabled = 0x0057EA80;   // stdcall (ride)
+const x86::reg32 RebuildPhysicsInfo = 0x0057F2B0;   // edi = ride, stdcall (bool)
+
 const uint32_t MaxFrames = 20 * 60 * 60;
 
 enum Mode { Circuit, Sprint, Drag, Knockout, ModeCount };
@@ -73,6 +121,7 @@ const int ModeTracks[ModeCount] = { 1001, 1102, 1201, 1001 };
 const int ModeTrackSeries[ModeCount] = { 10, 11, 12, 10 };
 
 enum Driver { AiDriver, ThrottleDriver, DriverCount };
+const char* const PhysicsNames[2] = { "full", "simplified" };
 const char* const DriverNames[DriverCount] = { "ai", "throttle" };
 
 // Names accepted for a car type besides its table name, and the name logged for it.
@@ -93,6 +142,12 @@ int s_laps = 2;
 int s_opponents = 3;
 int s_seconds = 0;
 bool s_exit = false;
+bool s_tuned = false;
+bool s_crashes = false;
+bool s_fullPhysics = true;
+int s_lightTrails = -1;         // -1: the game's setting
+int s_motionBlur = -1;          // -1: the game's setting
+std::atomic<x86::reg32> s_crashButtons{0};
 std::string s_car;
 win32::MethodPtr s_trackTableLoader = nullptr;
 
@@ -259,11 +314,113 @@ void trackTableLoaderHook(win32::WinApplication* app, x86::CPU& cpu)
     setDword(SkipFePointToPoint, entry ? win32::g_guestBase[entry + TrackPointToPoint] : 0);
     setDword(RandomSeed, fixedSeed());
     applyCar();
+    if (s_lightTrails >= 0)
+        setDword(LightStreaks, x86::reg32(s_lightTrails));
+    if (s_motionBlur >= 0)
+        setDword(MotionBlur, x86::reg32(s_motionBlur));
     if (s_mode == Drag)
     {
         win32::g_guestBase[TrackMapModes] = DragTrackMapMode;
         win32::g_guestBase[TrackMapModes + 1] = DragTrackMapMode;
     }
+}
+
+// bStringHash (0x00567C70).
+x86::reg32 stringHash(const char* text)
+{
+    x86::reg32 hash = ~0u;
+    for (; *text; ++text)
+        hash = hash * 33 + uint8_t(*text);
+    return hash;
+}
+
+// Fits the ride with every physics upgrade at the top level and, in each part slot the stock set fills (0x0057D340:
+// all but 6, 0xC and 0x1F-0x22), the highest level part the database has for the car (the neon included); then the
+// game's own update of the enabled parts and the physics.
+void tuneRide(win32::WinApplication* app, x86::CPU& cpu, x86::reg32 ride, int driverType)
+{
+    const int type = int(int32_t(dword(ride)));
+    const x86::reg32 entry = carEntry(type);
+    if (!entry)
+        return;
+    char name[CarTypeNameSize + 1] = {};
+    memcpy(name, win32::g_guestBase + entry + CarTypeHashName, CarTypeNameSize);
+    const x86::reg32 carHash = stringHash(name), brakeHash = stringHash("BRAKES"),
+                     tintHash = stringHash("WINDOW_TINTS"), neonHash = stringHash("NEON");
+
+    x86::reg32 best[PartSlots] = {};
+    int bestLevel[PartSlots];
+    for (int& level : bestLevel)
+        level = -1;
+    for (x86::reg32 pack = dword(CarPartPacks); pack && pack != CarPartPacks; pack = dword(pack))
+    {
+        const x86::reg32 parts = dword(pack + PackParts), count = dword(pack + PackPartCount);
+        for (x86::reg32 i = 0; parts && i < count; ++i)
+        {
+            const x86::reg32 part = parts + i * CarPartSize;
+            const int slot = int8_t(win32::g_guestBase[part + PartSlot]);
+            if (slot < 0 || slot >= PartSlots || slot == 6 || slot == 0xC || (slot >= 0x1F && slot <= 0x22))
+                continue;
+            const x86::reg32 owner = slot == BrakeSlot ? brakeHash : slot == WindowTintSlot ? tintHash
+                                   : slot == NeonSlot ? neonHash : carHash;
+            if (dword(part + PartCarHash) != owner)
+                continue;
+            const int level = win32::g_guestBase[part + PartLevel];
+            if (level > bestLevel[slot])
+            {
+                bestLevel[slot] = level;
+                best[slot] = part;
+            }
+        }
+    }
+    int changed = 0;
+    for (int slot = 0; slot < PartSlots; ++slot)
+    {
+        const x86::reg32 at = ride + RideParts + x86::reg32(slot) * 4;
+        if (!best[slot] || best[slot] == dword(at))
+            continue;
+        setDword(at, best[slot]);
+        ++win32::g_guestBase[ride + RidePartChanges + x86::reg32(slot)];
+        ++changed;
+    }
+    for (int i = 0; i < UpgradeCategories; ++i)
+        setDword(ride + RideUpgrades + x86::reg32(i) * 4, MaxUpgradeLevel);
+
+    const x86::reg32 eax = cpu.eax, ebx = cpu.ebx, ecx = cpu.ecx, edx = cpu.edx, esi = cpu.esi, edi = cpu.edi,
+                     ebp = cpu.ebp, esp = cpu.esp;
+    cpu.esp -= 4;
+    rc::st32(cpu.esp, ride);
+    ::native::callGuest(app, cpu, UpdatePartsEnabled);
+    if (cpu.terminate)
+        return;
+    cpu.esp = esp - 4;
+    rc::st32(cpu.esp, 1);
+    cpu.edi = ride;
+    ::native::callGuest(app, cpu, RebuildPhysicsInfo);
+    if (cpu.terminate)
+        return;
+    cpu.eax = eax, cpu.ebx = ebx, cpu.ecx = ecx, cpu.edx = edx, cpu.esi = esi, cpu.edi = edi, cpu.ebp = ebp;
+    cpu.esp = esp;
+    pf::logInfo("bench: %s car %s tuned: physics upgrades at level %u, %d part slots upgraded, neon level %d",
+                driverType == HumanDriver ? "player" : "opponent", carName(type).c_str(), unsigned(MaxUpgradeLevel),
+                changed, bestLevel[NeonSlot]);
+}
+
+// benchmark_crashes: the player's car on the human controller with throttle and full lock inside a crash window of
+// each period, on the AI controller outside.
+void steerCrash(uint32_t raceUs)
+{
+    const uint32_t period = raceUs / CrashPeriodUs, at = raceUs % CrashPeriodUs;
+    const bool crashing = at >= CrashStartUs && at < CrashStartUs + CrashUs;
+    const x86::reg32 steer = win32::controls::buttonMask(period & 1 ? win32::controls::DpadRight
+                                                                     : win32::controls::DpadLeft);
+    const x86::reg32 buttons = crashing ? win32::controls::buttonMask(win32::controls::R) | steer : 0;
+    if (buttons == s_crashButtons.load(std::memory_order_relaxed))
+        return;
+    s_crashButtons.store(buttons, std::memory_order_relaxed);
+    setDword(OverridePlayerControl, crashing ? HumanControl : AiControl);
+    pf::logInfo("bench: crash %u %s at %.1f s", unsigned(period), crashing ? (period & 1 ? "right" : "left") : "over",
+                double(raceUs) / 1e6);
 }
 
 x86::reg32 player0()
@@ -317,6 +474,26 @@ void framePresented(uint32_t presentUs)
 
 }
 
+// Called with benchmark_tuned=on for each driver the race adds (edi = the driver list entry, the race parameters
+// on the stack).
+void addDriver(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const x86::reg32 driver = cpu.edi;
+    const x86::reg32 type = dword(driver + DriverType);
+    if (type == HumanDriver || type == AiDriverType)
+        tuneRide(app, cpu, driver + DriverRide, int(type));
+}
+
+bool playerFullPhysics()
+{
+    return s_enabled && s_fullPhysics;
+}
+
+bool tuned()
+{
+    return s_enabled && s_tuned;
+}
+
 bool racing()
 {
     const x86::reg32 coordinator = dword(RaceCoordinator);
@@ -365,14 +542,34 @@ void configure(win32::WinApplication& app)
     s_car = pf::Config::getString("benchmark_car", "");
     s_seconds = std::max(pf::Config::getInt("benchmark_seconds", 0), 0);
     s_exit = pf::Config::getBool("benchmark_exit", false);
+    s_tuned = pf::Config::getBool("benchmark_tuned", false);
+    s_crashes = pf::Config::getBool("benchmark_crashes", false);
+    s_fullPhysics = pf::Config::getChoice("benchmark_player_physics", PhysicsNames, 2, 0) == 0;
+    bool lightTrails = false;
+    if (pf::Config::tryGetBool("benchmark_light_trails", &lightTrails))
+        s_lightTrails = lightTrails ? 1 : 0;
+    const char* blur = pf::Config::getString("benchmark_motion_blur", nullptr);
+    bool motionBlur = false;
+    if (blur && strcasecmp(blur, "enhanced") == 0)
+        s_motionBlur = 2;
+    else if (pf::Config::tryGetBool("benchmark_motion_blur", &motionBlur))
+        s_motionBlur = motionBlur ? 1 : 0;
     pf::logInfo("bench: on, %s race, track %d, %d laps, %d opponents, %s, seed 0x%08X, measure %s, %s",
                 ModeNames[s_mode], s_track, s_laps, s_opponents,
                 s_driver == AiDriver ? "AI drives the player's car"
                                      : "the race's drag controls with throttle held and automatic gears",
                 unsigned(fixedSeed()), s_seconds ? "up to the finish or the time limit" : "up to the finish",
                 s_exit ? "quit after the summary" : "keep running after the summary");
+    pf::logInfo("bench: player's car on %s physics", s_fullPhysics ? "full" : "simplified");
     if (s_seconds)
         pf::logInfo("bench: time limit %d s", s_seconds);
+    if (s_crashes)
+        pf::logInfo("bench: crashes: the player's car is steered into the side for %.1f s every %.0f s",
+                    CrashUs / 1e6, CrashPeriodUs / 1e6);
+    if (s_lightTrails >= 0)
+        pf::logInfo("bench: light trails %s", s_lightTrails ? "on" : "off");
+    if (s_tuned)
+        pf::logInfo("bench: player and opponent cars fully tuned (top physics upgrades, top level parts, neon)");
 
     setDword(SkipFe, 1);
     setDword(SkipFeAiCars, x86::reg32(s_opponents));
@@ -420,6 +617,7 @@ void poll()
                     ModeNames[s_mode], int(int32_t(dword(ConfigTrack))), carName(type).c_str(), type,
                     s_driver == AiDriver ? "the AI takes the player's car" : "throttle held");
         hitch::resetSummary();
+        phases::resetCollisionFrames();
         s_phase.store(Recording, std::memory_order_release);
         return;
     }
@@ -434,9 +632,22 @@ void poll()
         else if (s_seconds && pf::perf::now() - s_startUs >= uint32_t(s_seconds) * 1000000u)
             reason = "time limit";
         if (!reason)
+        {
+            if (s_crashes && s_driver == AiDriver)
+                steerCrash(pf::perf::now() - s_startUs);
             return;
+        }
+        s_crashButtons.store(0, std::memory_order_relaxed);
+        if (s_crashes && s_driver == AiDriver)
+            setDword(OverridePlayerControl, AiControl);
         s_endReason = reason;
         pf::logInfo("bench: measurement ended: %s", reason);
+        aiplan::logShadowTotal();
+        cars::logShadowTotal();
+        gjk::logShadowTotal();
+        physics::logShadowTotal();
+        lights::logShadowTotal();
+        phases::logCollisionFrames();
         s_phase.store(Stopping, std::memory_order_release);
         return;
     }
@@ -456,9 +667,47 @@ void poll()
 
 x86::reg32 heldButtons()
 {
-    if (!s_enabled || s_driver != ThrottleDriver || !racing())
+    if (!s_enabled || !racing())
+        return 0;
+    if (s_crashes)
+        return s_crashButtons.load(std::memory_order_relaxed);
+    if (s_driver != ThrottleDriver)
         return 0;
     return win32::controls::buttonMask(win32::controls::R);
+}
+
+}}
+
+// Race parameters: adds a driver (0x004322A0, tools/recompiler NATIVE_OVERRIDES); with benchmark_tuned=on the human
+// and AI drivers' rides are fitted first.
+namespace nfsu { namespace native {
+
+void sub_4322a0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    if (bench::tuned())
+    {
+        bench::addDriver(app, cpu);
+        if (cpu.terminate)
+            return;
+    }
+    sub_4322a0_guest(app, cpu);
+}
+
+// Movement mode of a racing car (0x00425150, eax = the car's driver; tools/recompiler NATIVE_OVERRIDES): full
+// physics for a human driver unless [0x00736208] gives player 0's car another controller. With the benchmark's
+// player physics full that value is read as 0 here.
+void sub_425150(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const x86::reg32 OverridePlayerControl = 0x00736208;
+    const x86::reg32 control = rc::ld32(OverridePlayerControl);
+    if (!control || !bench::playerFullPhysics())
+    {
+        sub_425150_guest(app, cpu);
+        return;
+    }
+    rc::st32(OverridePlayerControl, 0);
+    sub_425150_guest(app, cpu);
+    rc::st32(OverridePlayerControl, control);
 }
 
 }}

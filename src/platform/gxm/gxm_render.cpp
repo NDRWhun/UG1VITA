@@ -6,7 +6,10 @@
 #include <platform/jobs.h>
 #include <platform/log.h>
 #include <platform/perf.h>
+#include <platform/sync.h>
 #include <platform/texture.h>
+#include <psp2/kernel/processmgr.h>
+#include <atomic>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -22,7 +25,7 @@
     X(filter4_f) X(filter4_f_atest) X(clear_f) \
     X(filter1_f_bfcolor) X(filter1_f_bfalpha) X(filter1_f_bfscale) X(filter2_f_bfcolor) X(filter2_f_bfalpha) \
     X(filter2_f_bfscale) X(filter3_f_bfcolor) X(filter3_f_bfalpha) X(filter3_f_bfscale) X(filter4_f_bfcolor) \
-    X(filter4_f_bfalpha) X(filter4_f_bfscale)
+    X(filter4_f_bfalpha) X(filter4_f_bfscale) X(filter1_f_bfmask) X(world_half_f)
 
 extern "C" {
 #define NFSU_DECLARE_SHADER(name) extern const unsigned char shader_##name[];
@@ -90,6 +93,19 @@ void writeSwizzled(const Texture& t, uint32_t face, uint32_t level, const void* 
     uint8_t* base = static_cast<uint8_t*>(t.data) + face * t.faceStride;
     texture::swizzleLevel(d.format, d.width, d.height, level, data, pitch,
                           base + texture::levelOffset(d.format, d.width, d.height, level));
+}
+
+// A linear texture's rows (stride bytes apart) from rows of pitch bytes.
+void writeLinear(const Texture& t, uint32_t face, const void* data, uint32_t pitch)
+{
+    const render::TextureDesc& d = t.desc;
+    uint8_t* base = static_cast<uint8_t*>(t.data) + face * t.faceStride;
+    const uint32_t rowBytes = d.width * texture::unitBytes(d.format);
+    if (pitch == t.stride)
+        memcpy(base, data, size_t(rowBytes) + size_t(t.stride) * (d.height - 1));
+    else
+        for (uint32_t y = 0; y < d.height; ++y)
+            memcpy(base + y * t.stride, static_cast<const uint8_t*>(data) + y * pitch, rowBytes);
 }
 
 // The smallest alpha of a written level of a 2D texture (render::TextureStorage::levelAlpha).
@@ -185,6 +201,16 @@ uint32_t uniformBytes(const SceGxmProgram* program, const render::UniformField* 
             bytes = std::max<uint32_t>(bytes, (sceGxmProgramParameterGetResourceIndex(parameters[i]) + fields[i].count) * 4);
     }
     return alignUp(bytes, 16);
+}
+
+// Every cache line of a draw.
+inline void prefetchDraw(const render::DrawCall* d)
+{
+    const char* p = reinterpret_cast<const char*>(d);
+    __builtin_prefetch(p);
+    __builtin_prefetch(p + 32);
+    __builtin_prefetch(p + 64);
+    __builtin_prefetch(p + sizeof(render::DrawCall) - 1);
 }
 
 }
@@ -391,6 +417,127 @@ void GpuHeap::free(void* pointer)
 
 // ---- Initialisation ------------------------------------------------------------------------------------------------
 
+namespace
+{
+
+// Scene log (gpu_scene_log=on): every scene of a frame ends with a vertex and a fragment notification, a watcher
+// thread notes when each is written and logs the frames whose GPU work ended more than SceneLogSlowMs after the
+// frame before, scene by scene, and an average per scene every SceneLogAverageFrames frames.
+const uint32_t SceneLogVertexWords = 64;        // notification words 64.. (TA done), 192.. (3D done)
+const uint32_t SceneLogFragmentWords = 192;
+const uint32_t SceneLogScenes = 120;
+const uint32_t SceneLogFrames = 8;
+const float SceneLogSlowMs = 40.0f;
+const uint32_t SceneLogAverageFrames = 300;
+
+struct SceneLogScene
+{
+    uint16_t width, height, draws, blended, alphaTested;
+    char program[20];                           // fragment program of the first draw that is not a clear
+};
+
+struct SceneLogFrame
+{
+    uint32_t index, count, submitUs;
+    volatile unsigned int* done[SceneLogScenes];
+    SceneLogScene scenes[SceneLogScenes];
+};
+
+SceneLogFrame s_sceneLog[SceneLogFrames];
+std::atomic<uint32_t> s_sceneLogHead{ 0 }, s_sceneLogTail{ 0 };
+volatile unsigned int* s_notifications = nullptr;
+pf::Thread* s_sceneLogThread = nullptr;
+
+// Notification values are frame indices, written in order.
+inline bool reached(volatile unsigned int* word, uint32_t index)
+{
+    return int32_t(*word - index) >= 0;
+}
+
+int sceneLogEntry(void*)
+{
+    static uint32_t ta[SceneLogScenes], done[SceneLogScenes];
+    static double sums[SceneLogScenes];
+    uint32_t averaged = 0, previousEnd = 0;
+    char line[2048];
+    for (;;)
+    {
+        const uint32_t tail = s_sceneLogTail.load(std::memory_order_acquire);
+        if (tail == s_sceneLogHead.load(std::memory_order_acquire))
+        {
+            sceKernelDelayThread(200);
+            continue;
+        }
+        const SceneLogFrame& f = s_sceneLog[tail % SceneLogFrames];
+        memset(ta, 0, sizeof(ta));
+        memset(done, 0, sizeof(done));
+        uint32_t finished = 0, now = f.submitUs;
+        while (finished < f.count && now - f.submitUs < 2000000)
+        {
+            now = sceKernelGetProcessTimeLow();
+            for (uint32_t k = 0; k < f.count; ++k)
+            {
+                if (!ta[k] && reached(s_notifications + SceneLogVertexWords + k, f.index))
+                    ta[k] = now;
+                if (!done[k] && reached(f.done[k], f.index))
+                {
+                    done[k] = now;
+                    ++finished;
+                }
+            }
+            sceKernelDelayThread(80);
+        }
+        if (finished == f.count && f.count)
+        {
+            // A scene's 3D work starts after the scene before it and after its own TA work.
+            float ms[SceneLogScenes], total = 0;
+            for (uint32_t k = 0; k < f.count; ++k)
+            {
+                uint32_t start = k ? done[k - 1] : std::max(previousEnd, f.submitUs);
+                if (int32_t(ta[k] - start) > 0)
+                    start = ta[k];
+                ms[k] = int32_t(done[k] - start) > 0 ? float(done[k] - start) / 1000.0f : 0.0f;
+                total += ms[k];
+                sums[k] += ms[k];
+            }
+            const float interval = previousEnd ? float(int32_t(done[f.count - 1] - previousEnd)) / 1000.0f : 0.0f;
+            if (interval > SceneLogSlowMs)
+            {
+                int n = snprintf(line, sizeof(line), "gxm: scene log frame %u: GPU done %.1f ms after the frame before, "
+                                 "3D %.1f ms; scene WxH program draws/blended/alpha-tested 3D ms:", f.index, interval,
+                                 total);
+                for (uint32_t k = 0; k < f.count && n < int(sizeof(line)) - 80; ++k)
+                {
+                    const SceneLogScene& s = f.scenes[k];
+                    n += snprintf(line + n, sizeof(line) - n, " %u %ux%u %s %u/%u/%u %.2f", k, s.width, s.height,
+                                  s.program, s.draws, s.blended, s.alphaTested, ms[k]);
+                }
+                logInfo("%s", line);
+            }
+            previousEnd = done[f.count - 1];
+            if (++averaged == SceneLogAverageFrames)
+            {
+                int n = snprintf(line, sizeof(line), "gxm: scene log average of %u frames, scene WxH 3D ms:",
+                                 SceneLogAverageFrames);
+                for (uint32_t k = 0; k < f.count && n < int(sizeof(line)) - 40; ++k)
+                    n += snprintf(line + n, sizeof(line) - n, " %u %ux%u %.2f", k, f.scenes[k].width, f.scenes[k].height,
+                                  sums[k] / SceneLogAverageFrames);
+                logInfo("%s", line);
+                memset(sums, 0, sizeof(sums));
+                averaged = 0;
+            }
+        }
+        else
+        {
+            previousEnd = 0;
+        }
+        s_sceneLogTail.store(tail + 1, std::memory_order_release);
+    }
+    return 0;
+}
+
+}
+
 bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, volatile unsigned int* notifications)
 {
     m_context = context;
@@ -405,6 +552,18 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
         logInfo("gxm: cull winding swapped (cull_swap=on)");
     static const char* const DrawOrders[] = { "sorted", "game" };
     m_drawSort = Config::getChoice("alpha_draw_order", DrawOrders, 2, 0) == 0;
+    m_sceneLog = Config::getBool("gpu_scene_log", false);
+    if (m_sceneLog)
+    {
+        s_notifications = notifications;
+        for (uint32_t k = 0; k < SceneLogScenes; ++k)
+            notifications[SceneLogVertexWords + k] = notifications[SceneLogFragmentWords + k] = 0;
+        s_sceneLogThread = new Thread("gxm_scene_log", &sceneLogEntry, nullptr, Thread::PriorityHigh, 32 * 1024,
+                                      cores::mask(cores::Helper));
+        s_sceneLogThread->start();
+        logInfo("gxm: scene log on (gpu_scene_log): frames whose GPU work ends over %.0f ms after the frame before, "
+                "scene by scene", SceneLogSlowMs);
+    }
     logInfo("gxm: alpha-tested draws %s (alpha_draw_order=%s)", m_drawSort ? "after opaque draws" : "in game order",
             m_drawSort ? "sorted" : "game");
     m_textureHeap = new GpuHeap("gxm_textures", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 16 * 1024 * 1024,
@@ -437,7 +596,8 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
         for (int v = 0; v < Variants; ++v)
         {
             // Without the variant: the plain program (the layer never selects it).
-            if ((v == 1 && f == render::FpClear) || (v >= 2 && !info.blendFactor))
+            if ((v == 1 && f == render::FpClear) || (v >= 2 && !info.blendFactor)
+                || (v == 1 + render::FactorAlphaMask && f != render::FpFilter1))
             {
                 m_fragmentPrograms[f][v] = m_fragmentPrograms[f][0];
                 m_fragmentPrograms[f][v].owned = false;
@@ -468,6 +628,20 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
             }
         }
     }
+    // The draws keep world_f's texture unit and uniform layout, so the half program must match them.
+    static const char* const Precisions[] = { "half", "full" };
+    m_particleHalf = Config::getChoice("particle_precision", Precisions, 2, 0) == 0;
+    if (m_particleHalf)
+    {
+        const FragmentProgram& world = m_fragmentPrograms[render::FpWorld][0];
+        const SceGxmProgram* half = registerProgram("world_half_f", &m_worldHalf);
+        const SceGxmProgramParameter* sampler = sceGxmProgramFindParameterByName(half, "uTex0");
+        if (!sampler || sceGxmProgramParameterGetResourceIndex(sampler) != world.units[0]
+            || sceGxmProgramGetDefaultUniformBufferSize(half) > world.uniformBytes)
+            fatal("shader world_half_f does not match world_f's texture unit and uniforms");
+    }
+    logInfo("gxm: depth-tested SRCALPHA/INVSRCALPHA world draws in %s precision "
+            "(particle_precision=%s)", m_particleHalf ? "half" : "full", m_particleHalf ? "half" : "full");
 
     // 0..65535 for draws without indices.
     m_sequenceUid = sceKernelAllocMemBlock("gxm_sequence", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW, 128 * 1024, nullptr);
@@ -534,6 +708,8 @@ void FrameRenderer::shutdown()
         for (int v = 0; v < Variants; ++v)
             if (m_fragmentPrograms[f][v].owned && m_fragmentPrograms[f][v].id)
                 sceGxmShaderPatcherUnregisterProgram(m_patcher, m_fragmentPrograms[f][v].id);
+    if (m_worldHalf)
+        sceGxmShaderPatcherUnregisterProgram(m_patcher, m_worldHalf);
     delete m_textureHeap;
     delete m_bufferHeap;
     delete m_uploadDone;
@@ -764,19 +940,11 @@ void FrameRenderer::writeTexture(render::TextureStorage* storage, uint32_t face,
         perf::upload(perf::UploadLevels, 1);
         perf::upload(perf::UploadBytes, texture::levelBytes(d.format, d.width, d.height, level));
     }
-    uint8_t* base = static_cast<uint8_t*>(t->data) + face * t->faceStride;
     noteAlpha(*t, level, data, pitch);
     if (t->stride)
-    {
-        const uint32_t rowBytes = d.width * texture::unitBytes(d.format);
-        if (pitch == t->stride)
-            memcpy(base, data, size_t(rowBytes) + size_t(t->stride) * (d.height - 1));
-        else
-            for (uint32_t y = 0; y < d.height; ++y)
-                memcpy(base + y * t->stride, static_cast<const uint8_t*>(data) + y * pitch, rowBytes);
-        return;
-    }
-    writeSwizzled(*t, face, level, data, pitch);
+        writeLinear(*t, face, data, pitch);
+    else
+        writeSwizzled(*t, face, level, data, pitch);
 }
 
 void FrameRenderer::readTexture(const render::TextureStorage* storage, uint32_t face, uint32_t level, void* data,
@@ -819,11 +987,6 @@ uint32_t FrameRenderer::writeTextureAsync(render::TextureStorage* storage, uint3
     const render::TextureDesc& d = t->desc;
     if (level >= d.levels || face >= (d.cube ? 6u : 1u))
         return 0;
-    if (t->stride)
-    {
-        writeTexture(storage, face, level, data, pitch);
-        return 0;
-    }
     if (perf::timed())
     {
         perf::upload(perf::UploadLevels, 1);
@@ -878,7 +1041,10 @@ void FrameRenderer::runUpload(void* argument)
     }
     else
     {
-        writeSwizzled(*u->to, u->face, u->level, u->data, u->pitch);
+        if (u->to->stride)
+            writeLinear(*u->to, u->face, u->data, u->pitch);
+        else
+            writeSwizzled(*u->to, u->face, u->level, u->data, u->pitch);
         noteAlpha(*u->to, u->level, u->data, u->pitch);
     }
     __asm__ volatile("dsb" : : : "memory");
@@ -1072,18 +1238,29 @@ const FrameRenderer::VertexEntry* FrameRenderer::vertexProgram(uint8_t program, 
     return &entry;
 }
 
-// Fragment program cache key: the programs, the variant, blending and the colour mask.
+// Fragment program cache key: the programs, the variant, blending, the colour mask and world_half_f in place of the
+// program.
 static uint64_t fragmentKey(uint8_t vertexProgram, uint8_t fragmentProgram, uint32_t variant, bool blend, uint8_t mask,
-                            uint8_t srcBlend, uint8_t dstBlend)
+                            uint8_t srcBlend, uint8_t dstBlend, bool half)
 {
     return uint64_t(vertexProgram) | uint64_t(fragmentProgram) << 8 | uint64_t(variant) << 16 | uint64_t(blend) << 19
-         | uint64_t(mask) << 20 | (blend ? uint64_t(srcBlend) << 24 | uint64_t(dstBlend) << 32 : 0);
+         | uint64_t(mask) << 20 | (blend ? uint64_t(srcBlend) << 24 | uint64_t(dstBlend) << 32 : 0)
+         | uint64_t(half) << 40;
+}
+
+// particle_precision=half: a depth-tested world_f draw without alpha test, blended SRCALPHA/INVSRCALPHA (or
+// BOTHSRCALPHA), runs world_half_f. Depth-tested excludes the HUD and screen overlays drawn with the world effect.
+bool FrameRenderer::halfPrecision(const render::DrawState& state) const
+{
+    return m_particleHalf && state.blendEnable && state.depthEnable && state.fragmentProgram == render::FpWorld
+        && variant(state) == 0 && ((state.srcBlend == 5 && state.dstBlend == 6) || state.srcBlend == 12);
 }
 
 const FrameRenderer::FragmentEntry* FrameRenderer::fragmentProgram(const render::DrawState& state)
 {
     const uint64_t key = fragmentKey(state.vertexProgram, state.fragmentProgram, variant(state),
-                                     state.blendEnable != 0, state.colorMask, state.srcBlend, state.dstBlend);
+                                     state.blendEnable != 0, state.colorMask, state.srcBlend, state.dstBlend,
+                                     halfPrecision(state));
     auto it = m_fragmentCache.find(key);
     if (it != m_fragmentCache.end())
         return &it->second;
@@ -1119,11 +1296,13 @@ const FrameRenderer::FragmentEntry* FrameRenderer::createFragment(uint64_t key)
     info.alphaSrc = alphaFactor(colorSrc);
     info.alphaDst = alphaFactor(colorDst);
     const bool plain = !blend && mask == 0xf;
+    const bool half = (key >> 40) & 1;
     const SceGxmProgram* vertex = m_vertexPrograms[vertexProgram < render::VpCount ? vertexProgram : 0].program;
     SceGxmFragmentProgram* result = nullptr;
     const bool timed = perf::hitch() && !m_loadingPrograms;
     const uint32_t start = timed ? perf::now() : 0;
-    const int error = sceGxmShaderPatcherCreateFragmentProgram(m_patcher, p.id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+    const int error = sceGxmShaderPatcherCreateFragmentProgram(m_patcher, half ? m_worldHalf : p.id,
+                                                               SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
                                                                SCE_GXM_MULTISAMPLE_NONE, plain ? nullptr : &info,
                                                                vertex, &result);
     if (timed)
@@ -1206,8 +1385,10 @@ uint32_t FrameRenderer::loadPrograms(const char* path)
         const uint32_t v = uint32_t(key >> 16) & 7;
         const bool blend = (key >> 19) & 1;
         const uint8_t mask = blend ? uint8_t(key >> 20) & 0xf : uint8_t(key >> 20);
-        if (vertex >= render::VpCount || fragment >= render::FpCount || v >= Variants
-            || fragmentKey(vertex, fragment, v, blend, mask, uint8_t(key >> 24), uint8_t(key >> 32)) != key
+        // world_half_f entries only with particle_precision=half.
+        const bool half = (key >> 40) & 1;
+        if (vertex >= render::VpCount || fragment >= render::FpCount || v >= Variants || (half && !m_worldHalf)
+            || fragmentKey(vertex, fragment, v, blend, mask, uint8_t(key >> 24), uint8_t(key >> 32), half) != key
             || m_fragmentCache.find(key) != m_fragmentCache.end())
             continue;
         createFragment(key);
@@ -1275,6 +1456,7 @@ void FrameRenderer::preparePrograms(const render::Frame& frame)
     const render::DrawState* previous = nullptr;
     for (uint32_t i = 0; i < frame.drawCount; ++i)
     {
+        prefetchDraw(&frame.draws[i + 4]);
         const render::DrawState& s = frame.draws[i].state;
         if (!frame.draws[i].count)
         {
@@ -1287,7 +1469,8 @@ void FrameRenderer::preparePrograms(const render::Frame& frame)
         if (!previous || s.vertexProgram != previous->vertexProgram || s.fragmentProgram != previous->fragmentProgram
             || s.alphaTest != previous->alphaTest || s.factorOutput != previous->factorOutput
             || s.blendEnable != previous->blendEnable || s.srcBlend != previous->srcBlend
-            || s.dstBlend != previous->dstBlend || s.colorMask != previous->colorMask)
+            || s.dstBlend != previous->dstBlend || s.colorMask != previous->colorMask
+            || (m_particleHalf && s.depthEnable != previous->depthEnable))
             last.fragment = fragmentProgram(s);
         m_programs[i] = last;
         previous = &s;
@@ -1660,9 +1843,11 @@ uint32_t flushTransitions(const render::Frame& frame, const uint32_t* order, uin
     return transitions;
 }
 
-uint64_t geometryBit(const void* vertices)
+// Bit of a draw's first vertex in the 256-bit filter of the held draws.
+uint32_t geometrySlot(const void* vertices)
 {
-    return uint64_t(1) << ((uintptr_t(vertices) >> 4) & 63);
+    const uintptr_t v = uintptr_t(vertices);
+    return uint32_t((v >> 4) ^ (v >> 12)) & 255;
 }
 
 }
@@ -1679,26 +1864,28 @@ void FrameRenderer::sortScene(const render::Frame& frame, uint32_t scene)
     {
         const render::TextureStorage* target = frame.scenes[scene].target.color;
         m_held.clear();
-        uint64_t held = 0;
+        uint32_t held[8] = {};
         uint32_t out = 0;
         for (uint32_t n = 0; n < p.orderCount; ++n)
         {
             const uint32_t index = order[n];
+            if (n + 4 < p.orderCount)
+                prefetchDraw(&frame.draws[order[n + 4]]);
             const render::DrawCall& d = frame.draws[index];
             const SortClass c = sortClass(d, target);
+            const uint32_t slot = geometrySlot(d.vertices);
             if (c == SortDiscard)
             {
-                m_held.push_back(index);
-                held |= geometryBit(d.vertices);
+                m_held.push_back(HeldDraw{ d.vertices, d.indices, d.count, index });
+                held[slot >> 5] |= 1u << (slot & 31);
                 continue;
             }
             bool release = c == SortFixed;
             // The same geometry drawn again stays after its alpha-tested draw.
-            if (!release && (held & geometryBit(d.vertices)))
+            if (!release && (held[slot >> 5] & (1u << (slot & 31))))
             {
-                for (uint32_t h : m_held)
+                for (const HeldDraw& e : m_held)
                 {
-                    const render::DrawCall& e = frame.draws[h];
                     if (e.vertices == d.vertices && e.indices == d.indices && e.count == d.count)
                     {
                         release = true;
@@ -1708,15 +1895,15 @@ void FrameRenderer::sortScene(const render::Frame& frame, uint32_t scene)
             }
             if (release)
             {
-                for (uint32_t h : m_held)
-                    order[out++] = h;
+                for (const HeldDraw& e : m_held)
+                    order[out++] = e.index;
                 m_held.clear();
-                held = 0;
+                memset(held, 0, sizeof(held));
             }
             order[out++] = index;
         }
-        for (uint32_t h : m_held)
-            order[out++] = h;
+        for (const HeldDraw& e : m_held)
+            order[out++] = e.index;
         m_held.clear();
     }
     if (!timed)
@@ -1859,12 +2046,39 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
         waitFrameUploads(frame);
     lap(perf::RenderUploadWait);
 
+    SceneLogFrame* log = nullptr;
+    if (m_sceneLog && s_sceneLogHead.load() - s_sceneLogTail.load(std::memory_order_acquire) < SceneLogFrames)
+    {
+        log = &s_sceneLog[s_sceneLogHead.load() % SceneLogFrames];
+        log->index = frame.index;
+        log->count = 0;
+        log->submitUs = sceKernelGetProcessTimeLow();
+    }
     for (uint32_t i = 0; i < sceneCount; ++i)
     {
         const ScenePlan& p = m_plan[i];
         if (p.skipped)
             continue;
         const render::Scene& scene = frame.scenes[i];
+        if (log && log->count < SceneLogScenes)
+        {
+            SceneLogScene& s = log->scenes[log->count];
+            memset(&s, 0, sizeof(s));
+            s.width = uint16_t(p.width);
+            s.height = uint16_t(p.height);
+            s.draws = uint16_t(p.orderCount);
+            for (uint32_t n = 0; n < p.orderCount; ++n)
+            {
+                const render::DrawState& st = frame.draws[m_order[p.firstOrder + n]].state;
+                s.blended += st.blendEnable ? 1 : 0;
+                s.alphaTested += st.alphaTest ? 1 : 0;
+                if (!s.program[0] && st.vertexProgram != render::VpClear && st.fragmentProgram < render::FpCount)
+                    snprintf(s.program, sizeof(s.program), "%s",
+                             render::fragmentProgram(render::FragmentProgram(st.fragmentProgram)).name);
+            }
+            if (!s.program[0])
+                snprintf(s.program, sizeof(s.program), "clear");
+        }
         // Scenes whose draws never test depth (filter passes, the HUD) neither load nor store it.
         SceGxmDepthStencilSurface depth;
         const Depth* d = m_plan[i].depthUsed ? static_cast<const Depth*>(scene.target.depth) : nullptr;
@@ -1892,12 +2106,16 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
                          d ? &depth : nullptr);
         bool recorded = lists && p.jobCount;
         for (uint32_t j = 0; j < p.jobCount && recorded; ++j)
-            recorded = m_jobs[p.firstJob + j].ok;
+        {
+            const Job& job = m_jobs[p.firstJob + j];
+            recorded = job.ok[job.used.load(std::memory_order_acquire)];
+        }
         if (recorded)
         {
             for (uint32_t j = 0; j < p.jobCount; ++j)
             {
-                const int error = sceGxmExecuteCommandList(m_context, &m_jobs[p.firstJob + j].list);
+                Job& job = m_jobs[p.firstJob + j];
+                const int error = sceGxmExecuteCommandList(m_context, &job.lists[job.used.load(std::memory_order_relaxed)]);
                 if (error < 0)
                     logError("gxm: sceGxmExecuteCommandList failed: 0x%08x", error);
             }
@@ -1912,8 +2130,23 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
                 draw(m_main, frame, m_order[p.firstOrder + n]);
         }
         const bool last = i + 1 == sceneCount;
-        sceGxmEndScene(m_context, nullptr, last && lastWritesDone ? &slot.done : nullptr);
+        SceGxmNotification* fragmentDone = last && lastWritesDone ? &slot.done : nullptr;
+        if (log && log->count < SceneLogScenes)
+        {
+            SceGxmNotification ta = { s_notifications + SceneLogVertexWords + log->count, frame.index };
+            SceGxmNotification done = { s_notifications + SceneLogFragmentWords + log->count, frame.index };
+            if (!fragmentDone)
+                fragmentDone = &done;
+            log->done[log->count++] = fragmentDone->address;
+            sceGxmEndScene(m_context, &ta, fragmentDone);
+        }
+        else
+        {
+            sceGxmEndScene(m_context, nullptr, fragmentDone);
+        }
     }
+    if (log)
+        s_sceneLogHead.fetch_add(1, std::memory_order_release);
     // Unbinds the precomputed states.
     sceGxmSetPrecomputedVertexState(m_context, nullptr);
     sceGxmSetPrecomputedFragmentState(m_context, nullptr);
@@ -2038,13 +2271,15 @@ void FrameRenderer::initLists()
         return;
     }
     m_jobLock = new Mutex("gxm_jobs", false);
-    m_jobsDone = new CondVar("gxm_jobs_done", *m_jobLock);
+    m_recordersDone = new CondVar("gxm_recorders_done", *m_jobLock);
     m_wake = new Semaphore("gxm_wake", 0);
+    m_jobs.reset(new Job[MaxJobs]);
     static const char* const names[] = { "gxm_list_core3", "gxm_list_core2" };
     for (size_t i = 1; i < m_workers.size(); ++i)
     {
         Worker* w = m_workers[i];
         const int core = cores[i - 1];
+        w->core = uint8_t(core);
         w->thread = new Thread(core == 3 ? names[0] : names[1], &workerEntry, w, ListWorkerPriority,
                                64 * 1024, Thread::Cpu0 << core);
         w->thread->start();
@@ -2059,10 +2294,7 @@ void FrameRenderer::shutdownLists()
 {
     if (m_jobLock)
     {
-        {
-            LockGuard guard(*m_jobLock);
-            m_stop = true;
-        }
+        m_stop.store(true);
         m_wake->post(int(m_workers.size()));
     }
     for (Worker* w : m_workers)
@@ -2078,10 +2310,11 @@ void FrameRenderer::shutdownLists()
         delete w;
     }
     m_workers.clear();
-    delete m_jobsDone;
+    m_jobs.reset();
+    delete m_recordersDone;
     delete m_jobLock;
     delete m_wake;
-    m_jobsDone = nullptr;
+    m_recordersDone = nullptr;
     m_jobLock = nullptr;
     m_wake = nullptr;
 }
@@ -2090,14 +2323,13 @@ int FrameRenderer::workerEntry(void* worker)
 {
     Worker& w = *static_cast<Worker*>(worker);
     FrameRenderer& r = *w.owner;
+    if (perf::enabled())
+        perf::trackThread(w.core == 3 ? "lists_core3" : "lists_core2");
     while (true)
     {
         r.m_wake->wait();
-        {
-            LockGuard guard(*r.m_jobLock);
-            if (r.m_stop)
-                break;
-        }
+        if (r.m_stop.load())
+            break;
         r.runJobs(w);
     }
     return 0;
@@ -2115,103 +2347,87 @@ void FrameRenderer::beginWorkerFrame(Worker& w, const render::Frame& frame)
     w.recorder.words.reset();
 }
 
-// Claims jobs until none is left. A worker woken late finds the current frame's jobs, or none.
+// Claims jobs until none is left. A worker woken late finds the current frame's jobs, or none. The helper threads
+// count in m_recording from before their first claim until they leave.
 void FrameRenderer::runJobs(Worker& w)
 {
-    while (true)
+    const bool counted = w.thread != nullptr;
+    if (counted)
+        m_recording.fetch_add(1);
+    uint32_t claim = m_claim.load(std::memory_order_acquire);
+    while (!m_stop.load(std::memory_order_relaxed))
     {
-        const render::Frame* frame;
-        uint32_t index, generation;
-        Job job;
-        {
-            LockGuard guard(*m_jobLock);
-            if (m_stop || m_nextJob >= m_jobs.size())
-                return;
-            index = m_nextJob++;
-            frame = m_jobFrame;
-            generation = m_jobGeneration;
-            m_jobs[index].state = JobClaimed;
-            m_jobs[index].worker = w.index;
-            job = m_jobs[index];
-            w.abandon.store(false, std::memory_order_relaxed);
-            ++m_recording;
-        }
-        beginWorkerFrame(w, *frame);
+        const uint32_t index = claim & ClaimIndexMask;
+        if (index >= ((claim >> ClaimCountShift) & ClaimIndexMask))
+            break;
+        if (!m_claim.compare_exchange_weak(claim, claim + 1, std::memory_order_acquire, std::memory_order_acquire))
+            continue;
+        const render::Frame& frame = *m_jobFrame;
+        Job& job = m_jobs[index];
+        beginWorkerFrame(w, frame);
         SceGxmCommandList list;
-        const bool ok = recordJob(w, *frame, job, &list);
-        finishJob(w, generation, index, ok, list);
+        const bool ok = recordJob(w, frame, job, &list);
+        finishJob(job, 0, ok, list);
+        claim = m_claim.load(std::memory_order_acquire);
     }
+    if (counted)
+        leaveRecording();
 }
 
-void FrameRenderer::finishJob(Worker& w, uint32_t generation, uint32_t index, bool ok, const SceGxmCommandList& list)
+bool FrameRenderer::finishJob(Job& job, uint32_t recording, bool ok, const SceGxmCommandList& list)
 {
-    LockGuard guard(*m_jobLock);
-    --m_recording;
-    const bool stolen = m_stealing == index;
-    if (w.index == 0 && stolen)
-        m_stealing = NoJob;
-    if (generation == m_jobGeneration && m_jobs[index].state != JobDone)
-    {
-        Job& job = m_jobs[index];
-        job.ok = ok;
-        job.list = list;
-        job.state = JobDone;
-        // The other recorder of the job stops: the claiming worker, or the render thread stealing it.
-        if (stolen)
-            m_workers[w.index == 0 ? job.worker : 0]->abandon.store(true, std::memory_order_relaxed);
-        ++m_doneJobs;
-    }
-    m_jobsDone->broadcast();
+    job.lists[recording] = list;
+    job.ok[recording] = ok;
+    int8_t none = -1;
+    if (!job.used.compare_exchange_strong(none, int8_t(recording), std::memory_order_acq_rel,
+                                          std::memory_order_relaxed))
+        return false;
+    job.abandon.store(true, std::memory_order_relaxed);
+    return true;
 }
 
 void FrameRenderer::stealJobs(const render::Frame& frame)
 {
     Worker& self = *m_workers[0];
     const bool timed = perf::hitch();
-    while (true)
+    for (uint32_t i = 0; i < m_jobCount; ++i)
     {
-        uint32_t index = NoJob, generation;
-        Job job;
-        {
-            LockGuard guard(*m_jobLock);
-            if (m_doneJobs >= m_jobs.size())
-                return;
-            for (uint32_t i = 0; i < m_jobs.size() && index == NoJob; ++i)
-            {
-                if (m_jobs[i].state == JobClaimed && m_jobs[i].worker != 0)
-                    index = i;
-            }
-            if (index == NoJob)
-            {
-                m_jobsDone->wait();
-                continue;
-            }
-            m_stealing = index;
-            generation = m_jobGeneration;
-            job = m_jobs[index];
-            self.abandon.store(false, std::memory_order_relaxed);
-            ++m_recording;
-        }
+        Job& job = m_jobs[i];
+        if (job.used.load(std::memory_order_acquire) >= 0)
+            continue;
         beginWorkerFrame(self, frame);
         SceGxmCommandList list;
         const bool ok = recordJob(self, frame, job, &list);
+        const bool won = finishJob(job, 1, ok, list);
         if (timed)
         {
             perf::renderPart(perf::RenderListSteals, 1);
-            if (!self.abandon.load(std::memory_order_relaxed))
+            if (won)
                 perf::renderPart(perf::RenderListStealsWon, 1);
         }
-        finishJob(self, generation, index, ok, list);
+    }
+}
+
+void FrameRenderer::leaveRecording()
+{
+    if (m_recording.fetch_sub(1) == 1 && m_recorderWaiters.load() != 0)
+    {
+        LockGuard guard(*m_jobLock);
+        m_recordersDone->broadcast();
     }
 }
 
 void FrameRenderer::waitRecorders()
 {
-    if (!m_jobLock)
+    if (!m_jobLock || m_recording.load() == 0)
         return;
-    LockGuard guard(*m_jobLock);
-    while (m_recording)
-        m_jobsDone->wait();
+    m_recorderWaiters.fetch_add(1);
+    {
+        LockGuard guard(*m_jobLock);
+        while (m_recording.load() != 0)
+            m_recordersDone->wait();
+    }
+    m_recorderWaiters.fetch_sub(1);
 }
 
 bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& job, SceGxmCommandList* list)
@@ -2238,8 +2454,10 @@ bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& 
     for (uint32_t n = job.begin; n < job.end; ++n)
     {
         // Every 8 draws: another recorder finished the job, this list is not used.
-        if (((n - job.begin) & 7) == 7 && w.abandon.load(std::memory_order_relaxed))
+        if (((n - job.begin) & 7) == 7 && job.abandon.load(std::memory_order_relaxed))
             break;
+        if (n + 2 < job.end)
+            prefetchDraw(&frame.draws[m_order[n + 2]]);
         draw(w.recorder, frame, m_order[n]);
     }
     error = sceGxmEndCommandList(context, list);
@@ -2252,34 +2470,46 @@ bool FrameRenderer::recordJob(Worker& w, const render::Frame& frame, const Job& 
 }
 
 // Splits the frame's scenes into jobs and records them on the workers and this thread; false: draw immediately.
+// The jobs are rewritten while none is claimable: every job of the last call was claimed, and waitRecorders let the
+// helpers that recorded them leave.
 bool FrameRenderer::recordLists(const render::Frame& frame)
 {
     if (m_workers.empty() || m_order.size() < ListMinimumDraws)
         return false;
     const uint32_t threads = uint32_t(m_workers.size());
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
     {
-        LockGuard guard(*m_jobLock);
-        m_jobs.clear();
-        for (uint32_t i = 0; i < frame.sceneCount; ++i)
+        ScenePlan& p = m_plan[i];
+        p.firstJob = count;
+        if (p.skipped || !p.orderCount)
+            continue;
+        // About two ranges per thread.
+        const uint32_t size = std::max(JobMinimumDraws, (p.orderCount + 2 * threads - 1) / (2 * threads));
+        for (uint32_t begin = 0; begin < p.orderCount; begin += size)
         {
-            ScenePlan& p = m_plan[i];
-            p.firstJob = uint32_t(m_jobs.size());
-            if (p.skipped || !p.orderCount)
-                continue;
-            // About two ranges per thread.
-            const uint32_t size = std::max(JobMinimumDraws, (p.orderCount + 2 * threads - 1) / (2 * threads));
-            for (uint32_t begin = 0; begin < p.orderCount; begin += size)
+            if (count == MaxJobs)
             {
-                const uint32_t end = std::min(p.orderCount, begin + size);
-                m_jobs.push_back(Job{ i, p.firstOrder + begin, p.firstOrder + end, false, {}, JobFree, 0 });
+                static bool s_logged = false;
+                if (!s_logged)
+                    logInfo("gxm: more than %u command list jobs in a frame: drawn immediately", unsigned(MaxJobs));
+                s_logged = true;
+                return false;
             }
-            p.jobCount = uint32_t(m_jobs.size()) - p.firstJob;
+            Job& job = m_jobs[count++];
+            job.scene = i;
+            job.begin = p.firstOrder + begin;
+            job.end = p.firstOrder + std::min(p.orderCount, begin + size);
+            job.ok[0] = job.ok[1] = false;
+            job.used.store(-1, std::memory_order_relaxed);
+            job.abandon.store(false, std::memory_order_relaxed);
         }
-        m_jobFrame = &frame;
-        m_nextJob = 0;
-        m_doneJobs = 0;
-        ++m_jobGeneration;
+        p.jobCount = count - p.firstJob;
     }
+    m_jobCount = count;
+    m_jobFrame = &frame;
+    ++m_jobGeneration;
+    m_claim.store((m_jobGeneration << ClaimGenerationShift) | (count << ClaimCountShift));
     if (threads > 1)
         m_wake->post(int(threads - 1));
     runJobs(*m_workers[0]);

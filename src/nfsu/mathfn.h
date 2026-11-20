@@ -18,6 +18,9 @@ namespace nfsu { namespace mathfn
 double sin16(x86::reg32 angle);
 // Sine and cosine of a 16-bit angle, rounded to float as the guest stores them (guest 0x564bd0).
 void sinCos16(x86::reg32 angle, float& sine, float& cosine);
+// Guest 0x5416e0: adds the colour in, weighted by the spherical harmonic terms of a0..a3, to the 40 coefficients at
+// out (10 rows of 4 floats).
+void irradiance(float* out, const float in[4], float a0, float a1, float a2, float a3);
 
 // Perf builds: the helpers' calls and their estimated time since the last call; for the prep perf line.
 struct Usage

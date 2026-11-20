@@ -617,6 +617,7 @@ struct Stream
 {
     uint32_t*   data = nullptr;
     uint32_t    size = 0, capacity = 0;
+    bool        motionBlurEnhanced = false;     // the frame draws the enhanced motion blur (Device::motionBlurQuad)
 
     uint32_t* append(uint32_t words)
     {
@@ -766,6 +767,9 @@ struct BlendFactorDraw
 BlendFactorDraw resolveBlendFactor(DWORD src, DWORD dst, DWORD op, DWORD factor, bool variants, bool alphaWrite);
 // Row-vector product out = a * b.
 void multiply(const float* a, const float* b, float* out);
+// The same product with the same float results; NEON when the calling thread's FPSCR rounds to nearest with
+// flush-to-zero and default NaN (the modes NEON always uses).
+void multiplyFast(const float* a, const float* b, float* out);
 
 // ---- Device --------------------------------------------------------------------------------------------------------
 
@@ -937,6 +941,10 @@ private:
                  const uint16_t* indices, uint32_t vertexCount, uint8_t layout, uint32_t texComponents,
                  bool positionT, render::BufferStorage* vertexStorage, render::BufferStorage* indexStorage);
     VertexDeclaration* fvfDeclaration(DWORD fvf);
+    // Enhanced motion blur (bridge::setMotionBlurEnhanced): the motion blur passes sample texel centres, and the
+    // composite (filter1 with BLENDFACTOR/INVBLENDFACTOR, FactorAlphaMask) covers each pixel in proportion to how far
+    // the blur smears it. Adjusts a 48-byte filter quad (position, colour, four texture coordinates) of these passes.
+    void motionBlurQuad(float* vertices);
 
     WinApplication*         m_app;
     Direct3D*               m_d3d;
@@ -948,6 +956,9 @@ private:
     Surface*                m_autoDepth = nullptr;
     const EffectPass*       m_effectPass = nullptr;
     uint32_t                m_deviceSamplers = 0;
+    bool                    m_motionBlurEnhanced = false;   // the frame being recorded draws the enhanced motion blur
+    uint32_t                m_blurPasses = 0;       // half-size motion blur quads since the last composite
+    float                   m_blurStep[4] = {};     // per-tap offsets of the zoom: left, top, right, bottom edge
     std::vector<VertexDeclaration*> m_fvfDeclarations;
     DWORD                   m_lights[8][26] = {};
     BOOL                    m_lightEnabled[8] = {};

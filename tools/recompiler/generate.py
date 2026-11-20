@@ -53,12 +53,35 @@ NATIVE_OVERRIDES = [
     0x674898,   # _ftol2: the same result without a control word change
     0x6734a0,   # _chkstk / _alloca_probe: page-probing stack allocation
     0x647cb0,   # movie YUV420 -> ARGB converter: the guest has only an MMX path
+    0x413270,   # movie frame to the movie texture: converted straight into the locked texture
+    # Movie decoder kernels (src/nfsu/movie_decode.cpp): the inverse DCT, the intra coefficient decoder and the block
+    # moves between bytes and the 16.16 work buffers.
+    0x64abc0,   # 8x8 inverse DCT in 16.16 fixed point
+    0x64b110,   # intra coefficients of a block
+    0x64a694,   # 8x8 block of the DC value
+    0x64a71f,   # 8x8 bytes to 16.16 values in a 16-wide buffer
+    0x64a7f0,   # 8x8 bytes to 16.16 values in an 8-wide buffer
+    0x64a8c1,   # 16x16 16.16 values to clamped bytes
+    0x64aaa5,   # 8x8 16.16 values to clamped bytes
     0x4086b0,   # back buffer size: the display's with widescreen=on, and the 2D mapping the patches below read
     0x4f5730,   # end of an FE package's rendering: places the HUD packages' objects before the render list is drawn
     0x514b90,   # FE render object draw: its polygons at the object's place (centred, screen edge or full width)
     0x58e810,   # track map draw: the whole map at its place
     0x4f3030,   # FE mouse pointer draw: keeps the pointer state, draws nothing (no pointer on the Vita)
+    0x4070a0,   # device read: the pad's action tables of the active input map only (src/nfsu/main.cpp)
     0x409cd0,   # FE background view: cleared first on the magazine screen
+    0x4322a0,   # race parameters: add a driver (benchmark_tuned fits the ride first)
+    0x46d1c0,   # drive train shift points: results kept per input (physics.cpp)
+    0x580240,   # theoretical top speed of a ride (physics.cpp)
+    0x478570,   # PhysicsMover::IterateForces: wheel ground forces and clutch torque per substep (physics.cpp)
+    0x585810,   # RigidBody::ComputeAuxiliaries per substep (physics.cpp)
+    0x585410,   # RigidBody::GetDerivative per substep (physics.cpp)
+    0x588580,   # Suspension::ComputeAuxiliaries per wheel and substep (physics.cpp)
+    0x628b30,   # character animation: bone matrices of a pose (anim.cpp)
+    0x6315f0,   # character animation: keyframe decoder of codec 7 (anim.cpp)
+    0x425150,   # movement mode of a racing car (the benchmark keeps the AI-driven player car on full physics)
+    0x416a10,   # Customize Display Settings: value change of a row (Motion Blur: off, on, enhanced; display.cpp)
+    0x4169b0,   # Customize Display Settings: the rows' values (Motion Blur: Enhanced; display.cpp)
     # D3DX (include/winapi/d3dx9.h): effects without the guest HLSL compiler; the math entries are jumps through
     # the PSGP dispatch table.
     0x5af9e5,   # D3DXCreateEffectPool
@@ -99,15 +122,24 @@ NATIVE_OVERRIDES = [
     0x583ea0,   # table value, linear between entries
     0x583f20,   # graph value, linear between points
     0x567370,   # normalise a vector
+    0x5416e0,   # irradiance: add a coloured direction's spherical harmonic terms
     0x567450,   # normalise a vector with the w term
     0x567310,   # normalise a 2D vector to a length
     0x540830,   # length with the w term
     0x5677d0,   # grow a box by a point and radius
     0x567740,   # grow a box by a point
     0x567710,   # box of one point
+    0x458750,   # first overlap time of two moving boxes
+    0x4733a0,   # box of a collision body's vertices
+    # AI planning (src/nfsu/aiplan.cpp).
+    0x5a5c30,   # future points: lateral limits of each point from the one after it
     # Render preparation (src/nfsu/prep.cpp): per-instance light-context fills on the workers.
     0x446730,   # StuffScenery: fill light contexts and submit the view's instances
     0x40a580,   # frame render and present
+    # Light contexts (src/nfsu/lights.cpp): elSetupLightContext and elCloneLightContext are listed with the phases.
+    0x542e40,   # elSetupLights: table and database lights, spherical harmonic coefficients
+    0x542c20,   # elSetupEnvMap: target direction and environment matrix of a light context
+    0x542400,   # light context copied with its directions and coefficients rotated
     # Resource loading (src/nfsu/load.cpp): the JDLZ decompressor, the 8-bit palette texture expansion and the car
     # skin compositor with its pixel blend.
     0x58d190,   # JDLZ decompressor
@@ -147,6 +179,44 @@ NATIVE_OVERRIDES = [
     0x4483c0,   # ServiceResourceLoading
     0x409580,   # world views of the frame render
     0x571050,   # RenderCars
+    0x58a240,   # RenderClans (phase timing)
+    0x592100,   # RenderWorldModels (phase timing)
+    0x570db0,   # RenderCarReflections (phase timing)
+    0x570950,   # the cars of the render list (src/nfsu/cars.cpp)
+    0x4ae650,   # MiniWorld::Render (phase timing)
+    0x570d00,   # RenderFlares (cars) (phase timing)
+    0x56dc30,   # CarRenderInfo::Render (cars, reflections) (phase timing)
+    0x56cf10,   # car shadow hull, corners and setup (phase timing)
+    0x56d0c0,   # car shadow hull, corners and setup (phase timing)
+    0x56d700,   # car shadow hull, corners and setup (phase timing)
+    0x569460,   # CarPartCuller::CullParts (phase timing)
+    0x5437f0,   # elSetupLightContext: native light context (lights.cpp), phase timing
+    0x544390,   # elCloneLightContext: native (lights.cpp), phase timing
+    0x591e40,   # WorldModel::Render (phase timing)
+    0x5791c0,   # SpaceNode::Update (phase timing)
+    0x577010,   # MobileTopologyUpdate (phase timing)
+    0x57a530,   # Avoidable::Update (phase timing)
+    0x42a790,   # ride physics info rebuild (phase timing)
+    0x426450,   # Car::CalculateDraftFactor (phase timing)
+    0x429620,   # Car::CalcForceParameters (phase timing)
+    0x4267a0,   # Car::BeginMovement (phase timing)
+    0x426930,   # Car::FinishMovement (phase timing)
+    0x595670,   # SmokeableThink (phase timing)
+    0x4281e0,   # Car::TriggerEvents (phase timing)
+    0x4286a0,   # Car::TriggerCarTerrainEffects (phase timing)
+    0x589f00,   # ServiceFlamingSkids (phase timing)
+    0x58e040,   # emProcessAllEvents (phase timing)
+    0x430730,   # Player::UpdateGameState (phase timing)
+    0x5793e0,   # ServiceSpaceNodes (phase timing)
+    0x435570,   # Race::Update (phase timing)
+    0x469580,   # DynamicCollisionBody::MaybeCreateWitnesses (phase timing)
+    0x468060,   # CollisionBodyWitness::TestForContact (phase timing)
+    0x46b5e0,   # Contact::Resolve (phase timing)
+    0x471de0,   # SCEA_GJKdistance (gjk.cpp, phase timing)
+    0x46ea50,   # DistanceSqr of a simplex pair (gjk.cpp, phase timing)
+    0x472f30,   # support point of a polytope (gjk.cpp)
+    0x473a90,   # support point of a wafer (gjk.cpp)
+    0x46bae0,   # Contact::CollisionImpulse (phase timing)
     # Particle draw (src/nfsu/particles.cpp): the quads of every particle on the workers, the draws in order.
     0x404110,   # particle system list draw for a view
     0x403a60,   # particle system update: emitters, then every particle's motion
@@ -196,6 +266,9 @@ PATCHES = [
     # Magazine screen: the 3D pass clear test 0x4098A2 reads a copy at 0x6D3A00 of [0x73645C], 0 while the magazine is
     # shown (phases.cpp sub_409580), so the background the FE view cleared and drew stays (native.cpp sub_409cd0).
     (0x4098a2, '833d5c64730001', '833d003a6d0001'),
+    # Display setting limits 0x410B70: with motion blur available, the limit of MOTIONBLUR [0x701064] is 2 instead of 1
+    # (enhanced, display.cpp); the limit is only compared with 0 and clamps the setting (0x410CE0, 0x415F90).
+    (0x410c3e, '893564107000 893568107000 5e c3 90909090', 'c70564107000 02000000 893568107000 5e c3'),
 ]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.

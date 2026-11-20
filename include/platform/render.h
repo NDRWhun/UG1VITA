@@ -244,7 +244,7 @@ struct FragmentProgramInfo
     uint16_t            blendFactor;    // float offset of uBlendFactor; 0: no factor variants
 };
 
-// Blend factor variants of a program (shader_<name>_bfcolor, _bfalpha, _bfscale; no alpha test). Direct3D's
+// Blend factor variants of a program (shader_<name>_bfcolor, _bfalpha, _bfscale, _bfmask; no alpha test). Direct3D's
 // constant blend colour has no GXM factor: the layer turns BLENDFACTOR and INVBLENDFACTOR terms into fixed factors
 // and one of these outputs, with uBlendFactor holding the factor (or 1 - factor).
 enum FactorOutput : uint8_t
@@ -253,6 +253,7 @@ enum FactorOutput : uint8_t
     FactorColor,                // output = uBlendFactor (source factor ZERO, destination SRCCOLOR)
     FactorAlpha,                // alpha = uBlendFactor.a (SRCALPHA, INVSRCALPHA)
     FactorScale,                // output = saturate(colour) * uBlendFactor (source factor ONE)
+    FactorAlphaMask,            // alpha = uBlendFactor.a * saturate(length(vTex1)) (SRCALPHA, INVSRCALPHA; filter1)
     FactorCount
 };
 const char* factorSuffix(FactorOutput output);

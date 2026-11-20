@@ -611,17 +611,26 @@ void noteResult(uint32_t op, const uint32_t* w, uint32_t length, HRESULT h, HRES
 
 // The result a queued call returns to its caller, that of the last record put; stored as its last word. Inside a
 // flush: D3D_OK, stored as NotReturned, except for calls that change what draws need bound.
+HRESULT queuedResult();
+
 inline HRESULT queued()
 {
     Deferral& d = s_defer;
     const uint32_t op = d.lastOp;
-    if (d.inWindow && op != MethodSetStreamSource && op != MethodSetIndices && op != MethodSetVertexDeclaration
-        && op != OpSetFVF && op != MethodDrawPrimitiveUP)
+    if (__builtin_expect(d.inWindow && op != MethodSetStreamSource && op != MethodSetIndices
+                         && op != MethodSetVertexDeclaration && op != OpSetFVF && op != MethodDrawPrimitiveUP, 1))
     {
         d.last[d.lastWords] = NotReturned;
         return D3D_OK;
     }
-    const HRESULT h = expected(op, d.last);
+    return queuedResult();
+}
+
+// queued() outside the window fast path: the expected result, stored as the record's last word.
+__attribute__((noinline)) HRESULT queuedResult()
+{
+    Deferral& d = s_defer;
+    const HRESULT h = expected(d.lastOp, d.last);
     d.last[d.lastWords] = h;
     return h;
 }
@@ -933,6 +942,8 @@ int queueEntry(void*)
 // Makes the written records visible to the queue thread and wakes it.
 void publish()
 {
+    if (g_openGroup)
+        g_openGroup->queue();
     Deferral& d = s_defer;
     d.unpublishedDraws = 0;
     if (d.mode != DeferThread)
@@ -993,6 +1004,13 @@ void makeRoom(uint32_t words)
 }
 
 // put when the record does not fit before the ring's end or before the unrun records.
+}
+
+CallGroup* g_openGroup = nullptr;
+
+namespace
+{
+
 __attribute__((noinline)) uint32_t* putSlow(uint32_t op, uint32_t words)
 {
     Deferral& d = s_defer;
@@ -1024,6 +1042,8 @@ __attribute__((noinline)) uint32_t* putSlow(uint32_t op, uint32_t words)
 // Appends a record of words payload words and the result word, and returns its payload.
 inline uint32_t* put(uint32_t op, uint32_t words)
 {
+    if (__builtin_expect(g_openGroup != nullptr, 0))
+        g_openGroup->queue();
     Deferral& d = s_defer;
     const uint32_t need = words + 2;
     const uint32_t at = d.head & QueueMask;
@@ -1224,6 +1244,8 @@ void deviceGone(const Device* device)
 
 void drainSlow(reg32 site)
 {
+    if (g_openGroup)
+        g_openGroup->queue();
     Deferral& d = s_defer;
     if (d.head != d.drained)
     {
@@ -1720,14 +1742,30 @@ CallGroup::CallGroup(WinApplication* app, x86::CPU& cpu)
 {
 }
 
+void CallGroup::open(uint32_t words)
+{
+    queue();
+    const uint32_t capacity = std::max<uint32_t>(ReserveWords, words);
+    m_ring = put(OpCalls, capacity);
+    m_capacity = capacity;
+    g_openGroup = this;
+}
+
 void CallGroup::queue()
 {
-    if (!m_size)
+    if (!m_ring)
         return;
-    uint32_t* w = put(OpCalls, m_size);
-    copyWords(w, m_words, m_size);
+    Deferral& d = s_defer;
+    m_ring[-1] = OpCalls | (m_size + 1) << 8;
+    d.head -= m_capacity - m_size;
+    d.last = m_ring;
+    d.lastWords = m_size;
+    d.lastOp = OpCalls;
+    g_openGroup = nullptr;
     queued();
-    s_defer.stats.compactCalls += m_count;
+    d.stats.compactCalls += m_count;
+    m_ring = nullptr;
+    m_capacity = 0;
     m_size = 0;
     m_count = 0;
 }

@@ -244,7 +244,7 @@ HRESULT IDirectInputDevice::GetCapabilities(WinApplication* app, x86::CPU& cpu,
     caps.dwDevType = deviceType();
     caps.dwAxes = input->getAxesCount();
     caps.dwButtons = input->getButtonCount();
-    caps.dwPOVs = dynamic_cast<const Gamepad*>(input) ? 1 : 0;
+    caps.dwPOVs = dynamic_cast<const Gamepad*>(input) ? 2 : 0;
     memcpy(lpDIDevCaps, &caps, caps.dwSize);
     return DI_OK;
 }
@@ -287,8 +287,9 @@ HRESULT IDirectInputDevice::EnumObjects(WinApplication* app, x86::CPU& cpu,
             snprintf(object.name, sizeof(object.name), "%s", name ? name : names[axis]);
             objects.push_back(object);
         }
-        Object hat = { 0xA36D02F2, DWORD(offsetof(DIJOYSTATE, rgdwPOV)), 0x10, 0, "Hat Switch" };   // DIDFT_POV
-        objects.push_back(hat);
+        for (DWORD hat = 0; hat < 2; ++hat)     // DIDFT_POV
+            objects.push_back(Object{ 0xA36D02F2, DWORD(offsetof(DIJOYSTATE, rgdwPOV) + 4 * hat), 0x10 | (hat << 8), 0,
+                                      "Hat Switch" });
         for (x86::reg32 button = 0; button < controls::joystickButtonCount(); ++button)
         {
             Object object = { s_buttonGuid, DWORD(offsetof(DIJOYSTATE, rgbButtons) + button),
@@ -450,8 +451,8 @@ HRESULT IDirectInputDevice::GetDeviceState(WinApplication* app, x86::CPU& cpu,
             return DIERR_INVALIDPARAM;
         x86::reg32 buttons;
         x86::sreg32 axes[controls::AxisCount];
-        int hat;
-        gamepad->getState(&buttons, axes, &hat);
+        int hat, rightHat;
+        gamepad->getState(&buttons, axes, &hat, &rightHat);
         memset(lpvData, 0, cbData);
         DIJOYSTATE* state = reinterpret_cast<DIJOYSTATE*>(lpvData);
         state->lX = axes[controls::AxisX];
@@ -465,6 +466,7 @@ HRESULT IDirectInputDevice::GetDeviceState(WinApplication* app, x86::CPU& cpu,
         for (DWORD& pov : state->rgdwPOV)
             pov = 0xffffffff;
         state->rgdwPOV[0] = hat < 0 ? 0xffffffff : DWORD(hat);
+        state->rgdwPOV[1] = rightHat < 0 ? 0xffffffff : DWORD(rightHat);
         for (x86::reg32 button = 0; button < controls::joystickButtonCount(); ++button)
             state->rgbButtons[button] = (buttons & (x86::reg32(1) << button)) ? 0x80 : 0x00;
         return DI_OK;

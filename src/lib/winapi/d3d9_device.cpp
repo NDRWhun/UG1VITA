@@ -45,6 +45,9 @@ const D3DMATRIX s_identity = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 
 // debug_frame_dump=on (development): one frame in 150, 40 frames in all, is written to the log call by call.
 std::atomic<bool> s_dumping{false};
 
+// bridge::setMotionBlurEnhanced: taken by each frame when it is opened.
+bool s_motionBlurEnhanced = false;
+
 bool dumpThisFrame(uint32_t index)
 {
     static const bool on = pf::Config::getBool("debug_frame_dump", false);
@@ -268,6 +271,9 @@ render::Frame* Device::frame(WinApplication* app, x86::CPU& cpu)
         m_sceneOpen = false;
         m_frameFull = false;
         m_stream = &frameStream(m_frame->index);
+        m_motionBlurEnhanced = s_motionBlurEnhanced;
+        m_stream->motionBlurEnhanced = m_motionBlurEnhanced;
+        m_blurPasses = 0;
         s_dumping = dumpThisFrame(m_frame->index);
         if (s_dumping)
             pf::logInfo("dump: frame %u, back buffer %ux%u", m_frame->index, unsigned(m_params.BackBufferWidth),
@@ -282,6 +288,11 @@ namespace bridge
 bool dumpingFrame()
 {
     return s_dumping;
+}
+
+void setMotionBlurEnhanced(bool on)
+{
+    s_motionBlurEnhanced = on;
 }
 
 }
@@ -1392,6 +1403,67 @@ HRESULT Device::drawIndexedFrameVertices(WinApplication* app, x86::CPU& cpu, DWO
                 decl->texComponents(), decl->positionT(), nullptr, ib->storage());
 }
 
+// The motion blur draws three quads into the half-size targets (the downsample of the scene, then two zoom passes:
+// tap i samples i zoom steps away in the first, 4 i in the second) and composites onto the scene with the next quad.
+// Every tap moves by half a target pixel, so that the target's pixel centres sample texel centres. The composite's
+// texture coordinate 1 is the blur's extent over its 16 steps at that pixel, in MaskPixels.
+void Device::motionBlurQuad(float* v)
+{
+    const float MaskPixels = 8.0f;
+    const D3DVIEWPORT9& vp = m_state.viewport;
+    const bool half = vp.Width * 2 == m_params.BackBufferWidth && vp.Height * 2 == m_params.BackBufferHeight;
+    if (!half && m_blurPasses != 3)
+        return;
+    if (half)
+    {
+        if (m_blurPasses == 3)
+            m_blurPasses = 0;
+        if (m_blurPasses == 2)
+        {
+            // Tap 3 of the second zoom pass is 12 steps in: u = -12 s0 at the left edge, 1 - 12 s2 at the right,
+            // v = -12 s1 at the top, 1 - 12 s3 at the bottom.
+            for (int i = 0; i < 4; ++i)
+            {
+                const float* p = v + 12 * i;
+                if (p[0] < 0.0f)
+                    m_blurStep[0] = -p[10] / 12.0f;
+                else
+                    m_blurStep[2] = (1.0f - p[10]) / 12.0f;
+                if (p[1] > 0.0f)
+                    m_blurStep[1] = -p[11] / 12.0f;
+                else
+                    m_blurStep[3] = (1.0f - p[11]) / 12.0f;
+            }
+        }
+        ++m_blurPasses;
+    }
+    else
+    {
+        m_blurPasses = 0;
+    }
+    const float du = 0.5f / float(vp.Width), dv = 0.5f / float(vp.Height);
+    for (int i = 0; i < 4; ++i)
+    {
+        for (int t = 0; t < 4; ++t)
+        {
+            v[12 * i + 4 + 2 * t] += du;
+            v[12 * i + 5 + 2 * t] += dv;
+        }
+    }
+    if (half)
+        return;
+    // A tap i samples i (-s0 + u (s0 - s2)) away in u at screen position u, likewise in v.
+    const float* s = m_blurStep;
+    const float scaleU = 15.0f * float(vp.Width) / MaskPixels, scaleV = 15.0f * float(vp.Height) / MaskPixels;
+    for (int i = 0; i < 4; ++i)
+    {
+        float* p = v + 12 * i;
+        const float u = p[0] < 0.0f ? 0.0f : 1.0f, w = p[1] > 0.0f ? 0.0f : 1.0f;
+        p[6] = scaleU * (-s[0] + u * (s[0] - s[2]));
+        p[7] = scaleV * (-s[1] + w * (s[1] - s[3]));
+    }
+}
+
 HRESULT Device::DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, UINT count, const void* data,
                                 UINT stride)
 {
@@ -1414,6 +1486,8 @@ HRESULT Device::DrawPrimitiveUP(WinApplication* app, x86::CPU& cpu, DWORD type, 
         return D3D_OK;
     }
     memcpy(copy, data, size_t(vertices) * stride);
+    if (stride == 48 && vertices == 4 && m_effectPass && m_motionBlurEnhanced)
+        motionBlurQuad(static_cast<float*>(copy));
     if (s_dumping)
     {
         // x, y: the first two floats of each vertex; diffuse after the position (and normal) of an FVF.

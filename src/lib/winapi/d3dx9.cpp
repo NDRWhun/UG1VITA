@@ -1328,10 +1328,8 @@ x86::reg32 matrixMultiply(WinApplication* app, x86::CPU& cpu, x86::reg32 out, x8
 {
     RC_USE(app);
     RC_USE(cpu);
-    float ma[16], mb[16], r[16];
-    memcpy(ma, hostFloats(a), 64);
-    memcpy(mb, hostFloats(b), 64);
-    multiply(ma, mb, r);
+    float r[16];
+    multiplyFast(hostFloats(a), hostFloats(b), r);
     store(out, r, 16);
     return out;
 }

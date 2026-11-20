@@ -2,6 +2,7 @@
 #include <platform/cores.h>
 #include <platform/log.h>
 #include <platform/perf.h>
+#include <platform/time.h>
 #include <psp2/audioout.h>
 #include <algorithm>
 #include <cmath>
@@ -279,6 +280,10 @@ AudioBuffer::AudioBuffer(AudioDevice* device, WinApplication* app, x86::reg32 bu
     ,   m_data(&app->getMemory<x86::reg8>(m_memmap->getBlockStart()))
     ,   m_format(format)
     ,   m_position(0)
+    ,   m_blockIndex(0)
+    ,   m_blockFrames(0)
+    ,   m_blockUs(0)
+    ,   m_blockStartUs(0)
     ,   m_staleFrames(0)
     ,   m_phase(0)
     ,   m_frequency(0)
@@ -330,13 +335,22 @@ void AudioBuffer::unlock()
 x86::reg32 AudioBuffer::position() const
 {
     pf::LockGuard guard(m_device->mutex());
-    return m_position;
+    if (!m_playing || m_blockFrames == 0)
+        return m_position;
+    const uint64_t elapsed = pf::ticksUs() - m_blockStartUs;
+    if (elapsed >= m_blockUs)
+        return m_position;
+    const x86::reg32 frameBytes = m_format.frameBytes();
+    const x86::reg32 ringFrames = m_bufferSize / frameBytes;
+    const x86::reg32 played = x86::reg32(uint64_t(m_blockFrames) * elapsed / m_blockUs);
+    return (m_blockIndex + played) % ringFrames * frameBytes;
 }
 
 void AudioBuffer::setPosition(x86::reg32 offset)
 {
     pf::LockGuard guard(m_device->mutex());
     m_position = offset - offset % m_format.frameBytes();
+    m_blockFrames = 0;
     m_phase = 0;
 }
 
@@ -345,6 +359,7 @@ void AudioBuffer::setFormat(const AudioFormat& format)
     pf::LockGuard guard(m_device->mutex());
     m_format = format;
     m_position -= m_position % format.frameBytes();
+    m_blockFrames = 0;
     m_phase = 0;
     if (m_primary)
         m_device->setOutputRate(format.sampleRate);
@@ -411,6 +426,10 @@ bool AudioBuffer::mixInto(x86::sreg32* accumulator, x86::reg32 frames, x86::reg3
             consumed = mixFrames<x86::reg8, 1>(m_data, ringFrames, index, available, m_phase, step, left, right, accumulator, frames);
     }
     m_staleFrames = std::min(m_staleFrames + consumed, ringFrames);
+    m_blockIndex = m_position / frameBytes;
+    m_blockFrames = consumed;
+    m_blockUs = x86::reg32(uint64_t(frames) * 1000000 / outputRate);
+    m_blockStartUs = pf::ticksUs();
     m_position = index * frameBytes;
     if (consumed < available)
         return true;

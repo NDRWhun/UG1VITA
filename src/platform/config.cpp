@@ -22,20 +22,27 @@ const int MaxLine    = 256;
 const char* const Known[] =
 {
     // Player settings.
-    "widescreen", "hud_widescreen", "menu_widescreen", "button_prompts", "fit_4_3", "frame_rate", "car_reflection_interval", "rear_touch",
+    "widescreen", "hud_widescreen", "menu_widescreen", "movies", "button_prompts", "fit_4_3", "frame_rate", "car_reflection_interval", "rear_touch",
     // Cores, logs and the benchmark.
     "use_core3", "core3_tasks", "timing_log", "timing_phases", "hitch_log", "console_log",
     "benchmark", "benchmark_exit", "benchmark_seconds", "benchmark_laps", "benchmark_opponents", "benchmark_track",
-    "benchmark_timing_log", "benchmark_mode", "benchmark_car", "benchmark_driver",
+    "benchmark_timing_log", "benchmark_mode", "benchmark_car", "benchmark_driver", "benchmark_tuned",
+    "benchmark_crashes", "benchmark_light_trails", "benchmark_motion_blur",
+    "benchmark_player_physics",
     // Renderer.
     "alpha_draw_order", "skip_unused_alpha_test", "matrices_on_render_thread", "texture_cache_mb", "texture_async",
-    "gxm_precomputed", "gxm_lists", "gxm_core2", "gxm_program_list", "cull_swap", "debug_frame_dump",
+    "gxm_precomputed", "gxm_lists", "gxm_core2", "gxm_program_list", "cull_swap", "debug_frame_dump", "gpu_scene_log",
+    "particle_precision",
     // Native versions of guest code and their shadow compares.
     "bank_native", "shadow_bank", "coll_native", "shadow_coll", "cull_native", "cull_parallel", "shadow_cull",
     "draw_native", "shadow_draw", "flush_native", "flush_async", "flush_async_core", "flush_async_priority",
-    "flush_async_frame", "flares_native", "flares_parallel", "shadow_flares",
-    "load_native", "shadow_load", "math_native", "shadow_math", "particles_native", "particles_update",
+    "flush_async_frame", "flares_native", "flares_parallel", "shadow_flares", "cars_native", "shadow_cars",
+    "load_native", "shadow_load", "math_native", "shadow_math", "ai_native", "shadow_ai", "gjk_native", "shadow_gjk", "particles_native", "particles_update",
     "particles_parallel", "particles_direct", "shadow_particles", "prep_native", "shadow_prep",
+    "lights_native", "shadow_lights",
+    "shift_points_native", "shadow_shift_points", "top_speed_native", "shadow_top_speed",
+    "forces_native", "shadow_forces", "rigid_body_native", "shadow_rigid_body", "suspension_native", "shadow_suspension",
+    "anim_native", "shadow_anim", "movie_native", "shadow_movie",
 };
 
 bool isKnown(const char* key)

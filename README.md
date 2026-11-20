@@ -78,6 +78,8 @@ If the game closes right away, `ux0:data/NFSUG1VITA/nfsug1vita.log` says what is
 | <img src="assets/icons/select.svg" width="20" alt="Select"> | Reset car to the track |
 | <img src="assets/icons/start.svg" width="20" alt="Start"> | Pause |
 
+These are the defaults. Options > Controller changes the driving controls; the changes are saved with the profile.
+
 Text fields open the Vita keyboard (or <img src="assets/icons/select.svg" width="20" alt="Select"> +
 <img src="assets/icons/triangle.svg" width="20" alt="Triangle">). To quit, use the PS button.
 
@@ -96,6 +98,7 @@ menu_widescreen=off
 | `fit_4_3` | `stretch` (default), `pillarbox` | With `widescreen=off`: stretch the 4:3 picture, or keep it with black bars |
 | `menu_widescreen` | `on` (default), `off` | Menus laid out for the wide screen, or centred at 4:3 |
 | `hud_widescreen` | `on` (default), `off` | Race HUD at the screen edges, or centred at 4:3 |
+| `movies` | `stretch` (default), `fit` | Movies stretched to the wide screen, or kept at 4:3 with black bars |
 | `button_prompts` | `vita` (default), `pc` | Vita buttons on screen, or the original PC keys |
 | `rear_touch` | `on` (default), `off` | Gear shifting on the rear touch pad |
 | `car_reflection_interval` | `1` (default) to `6` | Higher values update the car reflections less often, for more speed |

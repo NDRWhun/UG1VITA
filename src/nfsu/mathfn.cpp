@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <fpu.h>
 #include <recomp.h>
 
@@ -34,6 +35,9 @@ void sub_540830_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_5677d0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_567740_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_567710_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_5416e0_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_458750_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_4733a0_guest(win32::WinApplication* app, x86::CPU& cpu);
 
 namespace mathfn
 {
@@ -803,6 +807,55 @@ void expandPointNative(x86::CPU& cpu)
     cpu.flags.pf = !(a <= b);
 }
 
+// Guest 0x4733a0: the box min [esp+4], max [edx] of the collision body's vertices (esi: count at +0x14, the
+// vertices at [+0x54] + 0x10, 0x30 apart), the first vertex through the FPU and the rest by 0x567740. ret 4.
+void bodyBoxNative(x86::CPU& cpu)
+{
+    const reg32 e = cpu.esp, body = cpu.esi, mn = rc::ld32(e + 4), mx = cpu.edx;
+    const reg32 vertices = rc::ld32(body + 0x54), first = vertices + 0x10;
+    const float x = float(ld(first)), y = float(ld(first + 4)), z = float(ld(first + 8));
+    rc::stf32(e + 4, z);
+    rc::stf32(mn, x);
+    rc::stf32(mn + 4, y);
+    rc::stf32(mn + 8, z);
+    rc::st32(mx + 8, rc::ld32(e + 4));
+    rc::stf32(mx, x);
+    rc::stf32(mx + 4, y);
+    const sreg32 count = sreg32(rc::ld32(body + 0x14));
+    x86::CPU grow = cpu;
+    for (sreg32 i = 1; i < count; ++i)
+    {
+        grow.eax = vertices + reg32(i) * 0x30 + 0x10;
+        grow.ecx = mn;
+        grow.edx = mx;
+        grow.esp = e - 0x10;
+        expandPointNative(grow);
+    }
+    if (count > 1)
+    {
+        cpu.ecx = grow.ecx;
+        cpu.fpu.status = grow.fpu.status;
+        cpu.flags.cf = false;
+        cpu.flags.zf = true;
+        cpu.flags.sf = false;
+        cpu.flags.of = false;
+        cpu.flags.pf = true;
+        cpu.flags.af = false;
+    }
+    else
+    {
+        const reg32 a = reg32(count), r = a - 1;
+        cpu.flags.cf = a < 1;
+        cpu.flags.zf = r == 0;
+        cpu.flags.sf = r >> 31;
+        cpu.flags.of = ((a ^ 1u) & (a ^ r)) >> 31;
+        cpu.flags.pf = pf(r);
+        cpu.flags.af = ((a ^ 1u ^ r) >> 4) & 1;
+    }
+    cpu.eax = reg32(count);
+    cpu.esp = e + 8;
+}
+
 // Guest 0x567710: min [ecx] and max [edx] both set to the point at eax (through the FPU).
 void pointBoxNative(x86::CPU& cpu)
 {
@@ -818,24 +871,507 @@ void pointBoxNative(x86::CPU& cpu)
     cpu.esp += 4;
 }
 
+}
+
+// Guest 0x5416e0's arithmetic: adds the colour in, weighted by the spherical harmonic terms of a0..a3, to the 40
+// coefficients at out (10 rows of 4 floats).
+void irradiance(float* out, const float in[4], float a0, float a1, float a2, float a3)
+{
+    const float k6cc7ac = rc::ldf32(0x6cc7ac);
+    const float k6cc7bc = rc::ldf32(0x6cc7bc);
+    const float k6cc87c = rc::ldf32(0x6cc87c);
+    const float k6cc880 = rc::ldf32(0x6cc880);
+    const float k6cc884 = rc::ldf32(0x6cc884);
+    const float k6cc888 = rc::ldf32(0x6cc888);
+    const float k6cc88c = rc::ldf32(0x6cc88c);
+    const float k6cc890 = rc::ldf32(0x6cc890);
+    const float k6cc894 = rc::ldf32(0x6cc894);
+    const float k6cc898 = rc::ldf32(0x6cc898);
+    const float k6cc89c = rc::ldf32(0x6cc89c);
+    const float k6cc8a0 = rc::ldf32(0x6cc8a0);
+    const float k6cc8a4 = rc::ldf32(0x6cc8a4);
+    const double t0 = double(in[0]);
+    const double t1 = double(in[1]);
+    const double t2 = double(a3);
+    float l2c = in[2];
+    const double t3 = t2 * double(a3);
+    float l28 = in[3];
+    const double t4 = t3 * double(k6cc7ac);
+    const double t5 = t4 - double(k6cc7bc);
+    float l3c = float(t5);
+    const double t6 = double(a1);
+    const double t7 = t6 * double(a1);
+    const double t8 = double(a2);
+    const double t9 = t8 * double(a2);
+    const double t10 = t7 - t9;
+    float l38 = float(t10);
+    const double t11 = t0 * double(a0);
+    const double t12 = double(k6cc8a4);
+    const double t13 = t12 * t11;
+    const double t14 = t11 * double(k6cc8a0);
+    const double t15 = double(a2);
+    const double t16 = t15 * t14;
+    float l20 = float(t16);
+    const double t17 = double(a3);
+    const double t18 = t17 * t14;
+    float l1c = float(t18);
+    const double t19 = t14 * double(a1);
+    float l18 = float(t19);
+    const double t20 = t11 * double(k6cc89c);
+    const double t21 = double(a1);
+    const double t22 = t21 * t20;
+    const double t23 = double(a2);
+    const double t24 = t23 * t22;
+    float l14 = float(t24);
+    const double t25 = t20 * double(a2);
+    const double t26 = t25 * double(a3);
+    float l10 = float(t26);
+    const double t27 = t22 * double(a3);
+    float l8 = float(t27);
+    const double t28 = t11 * double(k6cc898);
+    const double t29 = t28 * double(l3c);
+    float lc = float(t29);
+    const double t30 = t11 * double(k6cc894);
+    const double t31 = t30 * double(l38);
+    float l4 = float(t31);
+    const double t32 = t13 * double(k6cc890);
+    const double t33 = double(lc);
+    const double t34 = t33 * double(k6cc88c);
+    const double t35 = t32 - t34;
+    const double t36 = t35 + double(out[0]);
+    out[0] = float(t36);
+    const double t37 = double(l4);
+    const double t38 = t37 * double(k6cc888);
+    const double t39 = t38 + double(out[4]);
+    out[4] = float(t39);
+    const double t40 = double(out[8]);
+    const double t41 = t40 - t38;
+    out[8] = float(t41);
+    const double t42 = double(lc);
+    const double t43 = t42 * double(k6cc884);
+    const double t44 = t43 + double(out[12]);
+    out[12] = float(t44);
+    const double t45 = double(l14);
+    const double t46 = t45 * double(k6cc880);
+    const double t47 = t46 + double(out[16]);
+    out[16] = float(t47);
+    const double t48 = double(l8);
+    const double t49 = t48 * double(k6cc880);
+    const double t50 = t49 + double(out[20]);
+    out[20] = float(t50);
+    const double t51 = double(l10);
+    const double t52 = t51 * double(k6cc888);
+    const double t53 = t52 + double(out[24]);
+    out[24] = float(t53);
+    const double t54 = double(l18);
+    const double t55 = t54 * double(k6cc87c);
+    const double t56 = t55 + double(out[28]);
+    out[28] = float(t56);
+    const double t57 = double(l20);
+    const double t58 = t57 * double(k6cc87c);
+    const double t59 = t58 + double(out[32]);
+    out[32] = float(t59);
+    const double t60 = double(l1c);
+    const double t61 = t60 * double(k6cc87c);
+    const double t62 = t61 + double(out[36]);
+    out[36] = float(t62);
+    const double t63 = t1 * double(a0);
+    const double t64 = double(k6cc8a4);
+    const double t65 = t64 * t63;
+    const double t66 = t63 * double(k6cc8a0);
+    const double t67 = double(a2);
+    const double t68 = t67 * t66;
+    l20 = float(t68);
+    const double t69 = double(a3);
+    const double t70 = t69 * t66;
+    l1c = float(t70);
+    const double t71 = t66 * double(a1);
+    l18 = float(t71);
+    const double t72 = t63 * double(k6cc89c);
+    const double t73 = double(a1);
+    const double t74 = t73 * t72;
+    const double t75 = double(a2);
+    const double t76 = t75 * t74;
+    l14 = float(t76);
+    const double t77 = t72 * double(a2);
+    const double t78 = t77 * double(a3);
+    l10 = float(t78);
+    const double t79 = t74 * double(a3);
+    l8 = float(t79);
+    const double t80 = t63 * double(k6cc898);
+    const double t81 = t80 * double(l3c);
+    lc = float(t81);
+    const double t82 = t63 * double(k6cc894);
+    const double t83 = t82 * double(l38);
+    l4 = float(t83);
+    const double t84 = t65 * double(k6cc890);
+    const double t85 = double(lc);
+    const double t86 = t85 * double(k6cc88c);
+    const double t87 = t84 - t86;
+    const double t88 = t87 + double(out[1]);
+    out[1] = float(t88);
+    const double t89 = double(l4);
+    const double t90 = t89 * double(k6cc888);
+    const double t91 = t90 + double(out[5]);
+    out[5] = float(t91);
+    const double t92 = double(out[9]);
+    const double t93 = t92 - t90;
+    out[9] = float(t93);
+    const double t94 = double(lc);
+    const double t95 = t94 * double(k6cc884);
+    const double t96 = t95 + double(out[13]);
+    out[13] = float(t96);
+    const double t97 = double(l14);
+    const double t98 = t97 * double(k6cc880);
+    const double t99 = t98 + double(out[17]);
+    out[17] = float(t99);
+    const double t100 = double(l8);
+    const double t101 = t100 * double(k6cc880);
+    const double t102 = t101 + double(out[21]);
+    out[21] = float(t102);
+    const double t103 = double(l10);
+    const double t104 = t103 * double(k6cc888);
+    const double t105 = t104 + double(out[25]);
+    out[25] = float(t105);
+    const double t106 = double(l18);
+    const double t107 = t106 * double(k6cc87c);
+    const double t108 = t107 + double(out[29]);
+    out[29] = float(t108);
+    const double t109 = double(l20);
+    const double t110 = t109 * double(k6cc87c);
+    const double t111 = t110 + double(out[33]);
+    out[33] = float(t111);
+    const double t112 = double(l1c);
+    const double t113 = t112 * double(k6cc87c);
+    const double t114 = t113 + double(out[37]);
+    out[37] = float(t114);
+    const double t115 = double(l2c);
+    const double t116 = t115 * double(a0);
+    const double t117 = double(k6cc8a4);
+    const double t118 = t117 * t116;
+    const double t119 = t116 * double(k6cc8a0);
+    const double t120 = double(a2);
+    const double t121 = t120 * t119;
+    l20 = float(t121);
+    const double t122 = double(a3);
+    const double t123 = t122 * t119;
+    l1c = float(t123);
+    const double t124 = t119 * double(a1);
+    l18 = float(t124);
+    const double t125 = t116 * double(k6cc89c);
+    const double t126 = double(a1);
+    const double t127 = t126 * t125;
+    const double t128 = double(a2);
+    const double t129 = t128 * t127;
+    l14 = float(t129);
+    const double t130 = t125 * double(a2);
+    const double t131 = t130 * double(a3);
+    l10 = float(t131);
+    const double t132 = t127 * double(a3);
+    l8 = float(t132);
+    const double t133 = t116 * double(k6cc898);
+    const double t134 = t133 * double(l3c);
+    lc = float(t134);
+    const double t135 = t116 * double(k6cc894);
+    const double t136 = t135 * double(l38);
+    l4 = float(t136);
+    const double t137 = t118 * double(k6cc890);
+    const double t138 = double(lc);
+    const double t139 = t138 * double(k6cc88c);
+    const double t140 = t137 - t139;
+    const double t141 = t140 + double(out[2]);
+    out[2] = float(t141);
+    const double t142 = double(l4);
+    const double t143 = t142 * double(k6cc888);
+    const double t144 = t143 + double(out[6]);
+    out[6] = float(t144);
+    const double t145 = double(out[10]);
+    const double t146 = t145 - t143;
+    out[10] = float(t146);
+    const double t147 = double(lc);
+    const double t148 = t147 * double(k6cc884);
+    const double t149 = t148 + double(out[14]);
+    out[14] = float(t149);
+    const double t150 = double(l14);
+    const double t151 = t150 * double(k6cc880);
+    const double t152 = t151 + double(out[18]);
+    out[18] = float(t152);
+    const double t153 = double(l8);
+    const double t154 = t153 * double(k6cc880);
+    const double t155 = t154 + double(out[22]);
+    out[22] = float(t155);
+    const double t156 = double(l10);
+    const double t157 = t156 * double(k6cc888);
+    const double t158 = t157 + double(out[26]);
+    out[26] = float(t158);
+    const double t159 = double(l18);
+    const double t160 = t159 * double(k6cc87c);
+    const double t161 = t160 + double(out[30]);
+    out[30] = float(t161);
+    const double t162 = double(l20);
+    const double t163 = t162 * double(k6cc87c);
+    const double t164 = t163 + double(out[34]);
+    out[34] = float(t164);
+    const double t165 = double(l1c);
+    const double t166 = t165 * double(k6cc87c);
+    const double t167 = t166 + double(out[38]);
+    out[38] = float(t167);
+    const double t168 = double(l28);
+    const double t169 = t168 * double(a0);
+    const double t170 = double(k6cc8a4);
+    const double t171 = t170 * t169;
+    const double t172 = t169 * double(k6cc8a0);
+    const double t173 = double(a2);
+    const double t174 = t173 * t172;
+    l20 = float(t174);
+    const double t175 = double(a3);
+    const double t176 = t175 * t172;
+    l1c = float(t176);
+    const double t177 = t172 * double(a1);
+    l18 = float(t177);
+    const double t178 = t169 * double(k6cc89c);
+    const double t179 = double(a1);
+    const double t180 = t179 * t178;
+    const double t181 = double(a2);
+    const double t182 = t181 * t180;
+    l14 = float(t182);
+    const double t183 = t178 * double(a2);
+    const double t184 = t183 * double(a3);
+    l10 = float(t184);
+    const double t185 = t180 * double(a3);
+    l8 = float(t185);
+    const double t186 = t169 * double(k6cc898);
+    const double t187 = t186 * double(l3c);
+    lc = float(t187);
+    const double t188 = t169 * double(k6cc894);
+    const double t189 = t188 * double(l38);
+    l4 = float(t189);
+    const double t190 = t171 * double(k6cc890);
+    const double t191 = double(lc);
+    const double t192 = t191 * double(k6cc88c);
+    const double t193 = t190 - t192;
+    const double t194 = t193 + double(out[3]);
+    out[3] = float(t194);
+    const double t195 = double(l4);
+    const double t196 = t195 * double(k6cc888);
+    const double t197 = t196 + double(out[7]);
+    out[7] = float(t197);
+    const double t198 = double(out[11]);
+    const double t199 = t198 - t196;
+    out[11] = float(t199);
+    const double t200 = double(lc);
+    const double t201 = t200 * double(k6cc884);
+    const double t202 = t201 + double(out[15]);
+    out[15] = float(t202);
+    const double t203 = double(l14);
+    const double t204 = t203 * double(k6cc880);
+    const double t205 = t204 + double(out[19]);
+    out[19] = float(t205);
+    const double t206 = double(l8);
+    const double t207 = t206 * double(k6cc880);
+    const double t208 = t207 + double(out[23]);
+    out[23] = float(t208);
+    const double t209 = double(l10);
+    const double t210 = t209 * double(k6cc888);
+    const double t211 = t210 + double(out[27]);
+    out[27] = float(t211);
+    const double t212 = double(l18);
+    const double t213 = t212 * double(k6cc87c);
+    const double t214 = t213 + double(out[31]);
+    out[31] = float(t214);
+    const double t215 = double(l20);
+    const double t216 = t215 * double(k6cc87c);
+    const double t217 = t216 + double(out[35]);
+    out[35] = float(t217);
+    const double t218 = double(l1c);
+    const double t219 = t218 * double(k6cc87c);
+    const double t220 = t219 + double(out[39]);
+    out[39] = float(t220);
+}
+
+namespace
+{
+
+// Guest 0x5416e0: adds the colour at ecx (4 floats), weighted by spherical harmonic terms of the stack arguments
+// (4 floats), to the coefficients at eax. ret 0x10.
+void irradianceNative(x86::CPU& cpu)
+{
+    const reg32 in = cpu.ecx, out = cpu.eax, entry = cpu.esp;
+    const reg32 edx = rc::ld32(in + 8), ecx = rc::ld32(in + 0xc);
+    float colour[4], coefficients[40];
+    memcpy(colour, rc::host(in), sizeof(colour));
+    memcpy(coefficients, rc::host(out), sizeof(coefficients));
+    irradiance(coefficients, colour, rc::ldf32(entry + 4), rc::ldf32(entry + 8), rc::ldf32(entry + 0xc),
+               rc::ldf32(entry + 0x10));
+    memcpy(rc::host(out), coefficients, sizeof(coefficients));
+    cpu.ecx = ecx;
+    cpu.edx = edx;
+    cpu.esp = entry + 0x14;
+    const reg32 a = entry - 0x3c, r = entry;
+    cpu.flags.cf = r < a;
+    cpu.flags.pf = pf(r);
+    cpu.flags.af = ((a ^ 0x3cu ^ r) & 0x10) != 0;
+    cpu.flags.zf = r == 0;
+    cpu.flags.sf = (r >> 31) != 0;
+    cpu.flags.of = ((~(a ^ 0x3cu) & (a ^ r)) >> 31) != 0;
+}
+
+// Guest 0x4586a0 (TimeIntervalForSeparatingAxis) as 0x458750 calls it: the time interval in which the offset x1
+// moving at x0 lies within the extent x2, to lo and hi.
+void separatingAxisTime(float x0, float x1, float x2, float& lo, float& hi)
+{
+    const float a0 = float(std::fabs(double(x0)));
+    if (a0 < rc::ldf32(AtanEpsilon))
+    {
+        const reg32 Far = 0x461c3c00, NearFar = 0xc61c3c00;     // 9999, -9999
+        float far, nearFar;
+        memcpy(&far, &Far, 4);
+        memcpy(&nearFar, &NearFar, 4);
+        hi = far;
+        lo = std::fabs(x1) > x2 ? far : nearFar;
+        return;
+    }
+    const double inverse = ld(One) / double(x0);
+    hi = float((double(x2) - double(x1)) * inverse);
+    lo = float(-((double(x1) + double(x2)) * inverse));
+    if (double(x0) < ld(Zero))
+        std::swap(lo, hi);
+}
+
+// Guest 0x4584f0 (IntervalOverlap) as 0x458750 calls it: the four ends sorted, the overlap when the second smallest
+// lies in both intervals; its compares, ecx and edx as the guest leaves them.
+bool intervalOverlap(x86::CPU& cpu, const float (&ends)[4], float& start, float& end)
+{
+    float v[4] = { ends[0], ends[1], ends[2], ends[3] };
+    for (int last = 3; last > 0; --last)
+    {
+        for (int i = 0; i < last; ++i)
+        {
+            cpu.fpu.compare(double(v[i + 1]), double(v[i]));
+            if (v[i + 1] < v[i])
+            {
+                cpu.edx = bits(v[i]);
+                std::swap(v[i], v[i + 1]);
+            }
+        }
+    }
+    cpu.ecx = 1;
+    const double v1 = double(v[1]);
+    cpu.fpu.compare(v1, double(ends[0]));
+    if (!(v1 >= double(ends[0])))
+        return false;
+    cpu.fpu.compare(v1, double(ends[1]));
+    if (!(v1 <= double(ends[1])))
+        return false;
+    cpu.fpu.compare(v1, double(ends[2]));
+    if (!(v1 >= double(ends[2])))
+        return false;
+    cpu.fpu.compare(v1, double(ends[3]));
+    if (!(v1 <= double(ends[3])))
+        return false;
+    start = v[1];
+    end = v[2];
+    cpu.edx = bits(v[2]);
+    return true;
+}
+
+// Guest 0x458750 (WhenWillOverlapOccur2D): edi and [esp+4] the two boxes (axes at +0x10/+0x14 and +0x20/+0x24,
+// half extents at +0x40/+0x44), [esp+8] the offset and [esp+0xc] the motion vector. The time of the first
+// overlap on the four separating axes to st0 (99999 for none), the argument slots as the guest leaves them.
+void overlap2DNative(x86::CPU& cpu)
+{
+    const reg32 e = cpu.esp, a = cpu.edi, b = rc::ld32(e + 4), p = rc::ld32(e + 8), q = rc::ld32(e + 0xc);
+    const reg32 Absent = 0x6cc798;
+    const auto f = [](reg32 address) { return ld(address); };
+    const auto absf = [](float x) { return float(std::fabs(double(x))); };
+    const double pr = f(b + 0x10) * f(a + 0x10) + f(a + 0x14) * f(b + 0x14);
+    const double qr = f(a + 0x24) * f(b + 0x14) + f(b + 0x10) * f(a + 0x20);
+    const float rf = float(f(a + 0x14) * f(b + 0x24) + f(b + 0x20) * f(a + 0x10));
+    const double sr = f(a + 0x24) * f(b + 0x24) + f(a + 0x20) * f(b + 0x20);
+    const float rA40 = absf(float(double(rf) * f(a + 0x40)));
+    const float sA44 = absf(float(sr * f(a + 0x44)));
+    const float pA40 = absf(float(pr * f(a + 0x40)));
+    const float qA44 = absf(float(qr * f(a + 0x44)));
+    const float qB40 = absf(float(qr * f(b + 0x40)));
+    const float sB44 = absf(float(sr * f(b + 0x44)));
+    const float pB40 = absf(float(pr * f(b + 0x40)));
+    const float rB44 = absf(float(double(rf) * f(b + 0x44)));
+    const float a40 = rc::ldf32(a + 0x40), a44 = rc::ldf32(a + 0x44), b40 = rc::ldf32(b + 0x40),
+                b44 = rc::ldf32(b + 0x44);
+    const auto dot = [&](reg32 v, reg32 x, reg32 y) { return float(f(v + 4) * f(x) + f(v) * f(y)); };
+    const auto dotA = [&](reg32 v, reg32 x, reg32 y) { return float(f(x) * f(v + 4) + f(y) * f(v)); };
+    float lo1, hi1, lo2, hi2, lo3, hi3, lo4, hi4;
+    separatingAxisTime(float(f(q + 4) * f(b + 0x24) + f(q) * f(b + 0x20)),
+                       float(f(p + 4) * f(b + 0x24) + f(p) * f(b + 0x20)),
+                       float(double(sA44) + double(rA40) + double(absf(b44))), lo1, hi1);
+    separatingAxisTime(float(f(q + 4) * f(b + 0x14) + f(b + 0x10) * f(q)),
+                       float(f(p + 4) * f(b + 0x14) + f(b + 0x10) * f(p)),
+                       float(double(qA44) + double(pA40) + double(absf(b40))), lo2, hi2);
+    rc::stf32(e + 4, lo2);
+    rc::stf32(e + 0xc, hi2);
+    separatingAxisTime(dotA(q, a + 0x24, a + 0x20), dotA(p, a + 0x24, a + 0x20),
+                       float(double(sB44) + double(qB40) + double(absf(a44))), lo3, hi3);
+    separatingAxisTime(dot(q, a + 0x14, a + 0x10), dot(p, a + 0x14, a + 0x10),
+                       float(double(rB44) + double(pB40) + double(absf(a40))), lo4, hi4);
+    float start = 0, end = 0;
+    cpu.edx = bits(lo2);
+    const bool overlap = intervalOverlap(cpu, {lo1, hi1, lo2, hi2}, start, end)
+        && (rc::stf32(e + 8, start), rc::stf32(e + 0xc, end), cpu.edx = bits(lo3),
+            intervalOverlap(cpu, {start, end, lo3, hi3}, start, end))
+        && (rc::stf32(e + 8, start), rc::stf32(e + 0xc, end), cpu.edx = bits(lo4),
+            intervalOverlap(cpu, {start, end, lo4, hi4}, start, end));
+    double result = ld(Absent);
+    if (!overlap)
+        cpu.eax = 0;
+    else
+    {
+        rc::stf32(e + 8, start);
+        rc::stf32(e + 0xc, end);
+        cpu.ecx = e + 8;
+        cpu.eax = 0;
+        compare(cpu, cpu.eax, double(start), ld(Zero));
+        if (double(start) > ld(Zero))
+            result = double(start);
+        else
+        {
+            compare(cpu, cpu.eax, double(start), ld(Zero));
+            if (double(start) < ld(Zero))
+            {
+                compare(cpu, cpu.eax, double(end), ld(Zero));
+                if (double(end) > ld(Zero))
+                    result = ld(Zero);
+            }
+        }
+    }
+    cpu.fpu.push(result);
+    const reg32 frame = e - 0x2c;
+    cpu.esp = e + 4;
+    cpu.flags.cf = e < frame;
+    cpu.flags.zf = e == 0;
+    cpu.flags.sf = e >> 31;
+    cpu.flags.of = ((frame ^ e) & (0x2cu ^ e)) >> 31;
+    cpu.flags.pf = pf(e);
+    cpu.flags.af = ((frame ^ 0x2cu ^ e) >> 4) & 1;
+}
+
 // ---- dispatch, shadow compare and perf ----
 
 enum Id
 {
     IdSin, IdSinRadians, IdSinCos, IdAsin, IdAtan, IdTruncate, IdTable, IdGraph, IdNormalize, IdNormalize4,
-    IdNormalize2, IdLength4, IdExpandBox, IdExpandPoint, IdPointBox, IdCount
+    IdNormalize2, IdLength4, IdExpandBox, IdExpandPoint, IdPointBox, IdIrradiance, IdOverlap2D, IdBodyBox, IdCount
 };
 
 const char* const Names[IdCount] = {
     "sin 0x564b10", "sin radians 0x564bb0", "sincos 0x564bd0", "asin 0x564cd0", "atan 0x564db0",
     "truncate 0x4387e0", "table 0x583ea0", "graph 0x583f20", "normalize 0x567370", "normalize4 0x567450",
     "normalize2 0x567310", "length4 0x540830", "expand box 0x5677d0", "expand point 0x567740",
-    "point box 0x567710",
+    "point box 0x567710", "irradiance 0x5416e0", "overlap 2D 0x458750", "body box 0x4733a0",
 };
 
 const reg32 Addresses[IdCount] = {
     0x564b10, 0x564bb0, 0x564bd0, 0x564cd0, 0x564db0, 0x4387e0, 0x583ea0, 0x583f20, 0x567370, 0x567450, 0x567310,
-    0x540830, 0x5677d0, 0x567740, 0x567710,
+    0x540830, 0x5677d0, 0x567740, 0x567710, 0x5416e0, 0x458750, 0x4733a0,
 };
 
 struct Span
@@ -845,6 +1381,7 @@ struct Span
 };
 
 const int MaxSpans = 3;
+const reg32 MaxSpanSize = 0xa0;
 const uint32_t SampleMask = 63;         // one call in 64 is timed
 const uint32_t ShadowLogLimit = 20;
 
@@ -889,7 +1426,7 @@ bool sameCpu(reg32 function, const x86::CPU& g, const x86::CPU& n, char* text, s
 void shadow(Id id, win32::WinApplication* app, x86::CPU& cpu, Native native, Guest guest, const Span* spans,
             int spanCount)
 {
-    reg8 before[MaxSpans][16], after[MaxSpans][16];
+    reg8 before[MaxSpans][MaxSpanSize], after[MaxSpans][MaxSpanSize];
     for (int i = 0; i < spanCount; ++i)
         memcpy(before[i], rc::host(spans[i].address), spans[i].size);
     x86::CPU n = cpu;
@@ -1072,6 +1609,24 @@ void sub_567710(win32::WinApplication* app, x86::CPU& cpu)
 {
     const Span spans[] = { {cpu.ecx, 12}, {cpu.edx, 12} };
     mathfn::dispatch(mathfn::IdPointBox, app, cpu, &mathfn::pointBoxNative, &sub_567710_guest, spans, 2);
+}
+
+void sub_5416e0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const Span spans[] = { {cpu.eax, 0xa0} };
+    mathfn::dispatch(mathfn::IdIrradiance, app, cpu, &mathfn::irradianceNative, &sub_5416e0_guest, spans, 1);
+}
+
+void sub_458750(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const Span spans[] = { {cpu.esp + 4, 12} };
+    mathfn::dispatch(mathfn::IdOverlap2D, app, cpu, &mathfn::overlap2DNative, &sub_458750_guest, spans, 1);
+}
+
+void sub_4733a0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    const Span spans[] = { {rc::ld32(cpu.esp + 4), 12}, {cpu.edx, 12}, {cpu.esp + 4, 4} };
+    mathfn::dispatch(mathfn::IdBodyBox, app, cpu, &mathfn::bodyBoxNative, &sub_4733a0_guest, spans, 3);
 }
 
 }

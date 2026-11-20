@@ -1,7 +1,7 @@
 // Direct3D resources: textures (2D, cube, render targets), surfaces, vertex and index buffers, vertex
 // declarations. Guest locks go to guest memory; unlocks write the GPU copy (a new one when frames in flight
-// still read the current one), swizzled on a job worker. The lock buffer of a level is kept after its unlock, so
-// the next lock of the level returns it instead of reading the GPU copy back.
+// still read the current one) on a job worker, swizzled or, for streamed textures, row by row. The lock buffer of a
+// level is kept after its unlock, so the next lock of the level returns it instead of reading the GPU copy back.
 
 #include <winapi/d3d9_internal.h>
 #include <platform/config.h>
