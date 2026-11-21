@@ -400,7 +400,7 @@ void resolveNative(WinApplication* app, x86::CPU& cpu)
 }
 
 // eax = the model: each entry with a solid slot puts the saved texture back into the slot and keeps the slot's.
-void restoreNative(WinApplication* app, x86::CPU& cpu)
+void restoreNative(WinApplication*, x86::CPU& cpu)
 {
     const reg32 entry = cpu.esp;
     const reg32 model = cpu.eax;
