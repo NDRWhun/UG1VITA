@@ -4,6 +4,7 @@
 
 #include "particles.h"
 #include "phases.h"
+#include "scenecallbacks.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -32,10 +33,6 @@ void sub_40e6d0(win32::WinApplication* app, x86::CPU& cpu);
 void sub_410400(win32::WinApplication* app, x86::CPU& cpu);
 void sub_40f3d0(win32::WinApplication* app, x86::CPU& cpu);
 void sub_403a60_guest(win32::WinApplication* app, x86::CPU& cpu);
-void sub_403a00(win32::WinApplication* app, x86::CPU& cpu);
-void sub_402d30(win32::WinApplication* app, x86::CPU& cpu);
-void sub_401f30(win32::WinApplication* app, x86::CPU& cpu);
-void sub_401e10(win32::WinApplication* app, x86::CPU& cpu);
 
 namespace particles
 {
@@ -924,7 +921,7 @@ bool emitters(win32::WinApplication* app, x86::CPU& c, reg32 system, reg32 dtBit
             c.ebx = state;
             c.esi = emitter;
             c.edi = system;
-            sub_402d30(app, c);
+            callbacks::spawn(app, c);
             if (c.terminate)
                 return false;
         }
@@ -962,7 +959,7 @@ bool emitters(win32::WinApplication* app, x86::CPU& c, reg32 system, reg32 dtBit
                     rc::st32(c.esp, 0x403b7d);
                     c.edx = emitter + 0x24;
                     c.esi = emitter;
-                    sub_401f30(app, c);
+                    callbacks::random(app, c);
                     if (c.terminate)
                         return false;
                     const double random = double(c.fpu.pop());
@@ -1026,7 +1023,7 @@ void updateNative(win32::WinApplication* app, x86::CPU& cpu)
     c.edi = system;
     c.esp = esp0 - 4;
     rc::st32(c.esp, 0x403aad);
-    sub_403a00(app, c);
+    callbacks::cameraPositions(app, c);
     if (c.terminate || !emitters(app, c, system, dtBits, esp0))
     {
         cpu = c;
@@ -1067,7 +1064,7 @@ void updateNative(win32::WinApplication* app, x86::CPU& cpu)
             c.ebx = g.group;
             c.esp = esp0 - 4;
             rc::st32(c.esp, 0x404084);
-            sub_401e10(app, c);
+            callbacks::releaseGroup(app, c);
             if (c.terminate)
             {
                 cpu = c;

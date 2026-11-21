@@ -1,8 +1,11 @@
 // filter effect: weighted sum of TAPS (1..4) texture samples. FACTOR 1..4: the blend factor outputs
 // (render::FactorOutput): uBlendFactor, alpha = uBlendFactor.a, saturated colour * uBlendFactor,
-// alpha = uBlendFactor.a * saturate(length(vTex1)) (TAPS 1).
+// the speed blur mask (TAPS 1): alpha = s * smoothstep of m, with m = saturate((length(vTex1) - vTex2.x) * vTex2.y)
+// and s = saturate((uBlendFactor.a - vTex3.x) * vTex3.y).
 
-float4 main(
+#include "precision.h"
+
+colour4 main(
     float2 vTex0 : TEXCOORD0,
     float2 vTex1 : TEXCOORD1,
     float2 vTex2 : TEXCOORD2,
@@ -18,26 +21,28 @@ float4 main(
 #if FACTOR == 1
     return uBlendFactor;
 #else
-    float4 c = tex2D(uTex0, vTex0) * uWeights[0];
+    colour4 c = tex2D<colour4>(uTex0, vTex0) * (colour4)uWeights[0];
 #if TAPS > 1
-    c += tex2D(uTex1, vTex1) * uWeights[1];
+    c += tex2D<colour4>(uTex1, vTex1) * (colour4)uWeights[1];
 #endif
 #if TAPS > 2
-    c += tex2D(uTex2, vTex2) * uWeights[2];
+    c += tex2D<colour4>(uTex2, vTex2) * (colour4)uWeights[2];
 #endif
 #if TAPS > 3
-    c += tex2D(uTex3, vTex3) * uWeights[3];
+    c += tex2D<colour4>(uTex3, vTex3) * (colour4)uWeights[3];
 #endif
 #ifdef ATEST
     if (uAlphaTest.x * saturate(c.a) < uAlphaTest.y)
         discard;
 #endif
 #if FACTOR == 2
-    return float4(c.rgb, uBlendFactor.a);
+    return colour4(c.rgb, uBlendFactor.a);
 #elif FACTOR == 3
-    return saturate(c) * uBlendFactor;
+    return saturate(c) * (colour4)uBlendFactor;
 #elif FACTOR == 4
-    return float4(c.rgb, uBlendFactor.a * saturate(length(vTex1)));
+    float m = saturate((length(vTex1) - vTex2.x) * vTex2.y);
+    float s = saturate((uBlendFactor.a - vTex3.x) * vTex3.y);
+    return colour4(c.rgb, s * m * m * (3.0 - 2.0 * m));
 #else
     return c;
 #endif

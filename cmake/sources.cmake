@@ -100,11 +100,13 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/cars.cpp
   src/nfsu/aiplan.cpp
   src/nfsu/coll.cpp
+  src/nfsu/contact.cpp
   src/nfsu/cull.cpp
   src/nfsu/display.cpp
   src/nfsu/flares.cpp
   src/nfsu/flush.cpp
   src/nfsu/draw.cpp
+  src/nfsu/groups.cpp
   src/nfsu/gjk.cpp
   src/nfsu/region.cpp
   src/nfsu/hitch.cpp
@@ -118,6 +120,10 @@ set(NFSU_GAME_PORT_SOURCES
   src/nfsu/phases.cpp
   src/nfsu/prompts.cpp
   src/nfsu/particles.cpp
+  src/nfsu/views.cpp
+  src/nfsu/viewparts.cpp
+  src/nfsu/scenesnap.cpp
+  src/nfsu/scenethread.cpp
   src/nfsu/native.cpp
 )
 
@@ -125,6 +131,9 @@ set(NFSU_GAME_PORT_SOURCES
 set(NFSU_GENERATED_HEADER_SOURCES
   src/lib/memmap.cpp
   src/nfsu/retstate.cpp
+  src/nfsu/scenecallbacks.cpp
+  src/nfsu/sceneshadow.cpp
+  src/nfsu/worldmodels.cpp
 )
 
 # Runtime sources that build without the generated code (the CI runtime check).

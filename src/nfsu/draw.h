@@ -91,6 +91,8 @@ struct QueueUsage
 };
 QueueUsage takeQueueUsage();
 bool nativeQueue();
+// At the benchmark's end with shadow_draw: the queue compares of the race.
+void logShadowTotal();
 // Perf builds: the "flush_async:" line of the flush's deferred device calls, when they are on.
 void logDeferral(unsigned frames);
 

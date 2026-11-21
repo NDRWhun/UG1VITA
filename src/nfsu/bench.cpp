@@ -2,11 +2,20 @@
 
 #include "aiplan.h"
 #include "cars.h"
+#include "contact.h"
+#include "draw.h"
 #include "gjk.h"
+#include "groups.h"
 #include "hitch.h"
 #include "lights.h"
 #include "phases.h"
 #include "physics.h"
+#include "scenecallbacks.h"
+#include "scenesnap.h"
+#include "scenethread.h"
+#include "viewparts.h"
+#include "views.h"
+#include "worldmodels.h"
 
 #include <lib/controls.h>
 #include <lib/guest.h>
@@ -644,9 +653,18 @@ void poll()
         pf::logInfo("bench: measurement ended: %s", reason);
         aiplan::logShadowTotal();
         cars::logShadowTotal();
+        draw::logShadowTotal();
+        groups::logShadowTotal();
+        views::logShadowTotal();
+        viewparts::logShadowTotal();
         gjk::logShadowTotal();
+        contact::logShadowTotal();
         physics::logShadowTotal();
         lights::logShadowTotal();
+        worldmodels::logShadowTotal();
+        callbacks::logShadowTotal();
+        scenesnap::logTotal();
+        scenethread::logTotal();
         phases::logCollisionFrames();
         s_phase.store(Stopping, std::memory_order_release);
         return;

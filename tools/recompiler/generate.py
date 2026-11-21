@@ -82,6 +82,9 @@ NATIVE_OVERRIDES = [
     0x425150,   # movement mode of a racing car (the benchmark keeps the AI-driven player car on full physics)
     0x416a10,   # Customize Display Settings: value change of a row (Motion Blur: off, on, enhanced; display.cpp)
     0x4169b0,   # Customize Display Settings: the rows' values (Motion Blur: Enhanced; display.cpp)
+    0x410a00,   # default display settings for the graphics card, then Motion Blur and Anti-Aliasing off (display.cpp)
+    0x415120,   # Display Settings: value change of the Resolution row (Anti-Aliasing with widescreen=on; display.cpp)
+    0x4151c0,   # Display Settings: the Resolution row's value (Anti-Aliasing with widescreen=on; display.cpp)
     # D3DX (include/winapi/d3dx9.h): effects without the guest HLSL compiler; the math entries are jumps through
     # the PSGP dispatch table.
     0x5af9e5,   # D3DXCreateEffectPool
@@ -164,6 +167,24 @@ NATIVE_OVERRIDES = [
     0x40f7c0,   # light context: fixed-function lights or the harmonic coefficients
     0x4100a0,   # reflection matrices
     0x40fae0,   # material: fixed-function material or the diffuse, specular and envmap terms
+    # Effect group functions and model texture swaps (src/nfsu/groups.cpp).
+    0x40e740,   # group start: headlight and black textures
+    0x40e7b0,   # group start: white texture, gloss and the view's texture projection
+    0x40e900,   # group start: headlight, black and white textures, projection or gloss
+    0x40eb30,   # group start: overlay texture
+    0x40eb60,   # group start: texture transforms off
+    0x53f540,   # a model's replacement textures into its solid
+    0x53f500,   # the solid's own textures back
+    # Parts of the world views (src/nfsu/viewparts.cpp).
+    0x408f00,   # scenery culler setup and call
+    0x409180,   # full-screen quad of the rear-view mirror frame and mask
+    0x408b20,   # screen pass states after the mirror and the player view
+    0x4090a0,   # fog of a view (0x588f40)
+    0x40cd40,   # motion blur
+    0x40d090,   # motion blur pass: a texture n times with stepped coordinates into a target
+    0x40d370,   # motion blur pass: a texture n times with texel offsets into a target
+    0x40d6e0,   # screen filter pass
+    0x409b70,   # screen pass of the player view's flares
     # Phase log (src/nfsu/phases.cpp, timing_phases): the guest bodies timed per call.
     0x420b40,   # World::DoTimestep
     0x420310,   # World::DoTimestepMove
@@ -185,7 +206,8 @@ NATIVE_OVERRIDES = [
     0x570950,   # the cars of the render list (src/nfsu/cars.cpp)
     0x4ae650,   # MiniWorld::Render (phase timing)
     0x570d00,   # RenderFlares (cars) (phase timing)
-    0x56dc30,   # CarRenderInfo::Render (cars, reflections) (phase timing)
+    0x56dc30,   # CarRenderInfo::Render (cars, reflections) (src/nfsu/cars.cpp)
+    0x40f0f0,   # user-pointer packet enqueue of the car shadows (src/nfsu/cars.cpp)
     0x56cf10,   # car shadow hull, corners and setup (phase timing)
     0x56d0c0,   # car shadow hull, corners and setup (phase timing)
     0x56d700,   # car shadow hull, corners and setup (phase timing)
@@ -216,6 +238,8 @@ NATIVE_OVERRIDES = [
     0x46ea50,   # DistanceSqr of a simplex pair (gjk.cpp, phase timing)
     0x472f30,   # support point of a polytope (gjk.cpp)
     0x473a90,   # support point of a wafer (gjk.cpp)
+    0x468fe0,   # DynamicCollisionBody::Interpolate (contact.cpp)
+    0x472830,   # the matrices of a witness (contact.cpp)
     0x46bae0,   # Contact::CollisionImpulse (phase timing)
     # Particle draw (src/nfsu/particles.cpp): the quads of every particle on the workers, the draws in order.
     0x404110,   # particle system list draw for a view
@@ -225,6 +249,12 @@ NATIVE_OVERRIDES = [
     0x40c910,   # model submit: cull and enqueue each mesh part
     0x40f1e0,   # enqueue a packet under its model's node
     0x40ed50,   # flush the draw queue
+    # Scene parts of the world views (src/nfsu/worldmodels.cpp; 0x592100, 0x591e40, 0x58a240, 0x4ae650 are listed
+    # with the phases): the textured quad submit, the FE flares, and the car flare recorded in shadow compares.
+    0x40c300,   # textured quad: transforms, texture and a fan of four vertices
+    0x570c70,   # FE flares: the car flares of the FE cars of a view
+    0x4ae7d0,   # MiniWorld::RenderFlares
+    0x56d8d0,   # car flare of a car (guest body; recorded by the shadow compares of the FE flares)
 ]
 
 # Byte patches applied to the code before discovery: (address, original bytes, new bytes) in hex. Generation stops
@@ -270,6 +300,11 @@ PATCHES = [
     # (enhanced, display.cpp); the limit is only compared with 0 and clamps the setting (0x410CE0, 0x415F90).
     (0x410c3e, '893564107000 893568107000 5e c3 90909090', 'c70564107000 02000000 893568107000 5e c3'),
 ]
+
+# Guest addresses in or after the read-only data that the port writes at run time (HUD mapping 0x6D3440 in
+# native.cpp, the env cube schedule copies at 0x6D3800, the magazine clear copy at 0x6D3A00): x87 operands there are
+# loaded from memory. Operands at other fixed addresses of read-only sections become constants (--load-constants).
+MUTABLE_CONSTANTS = [(0x6d3440, 8), (0x6d3800, 0x200), (0x6d3a00, 4)]
 
 # Busy-wait loops: the generated code releases the execution lock there so other guest threads can run.
 THREAD_SEGMENTS = []
@@ -483,6 +518,14 @@ def main():
                         help='keep x86 registers in cpu instead of C++ locals (for comparisons)')
     parser.add_argument('--flags-across-calls', action='store_true',
                         help='pass flags through calls and returns as any code may read them (for comparisons)')
+    parser.add_argument('--partial-reads', action='store_true',
+                        help='count partial register writes as reads of the whole register (for comparisons)')
+    parser.add_argument('--load-constants', action='store_true',
+                        help='x87 operands of read-only data loaded from memory, not folded (for comparisons)')
+    parser.add_argument('--preempt-call', action='store_true',
+                        help='loop preemption points call the yield directly, not through the stub (for comparisons)')
+    parser.add_argument('--alias-cpu', action='store_true',
+                        help='no restrict on the cpu parameter of translated functions (for comparisons)')
     parser.add_argument('--flag-audit', action='store_true',
                         help='check at run time that every flag read from cpu was stored there (logs the reader)')
     parser.add_argument('--fpu-check', action='store_true',
@@ -502,12 +545,15 @@ def main():
     print('discovery took %.0f s' % (time.time() - started))
     subroutines = [discovery.subroutine(e) for e in sorted(discovery.entries)]
     module = GameModule(image, subroutines)
+    mutable = MUTABLE_CONSTANTS + [(a, len(bytes.fromhex(o))) for a, o, _ in PATCHES]
     program = analysis.Program([module], THREAD_SEGMENTS, [], {}, FLAGS_PRESERVED, NOT_INDIRECT, NATIVE_OVERRIDES,
                                local_registers=not args.memory_registers, local_x87=not args.memory_x87,
                                setjmp=SETJMP, longjmp_jumps=LONGJMP_JUMPS, fpu_check=args.fpu_check,
-                               fpu_deltas=FPU_DELTAS, preempt_loops=True, address_taken=discovery.address_taken,
-                               abi_flags=not args.flags_across_calls, jump_targets=JUMP_TARGETS,
-                               flag_audit=args.flag_audit)
+                               fpu_deltas=FPU_DELTAS, preempt_loops=True,
+                               address_taken=discovery.address_taken, abi_flags=not args.flags_across_calls,
+                               jump_targets=JUMP_TARGETS, flag_audit=args.flag_audit, partial_reads=args.partial_reads,
+                               fold_constants=not args.load_constants, mutable_constants=mutable,
+                               restrict_cpu=not args.alias_cpu, preempt_stub=not args.preempt_call)
     program.analyze()
     # Every direct call and tail call must reach a generated function.
     missing = sorted(set(x.target for fn in program.functions.values() for i in fn.reachable for x in fn.exits[i]

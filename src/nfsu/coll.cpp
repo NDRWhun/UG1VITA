@@ -9,6 +9,7 @@
 // 0x440a40, ecx and the upper half of eax of 0x4400e0, ecx and edx of 0x4407b0. Runs on the calling thread.
 
 #include "cars.h"
+#include "coll.h"
 #include "retstate.h"
 
 #include <platform/config.h>
@@ -126,6 +127,39 @@ struct Writer
 };
 
 // ---- distance outside a track polygon (0x4400e0) ----
+
+// The undo records of the native queries while a journal runs (journalBegin), oldest first.
+std::vector<Writer::Undo> s_journal;
+// The values journalRewind replaced, newest store first.
+std::vector<Writer::Undo> s_redo;
+bool s_journaling = false;
+uint32_t s_unjournaled = 0;
+
+inline reg32 load(reg32 address, reg32 size)
+{
+    return size == 4 ? rc::ld32(address) : size == 2 ? rc::ld16(address) : rc::ld8(address);
+}
+
+inline void put(const Writer::Undo& u)
+{
+    if (u.size == 4)
+        rc::st32(u.address, u.value);
+    else if (u.size == 2)
+        rc::st16(u.address, reg16(u.value));
+    else
+        rc::st8(u.address, reg8(u.value));
+}
+
+// A query's writer: records its stores while a journal runs.
+struct JournalWriter : Writer
+{
+    JournalWriter() { record = s_journaling; }
+    ~JournalWriter()
+    {
+        if (record)
+            s_journal.insert(s_journal.end(), undo.begin(), undo.end());
+    }
+};
 
 // Cross product of the edge from vertex offset a to b with the point q, rounded to float as the guest stores it
 // in its stack slot (stored).
@@ -1015,6 +1049,46 @@ void timed(int entry, Body body)
 
 }
 
+void journalBegin()
+{
+    s_journal.clear();
+    s_redo.clear();
+    s_journaling = true;
+    s_unjournaled = 0;
+}
+
+void journalEnd()
+{
+    s_journaling = false;
+    s_journal.clear();
+    s_redo.clear();
+}
+
+uint32_t journalRewind()
+{
+    s_redo.clear();
+    for (size_t i = s_journal.size(); i-- > 0;)
+    {
+        const Writer::Undo& u = s_journal[i];
+        s_redo.push_back(Writer::Undo{u.address, load(u.address, u.size), u.size});
+        put(u);
+    }
+    s_journal.clear();
+    return uint32_t(s_redo.size());
+}
+
+uint32_t journalRollback()
+{
+    s_journaling = false;
+    for (size_t i = s_journal.size(); i-- > 0;)
+        put(s_journal[i]);
+    s_journal.clear();
+    for (size_t i = s_redo.size(); i-- > 0;)
+        put(s_redo[i]);
+    s_redo.clear();
+    return s_unjournaled;
+}
+
 }
 
 namespace native
@@ -1030,11 +1104,13 @@ void sub_440a40(win32::WinApplication* app, x86::CPU& cpu)
     const auto body = [&]
     {
         const coll::Settings& s = settings();
+        if (coll::s_journaling && (!s.native || s.shadow))
+            ++coll::s_unjournaled;
         if (!s.native)
             sub_440a40_guest(app, cpu);
         else if (!s.shadow)
         {
-            coll::Writer w;
+            coll::JournalWriter w;
             coll::elevationNative(cpu, w);
         }
         else
@@ -1078,11 +1154,13 @@ void sub_4407b0(win32::WinApplication* app, x86::CPU& cpu)
     const auto body = [&]
     {
         const coll::Settings& s = settings();
+        if (coll::s_journaling && (!s.native || s.shadow))
+            ++coll::s_unjournaled;
         if (!s.native)
             sub_4407b0_guest(app, cpu);
         else if (!s.shadow)
         {
-            coll::Writer w;
+            coll::JournalWriter w;
             coll::interestBoxNative(cpu, w);
         }
         else

@@ -15,6 +15,8 @@
 #include "cull.h"
 #include "phases.h"
 #include "retstate.h"
+#include "scenecallbacks.h"
+#include "sceneshadow.h"
 
 #include <platform/config.h>
 #include <platform/jobs.h>
@@ -36,10 +38,7 @@ namespace nfsu
 void sub_544f30_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_5447c0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_5443f0_guest(win32::WinApplication* app, x86::CPU& cpu);
-void sub_446fd0(win32::WinApplication* app, x86::CPU& cpu);
-void sub_4406d0(win32::WinApplication* app, x86::CPU& cpu);
 void sub_440a40(win32::WinApplication* app, x86::CPU& cpu);
-void sub_440710(win32::WinApplication* app, x86::CPU& cpu);
 void sub_673890(win32::WinApplication* app, x86::CPU& cpu);
 void sub_40c300(win32::WinApplication* app, x86::CPU& cpu);
 
@@ -212,7 +211,7 @@ bool ground(win32::WinApplication* app, x86::CPU& c, Flare& f, Run& run)
     const reg32 s = lightFrame(f.esp);
     const reg32 coordinate = s + 0x120, point = s + 0x10;
     c.eax = coordinate;
-    if (!call(sub_4406d0, app, c, s - 4, 0x544857))
+    if (!call(callbacks::coordinateInit, app, c, s - 4, 0x544857))
         return false;
     rc::st32(point, rc::ld32(f.flare + 0x10));
     rc::stf32(point + 4, float(ld(f.flare + 0x14)));
@@ -253,7 +252,7 @@ bool ground(win32::WinApplication* app, x86::CPU& c, Flare& f, Run& run)
     x.st(0) = x86::Float(x.st(0));
     x.pop();
     c.eax = coordinate;
-    return call(sub_440710, app, c, s - 0x18, 0x5448cd);
+    return call(callbacks::coordinateRelease, app, c, s - 0x18, 0x5448cd);
 }
 
 // Guest 0x5447c0-0x5448cd: the entry tests and the flare record. c is a scratch CPU. False when the guest is
@@ -439,6 +438,8 @@ void visibility(Flare& f)
 
 // ---- phase C ----
 
+uint32_t s_powGuest = 0;     // pow calls that ran the guest code
+
 // Guest 0x673890 (pow, x = st1, y = st0) where the guest code stores nothing outside its stack: x > 0 or x = +-0
 // with y >= 0, y finite, a normal result unless MathErrors is set. False where the guest code has to run.
 bool power(x86::CPU& cpu, double x, double y, double& r)
@@ -525,6 +526,7 @@ bool quad(win32::WinApplication* app, x86::CPU& cpu, const Flare& f, reg32 type,
     double r;
     if (!power(cpu, double(f.facing), ld(type + 0x28), r))
     {
+        ++s_powGuest;
         cpu.fpu.push(x86::Float(double(f.facing)));
         cpu.fpu.push(x86::Float(ld(type + 0x28)));
         if (!call(sub_673890, app, cpu, sp - 4, 0x54441e))
@@ -777,7 +779,7 @@ void world(win32::WinApplication* app, x86::CPU& cpu, Run& run)
         {
             rc::st32(esp - 0x1c, rc::ld32(view + 0x40) + 0x40);
             cpu.eax = Regions;
-            if (!call(sub_446fd0, app, cpu, esp - 0x20, 0x544f7e))
+            if (!call(callbacks::region, app, cpu, esp - 0x20, 0x544f7e))
                 return;
             const reg32 region = cpu.eax;
             clearPacks(run);
@@ -1072,6 +1074,9 @@ void report(uint32_t frames)
     if (s.native && s.shadow)
         pf::logInfo("shadow_flares: %u calls compared, %u differ", unsigned(s_shadow.calls),
                     unsigned(s_shadow.differing));
+    if (s_powGuest)
+        pf::logInfo("flares: %u pow calls ran the guest code", unsigned(s_powGuest));
+    s_powGuest = 0;
     s_perf = PerfSums();
 }
 
@@ -1083,11 +1088,17 @@ namespace nfsu { namespace native
 
 void sub_544f30(win32::WinApplication* app, x86::CPU& cpu)
 {
+    // Recorded in the guest run of a shadow compare (sceneshadow.h): the flare screen pass 0x409b70 calls it.
+    if (sceneshadow::record(0x544f30, 2, 0, app, cpu, &sub_544f30))
+        return;
     flares::worldFlares(app, cpu);
 }
 
 void sub_5447c0(win32::WinApplication* app, x86::CPU& cpu)
 {
+    // Recorded in the guest run of a shadow compare (sceneshadow.h): the mini world flares 0x4ae7d0 call it.
+    if (sceneshadow::record(0x5447c0, 6, retstate::Eax, app, cpu, &sub_5447c0))
+        return;
     if (cars::tap(0x5447c0, app, cpu, &sub_5447c0))
         return;
     flares::lightFlare(app, cpu);

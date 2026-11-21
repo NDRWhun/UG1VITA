@@ -171,7 +171,7 @@ struct Tracked
     SceUID thread;
     uint64_t lastClocks;    // updated by the log
 };
-const int TrackedCount = 8;
+const int TrackedCount = 12;
 Tracked s_tracked[TrackedCount];
 std::atomic<int> s_trackedCount{0};
 
@@ -390,6 +390,11 @@ void startCounting()
 uint32_t takeCount(Count counter)
 {
     return s_counts[counter].exchange(0, std::memory_order_relaxed);
+}
+
+uint32_t peekCount(Count counter)
+{
+    return s_counts[counter].load(std::memory_order_relaxed);
 }
 
 void add(Counter counter, uint32_t microseconds)

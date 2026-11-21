@@ -1,10 +1,12 @@
 // Native setup functions of the draw queue flush (draw.h): world transforms 0x410400, blend states 0x410550, alpha
 // test 0x410650, packet and node release 0x410700 / 0x40ed10, effect group switch 0x40e6d0, bone palette 0x4102f0,
 // model texture and texture offset 0x40f3d0, light context 0x40f7c0, reflection matrices 0x4100a0 and material
-// 0x40fae0. Guest functions they call that have no native version (0x40ec20, 0x40ec90, 0x546180, 0x565020, 0x40f6e0,
-// 0x40bc10 and the effect group functions) run as guest code with the stack and registers the guest gives them.
+// 0x40fae0, with the functions they call inline: the texture offsets 0x40ec20, 0x40ec90 and 0x546180, the identity
+// matrix 0x565020, the colour clamp 0x40f6e0 and the view inverse 0x40bc10. The effect group functions run through
+// groups.h.
 
 #include "draw.h"
+#include "groups.h"
 #include "retstate.h"
 
 #include <winapi/d3d9_native.h>
@@ -34,13 +36,6 @@ void sub_40f3d0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_40f7c0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_4100a0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_40fae0_guest(win32::WinApplication* app, x86::CPU& cpu);
-// Guest functions the native code calls (generated).
-void sub_40ec20(win32::WinApplication* app, x86::CPU& cpu);
-void sub_40ec90(win32::WinApplication* app, x86::CPU& cpu);
-void sub_546180(win32::WinApplication* app, x86::CPU& cpu);
-void sub_565020(win32::WinApplication* app, x86::CPU& cpu);
-void sub_40f6e0(win32::WinApplication* app, x86::CPU& cpu);
-void sub_40bc10(win32::WinApplication* app, x86::CPU& cpu);
 
 namespace draw
 {
@@ -136,12 +131,69 @@ inline reg32 ftol2(x86::CPU& cpu, reg32 depth, double value)
     return cpu.eax;
 }
 
-// The result the guest function left on the x87 stack, popped.
-inline double popResult(x86::CPU& cpu, reg32 depth)
+// _ftol2's integer as the guest reloads it (fild dword).
+inline double truncated(double value)
 {
-    const double value = cpu.fpu.regs[(depth + 1) & 7];
-    cpu.fpu.count = depth;
-    return value;
+    return double(sreg32(reg32(x86::truncInteger64(value))));
+}
+
+// 0x40ec20 (scroll at +0x5a) and 0x40ec90 (scroll at +0x5c): esi = the model, [esp + 4] = the time. The fraction of
+// the scrolled time: 0 without a scroll mode (+0x52), the time in whole steps of +0x58 in mode 2.
+double scrollOffset(reg32 model, reg32 time, reg32 scroll)
+{
+    const sreg32 mode = sreg8(rc::ld8(model + 0x52));
+    if (mode == 0)
+        return ld(Zero);
+    double v = double(asFloat(time));
+    if (mode == 2)
+        v = truncated(v / (double(ld16s(model + 0x58)) * ld(0x6cc8f0)));
+    v = v * double(ld16s(model + scroll)) * ld(0x6cca3c);
+    return v - truncated(v);
+}
+
+// 0x546180: eax = the animation kind, [esp + 8] = the time, [esp + 0xc] = the rate, [esp + 0x10] = the step. The
+// fraction of the animated time: 0 for kind 0, the time in whole steps for kind 2.
+double animationOffset(reg32 kind, reg32 time, reg32 rate, reg32 step)
+{
+    if (kind == 0)
+        return ld(Zero);
+    double v = double(asFloat(time));
+    if (kind == 2)
+        v = truncated(v / double(asFloat(step)));
+    v = v * double(asFloat(rate));
+    return v - truncated(v);
+}
+
+// 0x40f6e0: ecx = 4 floats, each clamped to [0, 1] in place; the condition codes of the last compare with 0 stay.
+void clampColour(x86::CPU& cpu, reg32 p)
+{
+    const double one = ld(0x6cc7bc), zero = ld(Zero);
+    for (reg32 i = 0; i < 4; ++i)
+    {
+        const reg32 a = p + 4 * i;
+        const double v = ld(a);
+        const double x = v < one ? v : one;
+        cpu.fpu.compare(x, zero);
+        if (x > zero)
+            rc::st32(a, bits(float(x)));
+        else
+            rc::st32(a, i < 3 ? rc::ld32(Zero) : 0);
+    }
+}
+
+// 0x40bc10: the inverse of a rotation and translation matrix (the transposed rotation after the negated
+// translation).
+void inverse(reg32 matrix, float* out)
+{
+    float m[16];
+    loadMatrix(matrix, m);
+    const auto pass = [](float v) { return float(double(v)); };
+    const auto negate = [](float v) { return float(-double(v)); };
+    const float r[16] = { m[0], pass(m[4]), pass(m[8]), 0.0f, pass(m[1]), pass(m[5]), pass(m[9]), 0.0f,
+                          pass(m[2]), pass(m[6]), pass(m[10]), 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+    const float t[16] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                          negate(m[12]), negate(m[13]), negate(m[14]), 1.0f };
+    bridge::matrixMultiply(t, r, out);
 }
 
 // Registers callee-saved by a guest function, restored at its return.
@@ -408,7 +460,7 @@ void groupNative(WinApplication* app, x86::CPU& cpu)
         cpu.edx = rc::ld32(CurrentGroup);
         cpu.esp = entry - 12;
         rc::st32(entry - 12, 0x0040e6f9);
-        bridge::callGuest(app, cpu, rc::ld32(cpu.edx + 0xdc));
+        groups::call(app, cpu, rc::ld32(cpu.edx + 0xdc));
         if (cpu.terminate)
             return;
     }
@@ -421,7 +473,7 @@ void groupNative(WinApplication* app, x86::CPU& cpu)
     store(CurrentGroup, esi);
     cpu.esp = entry - 12;
     rc::st32(entry - 12, 0x0040e705);
-    bridge::callGuest(app, cpu, rc::ld32(esi + 0xd8));
+    groups::call(app, cpu, rc::ld32(esi + 0xd8));
     if (cpu.terminate)
         return;
     const reg32 next = cpu.esi;
@@ -568,74 +620,26 @@ void modelNative(WinApplication* app, x86::CPU& cpu)
                 cpu.fpu.compare(a, b);
                 still = a == b;
             }
-            cpu.ebx = model;
-            cpu.ebp = entry - 4;
             if (still)
             {
-                cpu.ecx = t;
-                cpu.esi = model;
-                cpu.edi = g;
-                cpu.fpu.count = depth;
-                rc::st32(s - 4, t);
-                rc::st32(s - 8, 0x0040f617);
-                cpu.esp = s - 8;
-                sub_40ec20(app, cpu);
-                if (cpu.terminate)
-                    return;
-                u = bits(float(popResult(cpu, depth)));
-                rc::st32(s - 4, t);
-                rc::st32(s - 8, 0x0040f625);
-                cpu.esp = s - 8;
-                sub_40ec90(app, cpu);
-                if (cpu.terminate)
-                    return;
-                v = bits(float(popResult(cpu, depth)));
+                u = bits(float(scrollOffset(model, t, 0x5a)));
+                v = bits(float(scrollOffset(model, t, 0x5c)));
             }
             else
             {
-                const reg32 scale = rc::ld32(0x701094);
+                const reg32 animation = rc::ld32(0x701090), step = rc::ld32(0x701094);
                 const sreg32 x = ld16s(model + 0x44);
-                rc::st32(s - 4, scale);
-                rc::st32(s - 8, bits(float(ld(0x7363e0) / double(x))));
-                rc::st32(s - 12, t);
-                rc::st32(s - 16, model);
-                rc::st32(s - 20, 0x0040f654);
-                cpu.eax = rc::ld32(0x701090);
-                cpu.esi = scale;
-                cpu.edi = t;
-                cpu.esp = s - 20;
-                cpu.fpu.count = depth;
-                sub_546180(app, cpu);
-                if (cpu.terminate)
-                    return;
-                u = bits(float(popResult(cpu, depth)));
+                u = bits(float(animationOffset(animation, t, bits(float(ld(0x7363e0) / double(x))), step)));
                 const sreg32 y = ld16s(model + 0x46);
-                rc::st32(s - 4, scale);
-                rc::st32(s - 8, bits(float(ld(0x7363e4) / double(y))));
-                rc::st32(s - 12, t);
-                rc::st32(s - 16, model);
-                rc::st32(s - 20, 0x0040f67b);
-                cpu.eax = rc::ld32(0x701090);
-                cpu.ecx = reg32(y);
-                cpu.esp = s - 20;
-                sub_546180(app, cpu);
-                if (cpu.terminate)
-                    return;
-                v = bits(float(popResult(cpu, depth)));
+                v = bits(float(animationOffset(animation, t, bits(float(ld(0x7363e4) / double(y))), step)));
             }
         }
     }
+    // 0x565020: the identity matrix at eax; ecx = 0.
     cpu.eax = s + 0x30;
-    cpu.edi = rc::ld32(CurrentGroup);
-    cpu.ebp = entry - 4;
-    cpu.fpu.count = depth;
-    rc::st32(s - 4, 0x0040f68e);
-    cpu.esp = s - 4;
-    sub_565020(app, cpu);
-    if (cpu.terminate)
-        return;
-    reg32 matrix[16];
-    memcpy(matrix, rc::host(s + 0x30), 64);
+    cpu.ecx = 0;
+    const reg32 one = 0x3f800000u;
+    reg32 matrix[16] = { one, 0, 0, 0, 0, one, 0, 0, 0, 0, one, 0, 0, 0, 0, one };
     matrix[8] = u;
     matrix[9] = v;
     const reg32 vector[4] = { u, v, 0, 0 };
@@ -670,16 +674,8 @@ void lightsNative(WinApplication* app, x86::CPU& cpu)
         const double k = ld(0x701098);
         for (reg32 i = 0; i < 4; ++i)
             rc::stf32(s + 0xc + 4 * i, float(k * ld(light + 0x120 + 4 * i)));
-        cpu.eax = lights;
         cpu.ecx = s + 0xc;
-        cpu.esi = light;
-        cpu.ebp = entry - 4;
-        cpu.fpu.count = depth;
-        rc::st32(s - 4, 0x0040f834);
-        cpu.esp = s - 4;
-        sub_40f6e0(app, cpu);
-        if (cpu.terminate)
-            return;
+        clampColour(cpu, s + 0xc);
         const double scale = ld(ByteScale);
         reg32 color = ftol2(cpu, depth, ld(s + 0x18) * scale) << 8;
         color = (color | ftol2(cpu, depth, ld(s + 0x14) * scale)) << 8;
@@ -790,18 +786,12 @@ void reflectionNative(WinApplication* app, x86::CPU& cpu)
     else
     {
         const reg32 view = rc::ld32(rc::ld32(CurrentView) + 4);
-        cpu.eax = rc::ld32(ViewRecords + view * 0x60);
-        cpu.esi = s + 0xe0;
-        cpu.edi = viewProjection;
-        cpu.ebp = entry - 4;
-        cpu.fpu.count = depth;
-        rc::st32(s - 4, 0x004101a3);
-        cpu.esp = s - 4;
-        sub_40bc10(app, cpu);
-        if (cpu.terminate)
-            return;
+        // 0x40bc10 (eax = the view matrix, esi = the result): eax = the result, ecx = the matrix's first word.
+        const reg32 viewMatrix = rc::ld32(ViewRecords + view * 0x60);
         float r[16], p[16];
-        loadMatrix(s + 0xe0, r);
+        inverse(viewMatrix, r);
+        cpu.eax = s + 0xe0;
+        cpu.ecx = rc::ld32(viewMatrix);
         loadMatrix(viewProjection, b);
         bridge::matrixMultiply(b, bias, p);
         bridge::matrixMultiply(r, p, p);

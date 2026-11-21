@@ -95,6 +95,7 @@ struct State
     uint32_t    keys;               // bit per Key held
     int         pov;                // hat 0 in hundredths of a degree, -1 centred
     int         rightPov;           // hat 1, from the right stick: the same units
+    float       rightStick[2];      // right stick x, y: -1..1, y down; not shaped yet
     bool        openIme;            // the on-screen keyboard chord was pressed
 };
 

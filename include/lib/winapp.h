@@ -177,6 +177,19 @@ public:
     void lockContext(const x86::CPU& cpu);
     void unlockContext(const x86::CPU& cpu);
 
+    // A host thread that runs guest code for the thread holding the execution lock while that thread waits for it
+    // (the scene build's worker, src/nfsu/scenethread.cpp) has its lock operations run by the holder: forward(op,
+    // cpu) returns true when it ran op for the calling thread on the holder's host thread, false for any other
+    // thread. Null (the default): no such thread.
+    enum LockOp
+    {
+        LockOpLock,
+        LockOpUnlock,
+        LockOpYield     // the preemption point (allowPreemption)
+    };
+    typedef bool (*LockForward)(LockOp op, const x86::CPU& cpu);
+    void setLockForward(LockForward forward) { m_lockForward.store(forward, std::memory_order_release); }
+
     // Preemption point for the thread holding the execution lock: if a preempting thread waits for the lock, a
     // thread that does not preempt releases it and queues again. Every dynamic_call is one.
     inline void allowPreemption(const x86::CPU& cpu)
@@ -184,6 +197,24 @@ public:
         if (__builtin_expect(m_preemptWaiters.load(std::memory_order_relaxed) != 0, 0))
             yieldContext(cpu);
     }
+
+    // allowPreemption for the backward jumps of generated code: the yield goes through rc_yield_stub
+    // (src/lib/winapp.cpp), which keeps every register, so the loop around it keeps its values in registers.
+    inline void allowPreemptionInLoop(const x86::CPU& cpu)
+    {
+#if defined(__arm__)
+        if (__builtin_expect(m_preemptWaiters.load(std::memory_order_relaxed) != 0, 0))
+        {
+            register WinApplication* app asm("r0") = this;
+            register const x86::CPU* state asm("r1") = &cpu;
+            asm volatile("bl rc_yield_stub" : : "r"(app), "r"(state) : "memory", "cc", "lr");
+        }
+#else
+        allowPreemption(cpu);
+#endif
+    }
+    // The yield of rc_yield_stub.
+    static void yieldFromStub(WinApplication* app, const x86::CPU* cpu) { app->yieldContext(*cpu); }
 
     void terminate();
 
@@ -223,6 +254,7 @@ private:
     std::map<x86::reg32, GenericResource*>  m_resources;
     Mutex*                                  m_executionContext;
     std::atomic<int>                        m_preemptWaiters;   // preempting threads waiting for the lock
+    std::atomic<LockForward>                m_lockForward{nullptr};
     int                                     m_contextDepth;     // lock count of the execution context owner
     Mutex*                                  m_resourceContext;
     // Open addressing with linear probing; power-of-two size, at most half full, and one more empty slot.

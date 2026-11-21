@@ -22,7 +22,8 @@ const int MaxLine    = 256;
 const char* const Known[] =
 {
     // Player settings.
-    "widescreen", "hud_widescreen", "menu_widescreen", "movies", "button_prompts", "fit_4_3", "frame_rate", "car_reflection_interval", "rear_touch",
+    "widescreen", "render_resolution", "hud_widescreen", "menu_widescreen", "movies", "button_prompts", "fit_4_3",
+    "frame_rate", "car_reflection_interval", "rear_touch",
     // Cores, logs and the benchmark.
     "use_core3", "core3_tasks", "timing_log", "timing_phases", "hitch_log", "console_log",
     "benchmark", "benchmark_exit", "benchmark_seconds", "benchmark_laps", "benchmark_opponents", "benchmark_track",
@@ -32,14 +33,18 @@ const char* const Known[] =
     // Renderer.
     "alpha_draw_order", "skip_unused_alpha_test", "matrices_on_render_thread", "texture_cache_mb", "texture_async",
     "gxm_precomputed", "gxm_lists", "gxm_core2", "gxm_program_list", "cull_swap", "debug_frame_dump", "gpu_scene_log",
-    "particle_precision",
+    "particle_precision", "msaa", "shader_precision",
     // Native versions of guest code and their shadow compares.
     "bank_native", "shadow_bank", "coll_native", "shadow_coll", "cull_native", "cull_parallel", "shadow_cull",
     "draw_native", "shadow_draw", "flush_native", "flush_async", "flush_async_core", "flush_async_priority",
     "flush_async_frame", "flares_native", "flares_parallel", "shadow_flares", "cars_native", "shadow_cars",
-    "load_native", "shadow_load", "math_native", "shadow_math", "ai_native", "shadow_ai", "gjk_native", "shadow_gjk", "particles_native", "particles_update",
+    "groups_native", "shadow_groups", "views_native", "shadow_views", "view_parts_native", "shadow_view_parts",
+    "scene_snapshot", "shadow_scene_snapshot", "shadow_scene_snapshot_join", "shadow_scene_snapshot_topology",
+    "scene_thread", "scene_thread_core", "scene_thread_priority", "shadow_scene_thread",
+    "load_native", "shadow_load", "math_native", "shadow_math", "ai_native", "shadow_ai", "gjk_native", "shadow_gjk", "contact_native", "shadow_contact", "particles_native", "particles_update",
     "particles_parallel", "particles_direct", "shadow_particles", "prep_native", "shadow_prep",
-    "lights_native", "shadow_lights",
+    "lights_native", "shadow_lights", "world_models_native", "shadow_world_models",
+    "scene_callbacks_native", "shadow_scene_callbacks",
     "shift_points_native", "shadow_shift_points", "top_speed_native", "shadow_top_speed",
     "forces_native", "shadow_forces", "rigid_body_native", "shadow_rigid_body", "suspension_native", "shadow_suspension",
     "anim_native", "shadow_anim", "movie_native", "shadow_movie",

@@ -426,6 +426,11 @@ static int      s_gameBlock = pf::perf::BlockOther;
 // A thread suspended by SuspendThread stops here, without the lock, each time it would take it.
 void WinApplication::lockContext(const x86::CPU& cpu)
 {
+    if (const LockForward forward = m_lockForward.load(std::memory_order_acquire))
+    {
+        if (forward(LockOpLock, cpu))
+            return;
+    }
     Mutex* executionContext = getMemory<Mutex*>(cpu.efs + ThreadLockOffset);
     RC_ASSERT(executionContext);
     if (!executionContext)
@@ -461,6 +466,11 @@ void WinApplication::lockContext(const x86::CPU& cpu)
 
 void WinApplication::unlockContext(const x86::CPU& cpu)
 {
+    if (const LockForward forward = m_lockForward.load(std::memory_order_acquire))
+    {
+        if (forward(LockOpUnlock, cpu))
+            return;
+    }
     Mutex* executionContext = getMemory<Mutex*>(cpu.efs + ThreadLockOffset);
     RC_ASSERT(executionContext);
     if (executionContext)
@@ -488,6 +498,37 @@ void WinApplication::unlockContext(const x86::CPU& cpu)
     }
 }
 
+#if defined(__arm__)
+extern "C" void rcYieldFromStub(win32::WinApplication* app, const x86::CPU* cpu)
+{
+    win32::WinApplication::yieldFromStub(app, cpu);
+}
+
+// rc_yield_stub(r0 app, r1 cpu): yieldContext keeping r0-r3, r12, d0-d7, d16-d31 and the FPSCR (the callee-saved
+// registers are kept by the call itself). 224 bytes pushed keep the stack 8-byte aligned.
+asm(R"(
+    .text
+    .p2align 2
+    .global rc_yield_stub
+    .type rc_yield_stub, %function
+    .thumb
+    .thumb_func
+rc_yield_stub:
+    push {r0-r3, r12, lr}
+    vpush {d0-d7}
+    vpush {d16-d31}
+    vmrs r2, fpscr
+    push {r2, r3}
+    bl rcYieldFromStub
+    pop {r2, r3}
+    vmsr fpscr, r2
+    vpop {d16-d31}
+    vpop {d0-d7}
+    pop {r0-r3, r12, pc}
+    .size rc_yield_stub, .-rc_yield_stub
+)");
+#endif
+
 // Releases the execution lock and queues for it again when a thread of a higher level waits. The lock orders its
 // waiters by host priority, which follows the level, so the waiting thread of the highest priority runs next, until
 // it blocks or yields itself. Threads without the lock and a lock held more than once do not yield.
@@ -507,6 +548,12 @@ void WinApplication::yieldContext(const x86::CPU& cpu)
     };
     if (!higherWaits())
         return;
+    // The tests above only read: the holder waits while a forwarded thread runs.
+    if (const LockForward forward = m_lockForward.load(std::memory_order_acquire))
+    {
+        if (forward(LockOpYield, cpu))
+            return;
+    }
     const bool timed = pf::perf::timed();
     const uint32_t start = timed ? pf::perf::now() : 0;
     pf::perf::count(pf::perf::CountYield);

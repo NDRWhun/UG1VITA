@@ -9,8 +9,9 @@ void main(
     float4 out vPosition : POSITION,
     float4 out vColor : COLOR0,
     float2 out vTex0 : TEXCOORD0,
-    float4 out vTex1 : TEXCOORD1,
-    float3 out vTex2 : TEXCOORD2)
+    float3 out vTex1 : TEXCOORD1,
+    float3 out vTex2 : TEXCOORD2,
+    float2 out vTex3 : TEXCOORD3)
 {
     float4 p = aPosition.x * uWvp[0] + aPosition.y * uWvp[1] + aPosition.z * uWvp[2] + uWvp[3];
     float4 tp = aPosition.x * uHeadlightWvp[0] + aPosition.y * uHeadlightWvp[1] + aPosition.z * uHeadlightWvp[2]
@@ -18,7 +19,8 @@ void main(
     vPosition = p;
     vColor = aColor.zyxw;
     vTex0 = aTex0;
-    // xyw: projected headlight coordinates; w: depth fade coordinate.
-    vTex1 = float4(tp.xyw, tp.w * 0.005 + 0.5);
+    // Projected headlight coordinates (xyw) and the depth fade coordinate.
+    vTex1 = tp.xyw;
+    vTex3 = float2(tp.w * 0.005 + 0.5, 0.0);
     vTex2 = float3((p.x + p.w) * 0.5, (p.w - p.y) * 0.5, p.w);
 }

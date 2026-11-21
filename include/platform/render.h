@@ -253,7 +253,8 @@ enum FactorOutput : uint8_t
     FactorColor,                // output = uBlendFactor (source factor ZERO, destination SRCCOLOR)
     FactorAlpha,                // alpha = uBlendFactor.a (SRCALPHA, INVSRCALPHA)
     FactorScale,                // output = saturate(colour) * uBlendFactor (source factor ONE)
-    FactorAlphaMask,            // alpha = uBlendFactor.a * saturate(length(vTex1)) (SRCALPHA, INVSRCALPHA; filter1)
+    FactorAlphaMask,            // alpha = speed blur mask from vTex1..3 and uBlendFactor.a (SRCALPHA, INVSRCALPHA;
+                                // filter1; filter_f.cg)
     FactorCount
 };
 const char* factorSuffix(FactorOutput output);
@@ -425,6 +426,9 @@ struct Frame
     const uint32_t* commands;
     uint32_t    commandCount;                       // words
     bool        uploads;                            // a texture it reads had uploads when it was recorded
+    // Setting msaa: 1 (off), 2 or 4 samples for the scenes that can be multisampled; set by the layer when the frame
+    // is begun. Depths created with createDepth(..., samples) for this count take part.
+    uint8_t     msaaSamples;
 };
 
 // Smallest alpha a sampler reads from a texture (all levels): 0 when unknown or while writes are queued.

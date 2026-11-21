@@ -6,6 +6,11 @@
 
 #include "hitch.h"
 #include "lights.h"
+#include "retstate.h"
+#include "sceneshadow.h"
+#include "scenesnap.h"
+#include "views.h"
+#include "worldmodels.h"
 
 #include <platform/config.h>
 #include <platform/log.h>
@@ -35,10 +40,7 @@ void sub_4483c0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_409580_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_40ed50_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_571050_guest(win32::WinApplication* app, x86::CPU& cpu);
-void sub_58a240_guest(win32::WinApplication* app, x86::CPU& cpu);
-void sub_592100_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_570db0_guest(win32::WinApplication* app, x86::CPU& cpu);
-void sub_4ae650_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_570d00_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_56dc30_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_56cf10_guest(win32::WinApplication* app, x86::CPU& cpu);
@@ -47,7 +49,6 @@ void sub_56d700_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_569460_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_5437f0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_544390_guest(win32::WinApplication* app, x86::CPU& cpu);
-void sub_591e40_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_5791c0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_469580_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_468060_guest(win32::WinApplication* app, x86::CPU& cpu);
@@ -302,8 +303,12 @@ namespace native
 
 void sub_420b40(win32::WinApplication* app, x86::CPU& cpu)
 {
-    phases::Scope scope(phases::Step);
-    sub_420b40_guest(app, cpu);
+    {
+        phases::Scope scope(phases::Step);
+        sub_420b40_guest(app, cpu);
+    }
+    if (!cpu.terminate)
+        scenesnap::afterStep(app, cpu);
 }
 
 void sub_420310(win32::WinApplication* app, x86::CPU& cpu)
@@ -362,6 +367,9 @@ void sub_51d240(win32::WinApplication* app, x86::CPU& cpu)
 
 void sub_445050(win32::WinApplication* app, x86::CPU& cpu)
 {
+    scenesnap::beforeStreamer(app, cpu);
+    if (cpu.terminate)
+        return;
     phases::Scope scope(phases::Streamer);
     sub_445050_guest(app, cpu);
 }
@@ -379,7 +387,7 @@ void sub_409580(win32::WinApplication* app, x86::CPU& cpu)
     // .rdata: the game's clear flag [0x73645C], or 0 while the magazine screen is shown ([0x735768]) so the background
     // its FE view cleared and drew stays (native.cpp sub_409cd0).
     rc::st32(0x6d3a00, rc::ld8(0x735768) ? 0 : rc::ld32(0x73645c));
-    sub_409580_guest(app, cpu);
+    scenesnap::views(app, cpu, &views::run);
 }
 
 void sub_571050(win32::WinApplication* app, x86::CPU& cpu)
@@ -391,13 +399,13 @@ void sub_571050(win32::WinApplication* app, x86::CPU& cpu)
 void sub_58a240(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::Clans);
-    sub_58a240_guest(app, cpu);
+    worldmodels::clans(app, cpu);
 }
 
 void sub_592100(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::WorldModels);
-    sub_592100_guest(app, cpu);
+    worldmodels::worldModels(app, cpu);
 }
 
 void sub_570db0(win32::WinApplication* app, x86::CPU& cpu)
@@ -409,11 +417,14 @@ void sub_570db0(win32::WinApplication* app, x86::CPU& cpu)
 void sub_4ae650(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::MiniWorld);
-    sub_4ae650_guest(app, cpu);
+    worldmodels::miniWorld(app, cpu);
 }
 
 void sub_570d00(win32::WinApplication* app, x86::CPU& cpu)
 {
+    // Recorded in the guest run of a shadow compare (sceneshadow.h): the flare screen pass 0x409b70 calls it.
+    if (sceneshadow::record(0x570d00, 1, retstate::Eax, app, cpu, &sub_570d00))
+        return;
     phases::Scope scope(phases::CarFlares);
     cars::run(cars::CarFlares, app, cpu);
 }
@@ -423,7 +434,7 @@ void sub_56dc30(win32::WinApplication* app, x86::CPU& cpu)
     if (cars::tap(0x56dc30, app, cpu, &sub_56dc30))
         return;
     phases::Scope scope(phases::CarRender);
-    sub_56dc30_guest(app, cpu);
+    cars::run(cars::RenderPort, app, cpu);
 }
 
 void sub_56cf10(win32::WinApplication* app, x86::CPU& cpu)
@@ -465,12 +476,13 @@ void sub_544390(win32::WinApplication* app, x86::CPU& cpu)
 void sub_591e40(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::WorldModel);
-    sub_591e40_guest(app, cpu);
+    worldmodels::worldModel(app, cpu);
 }
 
 void sub_5791c0(win32::WinApplication* app, x86::CPU& cpu)
 {
     phases::Scope scope(phases::SpaceNode);
+    scenesnap::spaceNodeUpdate(cpu.ecx);
     sub_5791c0_guest(app, cpu);
 }
 

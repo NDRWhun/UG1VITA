@@ -4,6 +4,8 @@
 #include "cull.h"
 #include "movie_yuv.h"
 #include "phases.h"
+#include "retstate.h"
+#include "sceneshadow.h"
 
 #include <lib/guest.h>
 #include <lib/winapp.h>
@@ -1187,20 +1189,42 @@ void sub_413270(win32::WinApplication* app, x86::CPU& cpu)
     cpu.esp += 4;
 }
 
+namespace
+{
+
+// render_resolution: the back buffer size with widescreen=on. Every size has the display's 960:544 aspect.
+struct RenderSize
+{
+    uint32_t width, height;
+};
+const char* const RenderSizeNames[] = { "960x544", "840x476", "720x408", "600x340" };
+const RenderSize RenderSizes[] = { { 960, 544 }, { 840, 476 }, { 720, 408 }, { 600, 340 } };
+
+RenderSize renderSize()
+{
+    const int count = int(sizeof(RenderSizes) / sizeof(RenderSizes[0]));
+    const int choice = pf::Config::getChoice("render_resolution", RenderSizeNames, count, 0);
+    pf::logInfo("screen: render_resolution=%s", RenderSizeNames[choice]);
+    return RenderSizes[choice];
+}
+
+}
+
 // Back buffer size (0x4086B0): width in the argument, height in esi; the guest stores them in the present parameters
 // and in [0x701034] / [0x701038]. Every device creation and Reset size passes here (0x408A38, 0x4087A0..0x408804,
-// 0x4494CE). widescreen=on (default) replaces the size with the display's, off keeps the game's. Afterwards the 2D
-// mapping the patched code reads (generate.py PATCHES) is written: the 640x480 space spans k of the back buffer
-// width, centred, with k = (height / width) / 0.75 and at most 1.
+// 0x4494CE). widescreen=on (default) replaces the size with render_resolution (default the display's), off keeps the
+// game's. Afterwards the 2D mapping the patched code reads (generate.py PATCHES) is written: the 640x480 space spans k
+// of the back buffer width, centred, with k = (height / width) / 0.75 and at most 1.
 void sub_4086b0(win32::WinApplication* app, x86::CPU& cpu)
 {
     const x86::reg32 ScreenWidth = 0x701034, ScreenHeight = 0x701038;
     static const bool widescreen = pf::Config::getBool("widescreen", true);
+    static const RenderSize size = widescreen ? renderSize() : RenderSize{ 0, 0 };
     const x86::reg32 esi = cpu.esi;
     if (widescreen)
     {
-        rc::st32(cpu.esp + 4, pf::gxm::DisplayWidth);
-        cpu.esi = pf::gxm::DisplayHeight;
+        rc::st32(cpu.esp + 4, size.width);
+        cpu.esi = size.height;
     }
     sub_4086b0_guest(app, cpu);
     if (cpu.terminate)
@@ -1568,6 +1592,10 @@ void sub_5ac8e5(win32::WinApplication* app, x86::CPU& cpu)
 // Scenery culler and box against frustum test (cull.cpp).
 void sub_446620(win32::WinApplication* app, x86::CPU& cpu)
 {
+    // Recorded in the guest run of a shadow compare (sceneshadow.h): the culler setup 0x408f00 calls it.
+    if (sceneshadow::record(0x446620, 0, retstate::Eax | retstate::Ecx | retstate::Edx | retstate::Esi, app, cpu,
+                            &sub_446620))
+        return;
     cull::doCulling(app, cpu);
 }
 

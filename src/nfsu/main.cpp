@@ -28,6 +28,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -195,10 +196,12 @@ static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Conve
 // "button 3" (26), L / R the triggers (27 / 28), d-pad and hat navigate; Triangle presses the menu bar's extra
 // item (src/nfsu/prompts.cpp, button_prompts=vita), on the vinyl layer screen it opens the vinyl colours (21).
 // Hat 1 (the right stick) orbits the front end's car camera in menus (29-32: orbit up, down, left, right; stick left
-// sends orbit right, which turns the view left) and has no race actions.
+// sends orbit right, which turns the view left) at a speed that follows the stick (setOrbitSpeed); in races stick up
+// shifts up (7) and stick down shifts down (8).
 static const x86::reg32 s_raceActions[16] = { 10, 9, 6, 5, 8, 7, 2, 1, 14, 12, 0, 0, 7, 4, 8, 3 };
 static const x86::reg32 s_menuActions[16] = { 0, 23, 20, 26, 0, 0, 27, 28, 0, 25, 0, 0, 16, 19, 17, 18 };
 static const x86::reg32 s_raceHat[4] = { 0, 0, 3, 4 };
+static const x86::reg32 s_raceRightHat[4] = { 8, 7, 0, 0 };
 static const x86::reg32 s_menuHat[4] = { 17, 16, 18, 19 };
 static const x86::reg32 s_menuRightHat[4] = { 30, 29, 32, 31 };
 
@@ -245,8 +248,9 @@ static void setPadBindings()
 // Env cube faces drawn per frame (0x40AD60, patched in generate.py PATCHES to read the copy written here): frame
 // counter [0x7364DC] modulo the divisor of the reflection level [0x700E74] picks one of that level's six rows of six
 // face flags. The game's levels: 1 one face a frame, 2 faces 0 and 4 every frame and one of the others, 3 all six.
-// car_reflection_interval=n (2..6, default 1: the game's) spreads level 3 over n frames, face f drawn when the counter modulo n
-// is f modulo n.
+// car_reflection_interval=n (2..6) spreads level 3 over n frames, face f drawn when the counter modulo n is f modulo
+// n. Without the key: 1 (the game's) at frame_rate=30, 2 at frame_rate=60, so each face is drawn 30 times a second at
+// either rate.
 static void setEnvmapSchedule()
 {
     const x86::reg32 GameDivisors = 0x00702AAC, GameRows = 0x00702AC0, Divisors = 0x006D3800, Rows = 0x006D3810;
@@ -254,7 +258,9 @@ static void setEnvmapSchedule()
         guestDword(Divisors + 4 * i) = guestDword(GameDivisors + 4 * i);
     for (x86::reg32 i = 0; i < 18 * 6; ++i)
         guestDword(Rows + 4 * i) = guestDword(GameRows + 4 * i);
-    const int rate = std::min(std::max(pf::Config::getInt("car_reflection_interval", 1), 1), 6);
+    int interval = pf::Config::getInt("frame_rate", 30) >= 60 ? 2 : 1;
+    pf::Config::tryGetInt("car_reflection_interval", &interval);
+    const int rate = std::min(std::max(interval, 1), 6);
     if (rate == 1)
         return;
     guestDword(Divisors + 4 * 3) = x86::reg32(rate);
@@ -359,8 +365,8 @@ static PadMap padMap()
     return map;
 }
 
-// The slot's tables outside the read: the player's race actions, except that the right stick (hat 1) has none and
-// a race table without any action gets the port's defaults; the port's menu actions.
+// The slot's tables outside the read: the player's race actions, except that the right stick (hat 1) always has the
+// port's shift actions and a race table without any action gets the port's defaults; the port's menu actions.
 static void setPadTables(x86::reg32 slot)
 {
     bool bound = false;
@@ -374,7 +380,7 @@ static void setPadTables(x86::reg32 slot)
             guestDword(slot + RaceHats + 4 * i) = s_raceHat[i % 4];
         }
         if (i / 4 == 1)
-            guestDword(slot + RaceHats + 4 * i) = 0;
+            guestDword(slot + RaceHats + 4 * i) = s_raceRightHat[i % 4];
         guestDword(slot + MenuButtons + 4 * i) = s_menuActions[i];
         guestDword(slot + MenuHats + 4 * i) = i / 4 == 1 ? s_menuRightHat[i % 4] : s_menuHat[i % 4];
     }
@@ -391,33 +397,108 @@ void sub_41c7a0(win32::WinApplication* app, x86::CPU& cpu);
 namespace native
 {
 
-// The game writes the profile's .cfg when the player leaves the options with changed profile data, at profile
-// changes and when it exits; a changed race table alone is not saved before the exit, which the Vita does not
-// reach (the process ends). So when the pad's race tables differ from the ones last seen and no action is being
-// assigned, the .cfg of the current profile is written (0x0041C7A0: nothing without a profile, path at 0x00736230).
-static void savePadTables(win32::WinApplication* app, x86::CPU& cpu, x86::reg32 slot)
+// The profile's settings as 0x0041C7A0 writes them (nothing without a profile, path at 0x00736230): <name>.cfg gets
+// the display settings 0x00700E6C..0x00700EBF (BPP .. SOUNDENABLE), PERFORMANCE 0x00736334 and the pad's race
+// actions; <name>.opt (0x0041E200) gets the profile 0x007588C4 at +0x10..+0x20F (HUD, audio volumes, music mode,
+// camera, transmission, handling, vibration, quick race options), +0x294..+0x363 (EA Trax playlist) and +0xEEEC
+// (autosave). +0x6C and +0x70, the playlist's stream masks, change while the music plays and are left out.
+struct SettingsPart
 {
-    static x86::reg32 s_seen[32];
-    static bool s_haveSeen = false;
-    if (guestDword(slot + AssignedAction) != 0)
-        return;
-    const x86::reg8* race = win32::g_guestBase + slot + RaceButtons;
-    if (s_haveSeen && memcmp(s_seen, race, sizeof(s_seen)) == 0)
-        return;
-    const bool changed = s_haveSeen;
-    memcpy(s_seen, race, sizeof(s_seen));
-    s_haveSeen = true;
-    if (!changed || !win32::g_guestBase[0x00736230])
-        return;
+    x86::reg32 address;
+    x86::reg32 size;
+    const char* name;
+};
+
+static const SettingsPart s_settingsParts[] = {
+    {0x00700E6C, 0x54, "display"},
+    {0x00736334, 0x04, "display"},
+    {0x007588D4, 0x5C, "options"},
+    {0x00758938, 0x19C, "options"},
+    {0x00758B58, 0xD0, "options"},
+    {0x007677B0, 0x04, "options"},
+    {0, 32 * 4, "controls"},        // the pad slot's race tables (RaceButtons, RaceHats)
+};
+
+struct Settings
+{
+    x86::reg8 bytes[0x54 + 0x04 + 0x5C + 0x19C + 0xD0 + 0x04 + 32 * 4];
+};
+
+static void readSettings(Settings& settings, x86::reg32 slot)
+{
+    x86::reg8* at = settings.bytes;
+    for (const SettingsPart& part : s_settingsParts)
+    {
+        memcpy(at, win32::g_guestBase + (part.address ? part.address : slot + RaceButtons), part.size);
+        at += part.size;
+    }
+}
+
+// The names of the parts that differ, comma separated.
+static void changedParts(const Settings& a, const Settings& b, char* text, size_t size)
+{
+    text[0] = 0;
+    size_t offset = 0;
+    for (const SettingsPart& part : s_settingsParts)
+    {
+        if (memcmp(a.bytes + offset, b.bytes + offset, part.size) != 0 && !strstr(text, part.name))
+            snprintf(text + strlen(text), size - strlen(text), "%s%s", text[0] ? ", " : "", part.name);
+        offset += part.size;
+    }
+}
+
+// The game writes the profile's files at profile changes, when it exits, and when the player leaves the options
+// only if the career data changed (0x004C9570); settings changed alone are written at the exit, which the Vita does
+// not reach (the process ends). So the settings are read when a profile is loaded or changed; afterwards, each time
+// the current screen (package name at 0x0072CDD0) has changed while no race is driven and no action is being
+// assigned, they are compared with the ones last read or written, and when they differ the current profile's files
+// are written. Nothing with benchmark=on.
+static bool saveSettings(win32::WinApplication* app, x86::CPU& cpu, x86::reg32 slot)
+{
+    static Settings s_saved;
+    static char s_profile[260];
+    static char s_screen[64];
+    if (bench::enabled())
+        return true;
+    const char* profile = reinterpret_cast<const char*>(win32::g_guestBase + 0x00736230);
+    if (!profile[0])
+    {
+        s_profile[0] = 0;
+        return true;
+    }
+    const bool driving = win32::g_guestBase[0x007041C4] == 0;
+    if (driving || guestDword(slot + AssignedAction) != 0)
+        return true;
+    const char* screen = reinterpret_cast<const char*>(win32::g_guestBase + 0x0072CDD0);
+    const bool screenChanged = strncmp(screen, s_screen, sizeof(s_screen) - 1) != 0;
+    const bool profileChanged = strncmp(profile, s_profile, sizeof(s_profile) - 1) != 0;
+    if (!screenChanged && !profileChanged)
+        return true;
+    strncpy(s_screen, screen, sizeof(s_screen) - 1);
+    Settings current;
+    readSettings(current, slot);
+    if (profileChanged)
+    {
+        strncpy(s_profile, profile, sizeof(s_profile) - 1);
+        s_saved = current;
+        return true;
+    }
+    if (memcmp(current.bytes, s_saved.bytes, sizeof(current.bytes)) == 0)
+        return true;
+    char parts[64];
+    changedParts(current, s_saved, parts, sizeof(parts));
+    s_saved = current;
     // At the read's entry eax, ecx and edx hold nothing the read uses; the writer keeps the other registers.
     cpu.esp -= 4;
     sub_41c7a0(app, cpu);
-    pf::logInfo("input: race controls changed, saved to %s",
-                reinterpret_cast<const char*>(win32::g_guestBase + 0x00736230));
+    if (cpu.terminate)
+        return false;
+    pf::logInfo("settings: %s changed, profile saved (%s and its .opt)", parts, profile);
+    return true;
 }
 
 // Device read (slot in esi): the action mask from the device's state and the slot's tables. For the pad the tables
-// of the map that is not active are empty during the read, and on the vinyl layer screen Triangle (button 0) sends
+// of the map that is not active are empty during the read, in menus the right stick has no race action, and on the vinyl layer screen Triangle (button 0) sends
 // action 21; afterwards the slot holds its own tables again.
 void sub_4070a0(win32::WinApplication* app, x86::CPU& cpu)
 {
@@ -428,7 +509,8 @@ void sub_4070a0(win32::WinApplication* app, x86::CPU& cpu)
         return;
     }
     setPadTables(slot);
-    savePadTables(app, cpu, slot);
+    if (!saveSettings(app, cpu, slot))
+        return;
     const PadMap map = padMap();
     x86::reg32 race[32];
     memcpy(race, win32::g_guestBase + slot + RaceButtons, sizeof(race));
@@ -436,6 +518,8 @@ void sub_4070a0(win32::WinApplication* app, x86::CPU& cpu)
         memset(win32::g_guestBase + slot + RaceButtons, 0, sizeof(race));
     if (!map.menu)
         memset(win32::g_guestBase + slot + MenuButtons, 0, 32 * 4);
+    else
+        memset(win32::g_guestBase + slot + RaceHats + 4 * 4, 0, 4 * 4);   // the right stick shifts only while driving
     if (map.vinylColours)
         guestDword(slot + MenuButtons) = 21;
     sub_4070a0_guest(app, cpu);
@@ -445,7 +529,51 @@ void sub_4070a0(win32::WinApplication* app, x86::CPU& cpu)
 
 }}
 
-static void padPollHook(x86::reg32* buttons, int* pov, int* rightPov)
+// Front end car camera (0x004AE910, joystick handler of the garage screens): events 0x3C / 0x3D set the vertical
+// orbit speed to +value / 255 and -value / 255, events 0x3A / 0x3B the horizontal one to -value / 255 and
+// +value / 255. Their input scanners (configs at 0x00703B60, 0x20 bytes each: events 0x3C, 0x3D, 0x3A, 0x3B on
+// actions 29-32; 0x005744B0) send the config's byte at +0x14 as the value while the action is held (the game's
+// 128) and 0 when it is released; a changed byte sends the event again while held.
+// In menus hat 1 follows each axis of the right stick on its own past a band along the axis (no drift across it),
+// and the value of a held orbit action follows that axis: 1 at the band, 255 (speed 1) at full deflection, which is
+// twice the game's value. A direction reversed between two polls reports the axis centred for one poll, so the
+// released direction's 0 cannot come after the new direction's value. Outside menus the values are the game's.
+const x86::reg32 OrbitValues = 0x00703B74, OrbitConfigSize = 0x20;
+static const float s_orbitAxisBand = 0.15f;
+
+static x86::reg8 orbitValue(float position)
+{
+    const float amount = (std::fabs(position) - s_orbitAxisBand) / (1.0f - s_orbitAxisBand);
+    return x86::reg8(std::max(1L, std::lround(std::min(amount, 1.0f) * 255.0f)));
+}
+
+static void setOrbitSpeed(bool menu, float x, float y, int* rightPov)
+{
+    static int s_dx = 0, s_dy = 0;
+    x86::reg8 values[4] = { 128, 128, 128, 128 };   // up, down, right, left (actions 29-32)
+    int dx = 0, dy = 0;
+    if (menu)
+    {
+        dx = x > s_orbitAxisBand ? 1 : x < -s_orbitAxisBand ? -1 : 0;
+        dy = y > s_orbitAxisBand ? 1 : y < -s_orbitAxisBand ? -1 : 0;
+        if (dx && dx == -s_dx)
+            dx = 0;
+        if (dy && dy == -s_dy)
+            dy = 0;
+        static const int s_angles[3][3] = { { 31500, 0, 4500 }, { 27000, -1, 9000 }, { 22500, 18000, 13500 } };
+        *rightPov = s_angles[dy + 1][dx + 1];
+        if (dy)
+            values[dy < 0 ? 0 : 1] = orbitValue(y);
+        if (dx)
+            values[dx > 0 ? 2 : 3] = orbitValue(x);
+    }
+    s_dx = dx;
+    s_dy = dy;
+    for (x86::reg32 i = 0; i < 4; ++i)
+        win32::g_guestBase[OrbitValues + OrbitConfigSize * i] = values[i];
+}
+
+static void padPollHook(x86::reg32* buttons, int* pov, int* rightPov, float rightX, float rightY)
 {
     pollTextField();
     nfsu::bench::poll();
@@ -456,7 +584,8 @@ static void padPollHook(x86::reg32* buttons, int* pov, int* rightPov)
     const x86::reg32 slot = findPadSlot();
     const bool assigning = slot && guestDword(slot + AssignedAction) != 0;
 
-    if (!menu || assigning)
+    setOrbitSpeed(menu, rightX, rightY, rightPov);
+    if (assigning)
         *rightPov = -1;
     const x86::reg32 hatBit = x86::reg32(1) << 31, rightHatBit = x86::reg32(1) << 30;
     const x86::reg32 held = *buttons | (*pov >= 0 ? hatBit : 0) | (*rightPov >= 0 ? rightHatBit : 0);

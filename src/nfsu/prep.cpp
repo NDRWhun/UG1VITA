@@ -11,6 +11,8 @@
 #include "particles.h"
 #include "phases.h"
 #include "retstate.h"
+#include "scenesnap.h"
+#include "worldmodels.h"
 
 #include <platform/config.h>
 #include <platform/log.h>
@@ -217,6 +219,7 @@ void stuffNative(win32::WinApplication* app, x86::CPU& cpu)
         const reg32 matrix = rc::ld32(entry + 4);
         const reg32 instance = rc::ld32(entry + 8);
         const reg32 modelBase = model & ~3u;
+        scenesnap::noteFlag(instance + 0x2e);
         reg32 flags = reg32(sreg32(sreg16(rc::ld16(instance + 0x2e)))) | detail;
         if ((model & 3) == 2)
             flags |= 4;
@@ -379,6 +382,7 @@ void frame(win32::WinApplication* app, x86::CPU& cpu)
     flares::report(s_frames);
     lights::report(s_frames);
     particles::report(s_frames);
+    worldmodels::logUsage(s_frames);
     draw::logUsage(s_frames);
     s_perf = PerfSums();
     s_frames = 0;

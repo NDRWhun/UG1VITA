@@ -90,6 +90,10 @@ inline Division divideSigned(x86::reg32 hi, x86::reg32 lo, x86::reg32 d)
     return divideSignedWide(hi, lo, d);
 }
 
+// A float or double of the given bits (constants of read-only guest data).
+constexpr float f32(x86::reg32 bits)    { return __builtin_bit_cast(float, bits); }
+constexpr double f64(x86::reg64 bits)   { return __builtin_bit_cast(double, bits); }
+
 template< typename T >
 inline T load(x86::reg32 address)
 {

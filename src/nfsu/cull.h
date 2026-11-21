@@ -20,6 +20,11 @@ void getVisibleState(win32::WinApplication* app, x86::CPU& cpu);
 // outside, 1 partial, 2 inside. compareA and compareB get the operands of its last x87 compare. Any thread.
 int boxState(const float mn[3], const float mx[3], x86::reg32 view, double& compareA, double& compareB);
 
+// Guest 0x446fd0 on live memory (eax = the region list, [esp + 4] = the position; ret 4): the region whose polygon
+// holds the position, moved to the front of the list, with the registers and the last x87 compare the guest
+// leaves. False, with nothing done, for a list other than the one the culler reads.
+bool findDrivableSection(x86::CPU& cpu);
+
 }}
 
 #endif

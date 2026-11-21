@@ -83,7 +83,8 @@ public:
     uint32_t copyTextureAsync(render::TextureStorage* to, const render::TextureStorage* from);
     bool uploadDone(uint32_t ticket);
     void waitUpload(uint32_t ticket);
-    render::DepthStorage* createDepth(uint32_t width, uint32_t height);
+    // samples: 1, or 2 or 4 for a depth the multisampled scenes of frames with that Frame::msaaSamples use.
+    render::DepthStorage* createDepth(uint32_t width, uint32_t height, uint32_t samples);
     // Vertex or index data; BufferStorage::data is written directly.
     render::BufferStorage* createBuffer(uint32_t size);
     // Freed once the frames that may still read the resource and its queued uploads are finished.

@@ -38,6 +38,8 @@ bool dumpingFrame();
 // Game thread: the frames opened from now on draw the motion blur enhanced (Device::motionBlurQuad) or as the PC
 // does.
 void setMotionBlurEnhanced(bool on);
+// Game thread: the frames opened from now on multisample with 1 (off), 2 or 4 samples (Device::applyMsaa).
+void setMsaaSamples(uint32_t samples);
 
 // ---- IDirect3DDevice9 ----
 
@@ -46,7 +48,6 @@ HRESULT setMaterial(WinApplication* app, x86::CPU& cpu, reg32 device, const DWOR
 HRESULT setLight(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD index, const DWORD* light);
 HRESULT lightEnable(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD index, BOOL enable);
 HRESULT setRenderState(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD state, DWORD value);
-// Not recorded by a capture.
 HRESULT setTextureStageState(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD stage, DWORD type, DWORD value);
 HRESULT setSamplerState(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD sampler, DWORD type, DWORD value);
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD stage, reg32 texture);
@@ -59,8 +60,8 @@ HRESULT drawIndexedPrimitive(WinApplication* app, x86::CPU& cpu, reg32 device, D
 // data: the vertices in host memory (a capture records them by value).
 HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD type, UINT count, const void* data,
                         UINT stride);
-// Not recorded by a capture: SetViewport, SetFVF, Clear, BeginScene, EndScene, SetRenderTarget,
-// SetDepthStencilSurface, and an indexed draw whose vertices (bytes of data) go to frame memory
+// Not recorded by a capture: SetFVF, BeginScene, EndScene and, unless the capture asks for it
+// (Capture::frameVertices), an indexed draw whose vertices (bytes of data) go to frame memory
 // (Device::drawIndexedFrameVertices).
 HRESULT setViewport(WinApplication* app, x86::CPU& cpu, reg32 device, const DWORD* viewport);
 HRESULT setFVF(WinApplication* app, x86::CPU& cpu, reg32 device, DWORD fvf);
@@ -268,6 +269,14 @@ HRESULT effectEnd(WinApplication* app, x86::CPU& cpu, reg32 effect);
 // Calls the guest function at address with cpu (esp at the return address slot), as a call instruction of the
 // guest does.
 void callGuest(WinApplication* app, x86::CPU& cpu, reg32 address);
+// Runs run as the function at address (cpu.esp at the return address slot); while a capture records it is recorded
+// as a guest call to address with its first args stack arguments and the registers of the call register mask and
+// registers (setCallRegisters), and replayed as one.
+void callNative(WinApplication* app, x86::CPU& cpu, reg32 address, void (*run)(WinApplication*, x86::CPU&),
+                uint32_t args, uint8_t registers);
+// The registers guest calls of a capture record (eax 1, ecx 2, edx 4, ebx 8, esp 0x10, ebp 0x20, esi 0x40,
+// edi 0x80; default all): translated guest code leaves registers its callee does not read as they were.
+void setCallRegisters(uint8_t mask);
 
 // ---- Capture ----
 
@@ -302,6 +311,13 @@ struct Capture
     };
 
     Mode mode = Record;
+    // Guest calls (callGuest, callNative, the callouts) are recorded and replayed; when false they run in both
+    // modes and are not recorded.
+    bool guestCalls = true;
+    // Indexed draws from frame memory (drawFrameVertices) are recorded and replayed with their vertices.
+    bool frameVertices = false;
+    // The native ports run their native code under it (capturing() is false): a compare of native runs.
+    bool natives = false;
     std::vector<uint32_t> words;
     std::vector<Call> calls;
     std::vector<x86::CPU> cpus;
@@ -313,6 +329,13 @@ struct Capture
     uint8_t expected = MethodCount, got = MethodCount;
     uint32_t differingWord = 0;
     uint32_t expectedWord = 0, gotWord = 0;
+    // Replay: the words of the call that differed.
+    std::vector<uint32_t> gotWords;
+    // Replay: after the first difference, later calls of the same method are still compared and answered from the
+    // recording; the differing ones are counted per method (indexed by method number, 256 entries).
+    bool continueAfterDifference = false;
+    uint32_t differingCalls = 0;
+    std::vector<uint32_t> differingByMethod;
 
     void clear();
 };
@@ -320,8 +343,11 @@ struct Capture
 // Starts recording or replaying the calling thread's calls into capture; end() stops it.
 void begin(Capture& capture, Capture::Mode mode);
 void end();
-// True while a capture runs on the calling thread.
+// True while a capture runs on the calling thread, except one with Capture::natives: the native ports then take
+// their guest paths.
 bool capturing();
+// True while a capture records or replays the calling thread's calls (not inside a guest call it runs).
+bool capturingCalls();
 
 // While the guest run of a shadow compare is recorded, a guest call through one of these addresses is recorded as a
 // guest call to target and runs target with the capture paused. index < CalloutCount.
@@ -417,6 +443,12 @@ HRESULT pass(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT pass);
 HRESULT end(WinApplication* app, x86::CPU& cpu, reg32 effect);
 
 }
+
+// IDirect3DSurface9::GetDesc and IDirect3DTexture9::GetLevelDesc into desc (8 dwords, D3DSURFACE_DESC), called at
+// once: descriptor reads, neither deferred nor recorded (as the guest's calls of them). False, with nothing done, for
+// an object of another kind.
+bool surfaceDesc(WinApplication* app, x86::CPU& cpu, reg32 surface, DWORD* desc, HRESULT& result);
+bool textureLevelDesc(WinApplication* app, x86::CPU& cpu, reg32 texture, UINT level, DWORD* desc, HRESULT& result);
 
 // ---- D3DX math on host data, as the D3DX overrides compute it ----
 

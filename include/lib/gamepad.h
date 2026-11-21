@@ -78,8 +78,9 @@ public:
     void getState(x86::reg32* buttons, x86::sreg32 (&axes)[controls::AxisCount], int* pov, int* rightPov);
 
     // Game code run at each getState on the guest thread (execution lock held) with the buttons and hats about to
-    // be reported; it may change them. Set once before the game starts.
-    typedef void (*PollHook)(x86::reg32* buttons, int* pov, int* rightPov);
+    // be reported, which it may change, and the right stick shaped as a whole (-1..1, y down). Set once before the
+    // game starts.
+    typedef void (*PollHook)(x86::reg32* buttons, int* pov, int* rightPov, float rightX, float rightY);
     static void setPollHook(PollHook hook);
 
     // Input pump: reads the pad, posts the key changes as window messages and runs the on-screen keyboard. Called

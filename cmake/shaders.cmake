@@ -45,7 +45,7 @@ function(nfsu_add_shader out_var name profile)
       COMMAND "${PSP2CGC}" -profile ${profile} -O3 -Wperf ${defines} -o "${gxp}" "${SHADER_SOURCE}"
       COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${gxp}" "${prebuilt}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/shaders"
-      DEPENDS "${src}"
+      DEPENDS "${src}" "${CMAKE_SOURCE_DIR}/shaders/precision.h"
       COMMENT "Compiling shader ${name}.cg (${profile})"
       VERBATIM)
   else()
@@ -67,7 +67,8 @@ endfunction()
 
 # Every program of the port: the present and clear programs, the Direct3D effect and fixed-function programs
 # (include/platform/render.h); fragment programs also with -DATEST (alpha test, suffix _atest), filter programs also
-# with -DFACTOR (blend factor outputs, suffixes _bfcolor, _bfalpha, _bfscale; _bfmask for filter1 only).
+# with -DFACTOR (blend factor outputs, suffixes _bfcolor, _bfalpha, _bfscale; _bfmask for filter1 only), and the
+# effect and fixed-function fragment programs also with -DHALF (suffix _half).
 function(nfsu_add_shaders out_var)
   set(list "")
   nfsu_add_shader(list blit_v  sce_vp_psp2)
@@ -80,33 +81,44 @@ function(nfsu_add_shaders out_var)
   nfsu_add_shader(list world_proj_v sce_vp_psp2 SOURCE world_v.cg DEFINES PROJ=1)
   nfsu_add_shader(list ff_v sce_vp_psp2)
   nfsu_add_shader(list ff_screen_v sce_vp_psp2 SOURCE ff_v.cg DEFINES SCREEN=1)
-  foreach(name world_f worldheadlight_f worldreflect_f worldheadlightreflect_f car_f)
-    nfsu_add_shader(list ${name} sce_fp_psp2)
-    nfsu_add_shader(list ${name}_atest sce_fp_psp2 SOURCE ${name}.cg DEFINES ATEST=1)
-  endforeach()
-  nfsu_add_shader(list world_proj_f sce_fp_psp2 SOURCE world_f.cg DEFINES PROJ=1)
-  nfsu_add_shader(list world_proj_f_atest sce_fp_psp2 SOURCE world_f.cg DEFINES PROJ=1 ATEST=1)
-  # world_f in half precision for the alpha-blended world draws (setting particle_precision).
-  nfsu_add_shader(list world_half_f sce_fp_psp2)
-  foreach(taps 1 2 3 4)
-    nfsu_add_shader(list filter${taps}_f sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps})
-    nfsu_add_shader(list filter${taps}_f_atest sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps} ATEST=1)
-    # Blend factor variants (render::FactorOutput 1..3).
-    set(factor 1)
-    foreach(suffix bfcolor bfalpha bfscale)
-      nfsu_add_shader(list filter${taps}_f_${suffix} sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps} FACTOR=${factor})
-      math(EXPR factor "${factor} + 1")
+  # Fragment programs of the effects and fixed function, each also with -DHALF (suffix _half, colours in half
+  # precision: setting shader_precision).
+  foreach(precision full half)
+    set(h "")
+    set(hdef "")
+    if(precision STREQUAL "half")
+      set(h "_half")
+      set(hdef HALF=1)
+    endif()
+    foreach(name world_f worldheadlight_f worldreflect_f worldheadlightreflect_f car_f)
+      nfsu_add_shader(list ${name}${h} sce_fp_psp2 SOURCE ${name}.cg DEFINES ${hdef})
+      nfsu_add_shader(list ${name}_atest${h} sce_fp_psp2 SOURCE ${name}.cg DEFINES ATEST=1 ${hdef})
+    endforeach()
+    nfsu_add_shader(list world_proj_f${h} sce_fp_psp2 SOURCE world_f.cg DEFINES PROJ=1 ${hdef})
+    nfsu_add_shader(list world_proj_f_atest${h} sce_fp_psp2 SOURCE world_f.cg DEFINES PROJ=1 ATEST=1 ${hdef})
+    foreach(taps 1 2 3 4)
+      nfsu_add_shader(list filter${taps}_f${h} sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps} ${hdef})
+      nfsu_add_shader(list filter${taps}_f_atest${h} sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=${taps} ATEST=1 ${hdef})
+      # Blend factor variants (render::FactorOutput 1..3).
+      set(factor 1)
+      foreach(suffix bfcolor bfalpha bfscale)
+        nfsu_add_shader(list filter${taps}_f_${suffix}${h} sce_fp_psp2 SOURCE filter_f.cg
+                        DEFINES TAPS=${taps} FACTOR=${factor} ${hdef})
+        math(EXPR factor "${factor} + 1")
+      endforeach()
+    endforeach()
+    nfsu_add_shader(list filter1_f_bfmask${h} sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=1 FACTOR=4 ${hdef})
+    foreach(variant color tex proj)
+      string(TOUPPER ${variant} define)
+      set(defines ${hdef})
+      if(NOT variant STREQUAL "color")
+        list(APPEND defines ${define}=1)
+      endif()
+      nfsu_add_shader(list ff_${variant}_f${h} sce_fp_psp2 SOURCE ff_f.cg DEFINES ${defines})
+      nfsu_add_shader(list ff_${variant}_f_atest${h} sce_fp_psp2 SOURCE ff_f.cg DEFINES ${defines} ATEST=1)
     endforeach()
   endforeach()
-  nfsu_add_shader(list filter1_f_bfmask sce_fp_psp2 SOURCE filter_f.cg DEFINES TAPS=1 FACTOR=4)
-  foreach(variant color tex proj)
-    string(TOUPPER ${variant} define)
-    set(defines "")
-    if(NOT variant STREQUAL "color")
-      set(defines ${define}=1)
-    endif()
-    nfsu_add_shader(list ff_${variant}_f sce_fp_psp2 SOURCE ff_f.cg DEFINES ${defines})
-    nfsu_add_shader(list ff_${variant}_f_atest sce_fp_psp2 SOURCE ff_f.cg DEFINES ${defines} ATEST=1)
-  endforeach()
+  # world_f in half precision for the alpha-blended world draws (setting particle_precision).
+  nfsu_add_shader(list world_half_f sce_fp_psp2)
   set(${out_var} "${list}" PARENT_SCOPE)
 endfunction()

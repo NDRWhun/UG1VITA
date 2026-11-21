@@ -1,4 +1,4 @@
-// Direct calls into the Direct3D 9 device and the D3DX effects, their capture and replay, their deferral
+﻿// Direct calls into the Direct3D 9 device and the D3DX effects, their capture and replay, their deferral
 // (d3d9_native.h), and the guest entries of the bridged device methods.
 
 #include <winapi/d3d9_native.h>
@@ -118,6 +118,8 @@ public:
     {
         Capture& c = m_capture;
         const uint32_t index = c.replayed++;
+        if (c.differs && c.continueAfterDifference)
+            return replayAfterDifference();
         if (c.differs)
             return nullptr;
         if (c.next >= c.calls.size())
@@ -145,6 +147,26 @@ public:
         return &call;
     }
 
+    // A call after the first difference: compared with the recorded one at the same place, counted when it differs.
+    const Capture::Call* replayAfterDifference()
+    {
+        Capture& c = m_capture;
+        if (c.next >= c.calls.size())
+            return nullptr;
+        const Capture::Call& call = c.calls[c.next++];
+        bool same = call.method == m_method && call.count == m_words.size();
+        for (uint32_t i = 0; same && i < call.count; ++i)
+            same = c.words[call.first + i] == m_words[i];
+        if (!same)
+        {
+            ++c.differingCalls;
+            if (c.differingByMethod.size() < 256)
+                c.differingByMethod.assign(256, 0);
+            ++c.differingByMethod[m_method];
+        }
+        return call.method == m_method ? &call : nullptr;
+    }
+
     // Record: the call ran with this result.
     Capture::Call& done(HRESULT result)
     {
@@ -166,6 +188,13 @@ private:
         c.differingWord = wordIndex;
         c.expectedWord = expectedWord;
         c.gotWord = gotWord;
+        c.gotWords = m_words;
+        if (c.continueAfterDifference)
+        {
+            ++c.differingCalls;
+            c.differingByMethod.assign(256, 0);
+            ++c.differingByMethod[m_method];
+        }
     }
 
     Capture& m_capture;
@@ -179,25 +208,29 @@ inline bool active()
     return s_capture && !s_paused;
 }
 
-// Guest call: the registers it starts with.
-void guestCallWords(Record& r, reg32 address, const x86::CPU& cpu)
+// Registers of guest calls a capture compares (setCallRegisters).
+uint8_t s_callRegisters = 0xff;
+
+// Guest call: the registers of mask it starts with (eax 1, ecx 2, edx 4, ebx 8, esp 0x10, ebp 0x20, esi 0x40,
+// edi 0x80; the others as 0).
+void guestCallWords(Record& r, reg32 address, const x86::CPU& cpu, uint8_t mask)
 {
     r.word(address);
-    r.word(cpu.eax);
-    r.word(cpu.ecx);
-    r.word(cpu.edx);
-    r.word(cpu.ebx);
-    r.word(cpu.esp);
-    r.word(cpu.ebp);
-    r.word(cpu.esi);
-    r.word(cpu.edi);
+    r.word(mask & 1 ? cpu.eax : 0);
+    r.word(mask & 2 ? cpu.ecx : 0);
+    r.word(mask & 4 ? cpu.edx : 0);
+    r.word(mask & 8 ? cpu.ebx : 0);
+    r.word(mask & 0x10 ? cpu.esp : 0);
+    r.word(mask & 0x20 ? cpu.ebp : 0);
+    r.word(mask & 0x40 ? cpu.esi : 0);
+    r.word(mask & 0x80 ? cpu.edi : 0);
     r.word(cpu.fpu.count);
 }
 
 void runGuest(WinApplication* app, x86::CPU& cpu, reg32 address)
 {
     Record r(MethodGuestCall);
-    guestCallWords(r, address, cpu);
+    guestCallWords(r, address, cpu, s_callRegisters);
     if (r.replaying())
     {
         const Capture::Call* call = r.replay();
@@ -218,7 +251,7 @@ void runGuest(WinApplication* app, x86::CPU& cpu, reg32 address)
 void callout(WinApplication* app, x86::CPU& cpu, uint32_t index)
 {
     const reg32 target = s_calloutTargets[index];
-    if (active())
+    if (active() && s_capture->guestCalls)
         runGuest(app, cpu, target);
     else
         app->dynamic_call(target, cpu);
@@ -272,6 +305,34 @@ enum : uint8_t
     OpCount
 };
 static_assert(uint32_t(OpCount) <= uint32_t(DeferOpCount),"DeferStats has a slot per operation");
+
+// Capture method numbers of the calls a capture records that are not capture methods (MethodCount stays the
+// capture's "no call").
+enum : uint8_t
+{
+    RecordTextureStageState = OpCount,
+    RecordSamplerState,
+    RecordViewport,
+    RecordClear,
+    RecordRenderTarget,
+    RecordDepthStencilSurface,
+    RecordFrameVertices
+};
+
+const char* recordName(uint8_t method)
+{
+    switch (method)
+    {
+    case RecordTextureStageState:   return "SetTextureStageState";
+    case RecordSamplerState:        return "SetSamplerState";
+    case RecordViewport:            return "SetViewport";
+    case RecordClear:               return "Clear";
+    case RecordRenderTarget:        return "SetRenderTarget";
+    case RecordDepthStencilSurface: return "SetDepthStencilSurface";
+    case RecordFrameVertices:       return "DrawIndexedPrimitive (frame vertices)";
+    default:                        return "none";
+    }
+}
 
 const uint32_t QueueWords = 1u << 18;           // 1 MiB ring
 const uint32_t QueueMask = QueueWords - 1;
@@ -1101,15 +1162,22 @@ void Capture::clear()
     cpus.clear();
     next = 0;
     replayed = 0;
+    guestCalls = true;
+    frameVertices = false;
+    natives = false;
     differs = false;
     differingCall = 0;
     expected = got = MethodCount;
     differingWord = expectedWord = gotWord = 0;
+    gotWords.clear();
+    continueAfterDifference = false;
+    differingCalls = 0;
+    differingByMethod.clear();
 }
 
 const char* methodName(uint8_t method)
 {
-    return method < MethodCount ? s_methodNames[method] : "none";
+    return method < MethodCount ? s_methodNames[method] : recordName(method);
 }
 
 void begin(Capture& capture, Capture::Mode mode)
@@ -1129,7 +1197,12 @@ void end()
 
 bool capturing()
 {
-    return s_capture != nullptr;
+    return s_capture != nullptr && !s_capture->natives;
+}
+
+bool capturingCalls()
+{
+    return active();
 }
 
 reg32 calloutAddress(uint32_t index)
@@ -1157,10 +1230,44 @@ void init(WinApplication* app)
 
 void callGuest(WinApplication* app, x86::CPU& cpu, reg32 address)
 {
-    if (active())
+    if (active() && s_capture->guestCalls)
         runGuest(app, cpu, address);
     else
         app->dynamic_call(address, cpu);
+}
+
+void setCallRegisters(uint8_t mask)
+{
+    s_callRegisters = mask;
+}
+
+void callNative(WinApplication* app, x86::CPU& cpu, reg32 address, void (*run)(WinApplication*, x86::CPU&),
+                uint32_t args, uint8_t registers)
+{
+    if (!active() || !s_capture->guestCalls)
+    {
+        run(app, cpu);
+        return;
+    }
+    Record r(MethodGuestCall);
+    guestCallWords(r, address, cpu, s_callRegisters | registers);
+    for (uint32_t i = 1; i <= args; ++i)
+        r.word(rc::ld32(cpu.esp + 4 * i));
+    if (r.replaying())
+    {
+        const Capture::Call* call = r.replay();
+        if (call)
+            cpu = s_capture->cpus[call->cpu];
+        else
+            cpu.esp += 4;
+        return;
+    }
+    ++s_paused;
+    run(app, cpu);
+    --s_paused;
+    Capture::Call& call = r.done(D3D_OK);
+    call.cpu = uint32_t(s_capture->cpus.size());
+    s_capture->cpus.push_back(cpu);
 }
 
 // ---- Deferral ----
@@ -1522,6 +1629,22 @@ HRESULT setTextureStageState(WinApplication* app, x86::CPU& cpu, reg32 guest, DW
         return queued();
     }
     drain();
+    if (active())
+    {
+        Record r(RecordTextureStageState);
+        r.word(guest);
+        r.word(stage);
+        r.word(type);
+        r.word(value);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->SetTextureStageState(app, cpu, stage, type, value);
+        r.done(h);
+        return h;
+    }
     return device(guest)->SetTextureStageState(app, cpu, stage, type, value);
 }
 
@@ -1537,6 +1660,22 @@ HRESULT setSamplerState(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD s
         return queued();
     }
     drain();
+    if (active())
+    {
+        Record r(RecordSamplerState);
+        r.word(guest);
+        r.word(sampler);
+        r.word(type);
+        r.word(value);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->SetSamplerState(app, cpu, sampler, type, value);
+        r.done(h);
+        return h;
+    }
     return device(guest)->SetSamplerState(app, cpu, sampler, type, value);
 }
 
@@ -1552,6 +1691,20 @@ HRESULT setViewport(WinApplication* app, x86::CPU& cpu, reg32 guest, const DWORD
         return queued();
     }
     drain();
+    if (active())
+    {
+        Record r(RecordViewport);
+        r.word(guest);
+        r.dwords(viewport, 6);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->SetViewport(app, cpu, reinterpret_cast<const D3DVIEWPORT9*>(viewport));
+        r.done(h);
+        return h;
+    }
     return device(guest)->SetViewport(app, cpu, reinterpret_cast<const D3DVIEWPORT9*>(viewport));
 }
 
@@ -1595,6 +1748,27 @@ HRESULT clear(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD count, cons
     if (deferring(cpu))
         fallback();
     drain();
+    if (active())
+    {
+        Record r(RecordClear);
+        r.word(guest);
+        r.word(count);
+        r.dwords(rects, words);
+        r.word(flags);
+        r.word(color);
+        r.word(bits(z));
+        r.word(stencil);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->Clear(app, cpu, count, reinterpret_cast<const D3DRECT*>(rects), flags,
+                                               color, z, stencil);
+        refreshBindings();
+        r.done(h);
+        return h;
+    }
     const HRESULT h = device(guest)->Clear(app, cpu, count, reinterpret_cast<const D3DRECT*>(rects), flags, color, z,
                                            stencil);
     refreshBindings();
@@ -1629,6 +1803,21 @@ HRESULT setRenderTarget(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD i
     if (deferring(cpu))
         fallback();
     drain();
+    if (active())
+    {
+        Record r(RecordRenderTarget);
+        r.word(guest);
+        r.word(index);
+        r.word(surface);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->SetRenderTarget(app, cpu, index, static_cast<Surface*>(lookup(surface)));
+        r.done(h);
+        return h;
+    }
     return device(guest)->SetRenderTarget(app, cpu, index, static_cast<Surface*>(lookup(surface)));
 }
 
@@ -1644,6 +1833,20 @@ HRESULT setDepthStencilSurface(WinApplication* app, x86::CPU& cpu, reg32 guest, 
     if (deferring(cpu))
         fallback();
     drain();
+    if (active())
+    {
+        Record r(RecordDepthStencilSurface);
+        r.word(guest);
+        r.word(surface);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        const HRESULT h = device(guest)->SetDepthStencilSurface(app, cpu, static_cast<Surface*>(lookup(surface)));
+        r.done(h);
+        return h;
+    }
     return device(guest)->SetDepthStencilSurface(app, cpu, static_cast<Surface*>(lookup(surface)));
 }
 
@@ -1673,6 +1876,33 @@ HRESULT drawFrameVertices(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD
     if (deferring(cpu))
         fallback();
     drain();
+    if (active() && s_capture->frameVertices)
+    {
+        Record r(RecordFrameVertices);
+        r.word(guest);
+        r.word(type);
+        r.word(minIndex);
+        r.word(vertices);
+        r.word(startIndex);
+        r.word(count);
+        r.word(bytes);
+        r.bytes(data, bytes);
+        if (r.replaying())
+        {
+            const Capture::Call* call = r.replay();
+            return call ? call->result : D3D_OK;
+        }
+        Device* d = device(guest);
+        void* frame = d->frameVertices(app, cpu, bytes);
+        if (cpu.terminate)
+            return D3D_OK;
+        if (frame)
+            memcpy(frame, data, bytes);
+        const HRESULT h = d->drawIndexedFrameVertices(app, cpu, type, minIndex, vertices, startIndex, count, frame);
+        refreshBindings();
+        r.done(h);
+        return h;
+    }
     Device* d = device(guest);
     void* frame = d->frameVertices(app, cpu, bytes);
     if (cpu.terminate)
@@ -2464,6 +2694,26 @@ HRESULT effectEnd(WinApplication* app, x86::CPU& cpu, reg32 guest)
         return h;
     }
     return effect::end(app, cpu, guest);
+}
+
+// ---- Descriptors ----
+
+bool surfaceDesc(WinApplication* app, x86::CPU& cpu, reg32 surface, DWORD* desc, HRESULT& result)
+{
+    Object* o = lookup(surface);
+    if (!o || !isKind(o, KindSurface))
+        return false;
+    result = static_cast<Surface*>(o)->GetDesc(app, cpu, reinterpret_cast<D3DSURFACE_DESC*>(desc));
+    return true;
+}
+
+bool textureLevelDesc(WinApplication* app, x86::CPU& cpu, reg32 texture, UINT level, DWORD* desc, HRESULT& result)
+{
+    Object* o = lookup(texture);
+    if (!o || !(isKind(o, KindTexture) || isKind(o, KindCubeTexture)))
+        return false;
+    result = static_cast<Texture*>(o)->GetLevelDesc(app, cpu, level, reinterpret_cast<D3DSURFACE_DESC*>(desc));
+    return true;
 }
 
 // ---- D3DX math ----

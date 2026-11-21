@@ -352,6 +352,8 @@ State Mapper::update(const PadSample& pad, uint64_t nowUs)
 
     // Hat 1 follows the right stick: the nearest of 8 directions past half deflection.
     const float rx = pad.sticks[2], ry = pad.sticks[3];
+    state.rightStick[0] = rx;
+    state.rightStick[1] = ry;
     state.rightPov = -1;
     if (rx * rx + ry * ry > s_rightHatThreshold * s_rightHatThreshold)
     {

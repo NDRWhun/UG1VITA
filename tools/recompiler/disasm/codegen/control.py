@@ -8,10 +8,12 @@ def _target(ctx, edge):
     kind = ctx.fn.branch[ctx.index]
     if kind[0] == 'label':
         jump = ['goto L_0x%08x;' % kind[1]]
-        if kind[1] <= ctx.ins.address and ctx.fn.program.preempt_loops:
+        program = ctx.fn.program
+        if kind[1] <= ctx.ins.address and program.preempt_loops:
             # A loop: preemption point, so a spin on state that a timer callback or a higher-priority thread
             # changes lets that thread take the execution lock.
-            jump.insert(0, 'app->allowPreemption(cpu);')
+            yield_ = 'allowPreemptionInLoop' if program.preempt_stub else 'allowPreemption'
+            jump.insert(0, 'app->%s(cpu);' % yield_)
         return jump
     if kind[0] == 'tail':
         return ctx.exit_sync(edge) + ['return %s(app, cpu);' % ctx.function_name(kind[1])]

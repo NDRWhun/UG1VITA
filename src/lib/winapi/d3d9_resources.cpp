@@ -552,6 +552,8 @@ Surface::~Surface()
 {
     if (m_role == RoleDepth && m_depth)
         gpu().release(m_depth);
+    if (m_role == RoleDepth && m_device)
+        m_device->forgetDepth(this);
 }
 
 void Surface::setContainer(Texture* texture, uint32_t face, uint32_t level)

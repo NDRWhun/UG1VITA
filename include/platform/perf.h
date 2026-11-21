@@ -236,6 +236,8 @@ inline void count(Count counter)
 void startCounting();
 // The count since the last take.
 uint32_t takeCount(Count counter);
+// The same without taking it.
+uint32_t peekCount(Count counter);
 
 // Main thread, before any other thread starts: sets the switches (timing log, hitch log) and logs start-up facts.
 void init(bool enabled, bool hitchLog);

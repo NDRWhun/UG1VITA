@@ -1253,6 +1253,29 @@ int boxState(const float mn[3], const float mx[3], reg32 view, double& compareA,
     return state;
 }
 
+bool findDrivableSection(x86::CPU& cpu)
+{
+    if (cpu.eax != RegionList)
+        return false;
+    struct Live
+    {
+        void st32(reg32 address, reg32 value) { rc::st32(address, value); }
+        void st8(reg32 address, reg8 value) { rc::st8(address, value); }
+    };
+    Overlay o;
+    X87 x87;
+    reg32 ecx = cpu.ecx, edx = cpu.edx;
+    const reg32 node = findRegion(o, rc::ld32(cpu.esp + 4), x87, ecx, edx);
+    Live live;
+    o.commit(live);
+    x87.apply(cpu);
+    cpu.eax = node;
+    cpu.ecx = ecx;
+    cpu.edx = edx;
+    cpu.esp += 8;
+    return true;
+}
+
 void getVisibleState(win32::WinApplication* app, x86::CPU& cpu)
 {
     const Settings& s = settings();

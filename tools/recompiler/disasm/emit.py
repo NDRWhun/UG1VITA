@@ -95,6 +95,10 @@ def write_entry(out, header, module, program, fn, name, qualifier, declare, app_
         out.write('void %s%s%s\n{\n    RC_NATIVE(0x%x, native::%s, %s_guest);\n}\n\n'
                   % (qualifier, name, parameters, fn.entry_address, name, name))
         name += '_guest'
+    if program.restrict_cpu:
+        # Guest memory and the host objects reached through app never hold the CPU: memory stores leave the cpu
+        # fields this function has read or written in registers.
+        parameters = '(%s* app, x86::CPU& __restrict cpu)' % app_type
     write_function(out, module, fn, 'void %s%s%s' % (qualifier, name, parameters), function_names)
 
 

@@ -25,7 +25,7 @@
     X(filter4_f) X(filter4_f_atest) X(clear_f) \
     X(filter1_f_bfcolor) X(filter1_f_bfalpha) X(filter1_f_bfscale) X(filter2_f_bfcolor) X(filter2_f_bfalpha) \
     X(filter2_f_bfscale) X(filter3_f_bfcolor) X(filter3_f_bfalpha) X(filter3_f_bfscale) X(filter4_f_bfcolor) \
-    X(filter4_f_bfalpha) X(filter4_f_bfscale) X(filter1_f_bfmask) X(world_half_f)
+    X(filter4_f_bfalpha) X(filter4_f_bfscale) X(filter1_f_bfmask) X(world_half_f)     X(ff_color_f_half) X(ff_color_f_atest_half) X(ff_tex_f_half) X(ff_tex_f_atest_half) X(ff_proj_f_half)     X(ff_proj_f_atest_half) X(world_f_half) X(world_f_atest_half) X(world_proj_f_half) X(world_proj_f_atest_half)     X(worldheadlight_f_half) X(worldheadlight_f_atest_half) X(worldreflect_f_half) X(worldreflect_f_atest_half)     X(worldheadlightreflect_f_half) X(worldheadlightreflect_f_atest_half) X(car_f_half) X(car_f_atest_half)     X(filter1_f_half) X(filter1_f_atest_half) X(filter2_f_half) X(filter2_f_atest_half) X(filter3_f_half)     X(filter3_f_atest_half) X(filter4_f_half) X(filter4_f_atest_half)     X(filter1_f_bfcolor_half) X(filter1_f_bfalpha_half) X(filter1_f_bfscale_half) X(filter2_f_bfcolor_half)     X(filter2_f_bfalpha_half) X(filter2_f_bfscale_half) X(filter3_f_bfcolor_half) X(filter3_f_bfalpha_half)     X(filter3_f_bfscale_half) X(filter4_f_bfcolor_half) X(filter4_f_bfalpha_half) X(filter4_f_bfscale_half)     X(filter1_f_bfmask_half)
 
 extern "C" {
 #define NFSU_DECLARE_SHADER(name) extern const unsigned char shader_##name[];
@@ -433,6 +433,7 @@ const uint32_t SceneLogAverageFrames = 300;
 struct SceneLogScene
 {
     uint16_t width, height, draws, blended, alphaTested;
+    uint8_t samples;                            // 1, or the msaa sample count
     char program[20];                           // fragment program of the first draw that is not a clear
 };
 
@@ -509,8 +510,9 @@ int sceneLogEntry(void*)
                 for (uint32_t k = 0; k < f.count && n < int(sizeof(line)) - 80; ++k)
                 {
                     const SceneLogScene& s = f.scenes[k];
-                    n += snprintf(line + n, sizeof(line) - n, " %u %ux%u %s %u/%u/%u %.2f", k, s.width, s.height,
-                                  s.program, s.draws, s.blended, s.alphaTested, ms[k]);
+                    n += snprintf(line + n, sizeof(line) - n, " %u %ux%u%s %s %u/%u/%u %.2f", k, s.width, s.height,
+                                  s.samples == 4 ? "/4x" : s.samples == 2 ? "/2x" : "", s.program, s.draws, s.blended,
+                                  s.alphaTested, ms[k]);
                 }
                 logInfo("%s", line);
             }
@@ -520,7 +522,9 @@ int sceneLogEntry(void*)
                 int n = snprintf(line, sizeof(line), "gxm: scene log average of %u frames, scene WxH 3D ms:",
                                  SceneLogAverageFrames);
                 for (uint32_t k = 0; k < f.count && n < int(sizeof(line)) - 40; ++k)
-                    n += snprintf(line + n, sizeof(line) - n, " %u %ux%u %.2f", k, f.scenes[k].width, f.scenes[k].height,
+                    n += snprintf(line + n, sizeof(line) - n, " %u %ux%u%s %.2f", k, f.scenes[k].width,
+                                  f.scenes[k].height,
+                                  f.scenes[k].samples == 4 ? "/4x" : f.scenes[k].samples == 2 ? "/2x" : "",
                                   sums[k] / SceneLogAverageFrames);
                 logInfo("%s", line);
                 memset(sums, 0, sizeof(sums));
@@ -590,6 +594,12 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
             p.fields.push_back(sceGxmProgramFindParameterByName(p.program, info.fields[i].name));
         p.uniformBytes = uniformBytes(p.program, info.fields, p.fields);
     }
+    // shader_precision=half: the effect and fixed-function fragment programs with half-precision colours (the
+    // _half builds; same uniforms and texture units).
+    static const char* const ShaderPrecisions[] = { "half", "full" };
+    const bool shaderHalf = Config::getChoice("shader_precision", ShaderPrecisions, 2, 0) == 0;
+    logInfo("gxm: effect and fixed-function fragment programs in %s precision (shader_precision=%s)",
+            shaderHalf ? "half" : "full", shaderHalf ? "half" : "full");
     for (int f = 0; f < render::FpCount; ++f)
     {
         const render::FragmentProgramInfo& info = render::fragmentProgram(render::FragmentProgram(f));
@@ -611,8 +621,9 @@ bool FrameRenderer::init(SceGxmContext* context, SceGxmShaderPatcher* patcher, v
                 continue;
             }
             char name[64];
-            snprintf(name, sizeof(name), "%s%s", info.name,
-                     v == 1 ? "_atest" : render::factorSuffix(render::FactorOutput(v >= 2 ? v - 1 : 0)));
+            snprintf(name, sizeof(name), "%s%s%s", info.name,
+                     v == 1 ? "_atest" : render::factorSuffix(render::FactorOutput(v >= 2 ? v - 1 : 0)),
+                     shaderHalf && f != render::FpClear ? "_half" : "");
             FragmentProgram& p = m_fragmentPrograms[f][v];
             p.owned = true;
             p.program = registerProgram(name, &p.id);
@@ -788,6 +799,7 @@ render::Frame* FrameRenderer::beginFrame(uint32_t width, uint32_t height)
     f.commands = nullptr;
     f.commandCount = 0;
     f.uploads = false;
+    f.msaaSamples = 1;
     return &f;
 }
 
@@ -1103,14 +1115,17 @@ void FrameRenderer::settle(const Texture* texture)
     }
 }
 
-render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height)
+render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height, uint32_t samples)
 {
     const uint32_t w = alignUp(width, SCE_GXM_TILE_SIZEX), h = alignUp(height, SCE_GXM_TILE_SIZEY);
+    samples = samples == 4 ? 4 : samples == 2 ? 2 : 1;
     Depth* d = new Depth();
     d->width = uint16_t(width);
     d->height = uint16_t(height);
-    // Depth plane only, no stencil plane.
-    d->data = m_textureHeap->allocate(w * h * 4, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
+    // Depth plane only, no stencil plane; with msaa a value per sample: 2x doubles the rows, 4x the rows and the row
+    // length.
+    const uint32_t bytes = w * h * 4 * samples;
+    d->data = m_textureHeap->allocate(bytes, SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT);
     d->stencil = nullptr;
     if (!d->data)
     {
@@ -1119,6 +1134,19 @@ render::DepthStorage* FrameRenderer::createDepth(uint32_t width, uint32_t height
     }
     sceGxmDepthStencilSurfaceInit(&d->surface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M, SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,
                                   w, d->data, nullptr);
+    if (samples > 1)
+    {
+        d->samples = uint8_t(samples);
+        sceGxmDepthStencilSurfaceInit(&d->msaaSurface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M,
+                                      SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, samples == 4 ? w * 2 : w, d->data,
+                                      nullptr);
+        if (m_depthLogs < 16)
+        {
+            ++m_depthLogs;
+            logInfo("gxm: depth %ux%u for msaa %ux: %u bytes (%u without msaa)", unsigned(width), unsigned(height),
+                    unsigned(samples), unsigned(bytes), unsigned(w * h * 4));
+        }
+    }
     return d;
 }
 
@@ -1155,9 +1183,10 @@ bool FrameRenderer::presentScene(const render::Frame& frame) const
     return true;
 }
 
-SceGxmRenderTarget* FrameRenderer::renderTarget(uint32_t width, uint32_t height)
+SceGxmRenderTarget* FrameRenderer::renderTarget(uint32_t width, uint32_t height, bool msaa)
 {
-    const uint32_t key = width << 16 | height;
+    // Key: width << 16 | height, the multisample mode (of the frame being drawn) in bits 30 and 31.
+    const uint32_t key = width << 16 | height | (msaa ? uint32_t(m_msaa) << 30 : 0);
     auto it = m_targets.find(key);
     if (it != m_targets.end())
         return it->second;
@@ -1166,12 +1195,21 @@ SceGxmRenderTarget* FrameRenderer::renderTarget(uint32_t width, uint32_t height)
     params.width = uint16_t(width);
     params.height = uint16_t(height);
     params.scenesPerFrame = 8;
-    params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+    params.multisampleMode = msaa ? m_msaa : SCE_GXM_MULTISAMPLE_NONE;
     params.driverMemBlock = -1;
     SceGxmRenderTarget* target = nullptr;
     const int result = sceGxmCreateRenderTarget(&params, &target);
     if (result < 0)
-        fatal("sceGxmCreateRenderTarget(%ux%u) failed: 0x%08x", width, height, result);
+        fatal("sceGxmCreateRenderTarget(%ux%u%s) failed: 0x%08x", width, height, msaa ? ", msaa" : "", result);
+    if (msaa)
+    {
+        unsigned int driverBytes = 0, plainBytes = 0;
+        sceGxmGetRenderTargetMemSize(&params, &driverBytes);
+        params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+        sceGxmGetRenderTargetMemSize(&params, &plainBytes);
+        logInfo("gxm: render target %ux%u msaa %ux: driver memory %u bytes (%u without msaa)", width, height,
+                unsigned(m_msaaSamples), driverBytes, plainBytes);
+    }
     m_targets[key] = target;
     return target;
 }
@@ -1238,14 +1276,14 @@ const FrameRenderer::VertexEntry* FrameRenderer::vertexProgram(uint8_t program, 
     return &entry;
 }
 
-// Fragment program cache key: the programs, the variant, blending, the colour mask and world_half_f in place of the
-// program.
+// Fragment program cache key: the programs, the variant, blending, the colour mask, world_half_f in place of the
+// program and the multisample mode.
 static uint64_t fragmentKey(uint8_t vertexProgram, uint8_t fragmentProgram, uint32_t variant, bool blend, uint8_t mask,
-                            uint8_t srcBlend, uint8_t dstBlend, bool half)
+                            uint8_t srcBlend, uint8_t dstBlend, bool half, uint32_t multisample)
 {
     return uint64_t(vertexProgram) | uint64_t(fragmentProgram) << 8 | uint64_t(variant) << 16 | uint64_t(blend) << 19
          | uint64_t(mask) << 20 | (blend ? uint64_t(srcBlend) << 24 | uint64_t(dstBlend) << 32 : 0)
-         | uint64_t(half) << 40;
+         | uint64_t(half) << 40 | uint64_t(multisample & 3) << 41;
 }
 
 // particle_precision=half: a depth-tested world_f draw without alpha test, blended SRCALPHA/INVSRCALPHA (or
@@ -1256,11 +1294,11 @@ bool FrameRenderer::halfPrecision(const render::DrawState& state) const
         && variant(state) == 0 && ((state.srcBlend == 5 && state.dstBlend == 6) || state.srcBlend == 12);
 }
 
-const FrameRenderer::FragmentEntry* FrameRenderer::fragmentProgram(const render::DrawState& state)
+const FrameRenderer::FragmentEntry* FrameRenderer::fragmentProgram(const render::DrawState& state, bool msaa)
 {
     const uint64_t key = fragmentKey(state.vertexProgram, state.fragmentProgram, variant(state),
                                      state.blendEnable != 0, state.colorMask, state.srcBlend, state.dstBlend,
-                                     halfPrecision(state));
+                                     halfPrecision(state), msaa ? uint32_t(m_msaa) : 0);
     auto it = m_fragmentCache.find(key);
     if (it != m_fragmentCache.end())
         return &it->second;
@@ -1297,13 +1335,14 @@ const FrameRenderer::FragmentEntry* FrameRenderer::createFragment(uint64_t key)
     info.alphaDst = alphaFactor(colorDst);
     const bool plain = !blend && mask == 0xf;
     const bool half = (key >> 40) & 1;
+    const SceGxmMultisampleMode multisample = SceGxmMultisampleMode((key >> 41) & 3);
     const SceGxmProgram* vertex = m_vertexPrograms[vertexProgram < render::VpCount ? vertexProgram : 0].program;
     SceGxmFragmentProgram* result = nullptr;
     const bool timed = perf::hitch() && !m_loadingPrograms;
     const uint32_t start = timed ? perf::now() : 0;
     const int error = sceGxmShaderPatcherCreateFragmentProgram(m_patcher, half ? m_worldHalf : p.id,
                                                                SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
-                                                               SCE_GXM_MULTISAMPLE_NONE, plain ? nullptr : &info,
+                                                               multisample, plain ? nullptr : &info,
                                                                vertex, &result);
     if (timed)
     {
@@ -1385,10 +1424,14 @@ uint32_t FrameRenderer::loadPrograms(const char* path)
         const uint32_t v = uint32_t(key >> 16) & 7;
         const bool blend = (key >> 19) & 1;
         const uint8_t mask = blend ? uint8_t(key >> 20) & 0xf : uint8_t(key >> 20);
-        // world_half_f entries only with particle_precision=half.
+        // world_half_f entries only with particle_precision=half; multisampled ones of the 2x and 4x modes (the mode
+        // can change at run time).
         const bool half = (key >> 40) & 1;
+        const uint32_t multisample = uint32_t(key >> 41) & 3;
         if (vertex >= render::VpCount || fragment >= render::FpCount || v >= Variants || (half && !m_worldHalf)
-            || fragmentKey(vertex, fragment, v, blend, mask, uint8_t(key >> 24), uint8_t(key >> 32), half) != key
+            || multisample > uint32_t(SCE_GXM_MULTISAMPLE_4X)
+            || fragmentKey(vertex, fragment, v, blend, mask, uint8_t(key >> 24), uint8_t(key >> 32), half,
+                           multisample) != key
             || m_fragmentCache.find(key) != m_fragmentCache.end())
             continue;
         createFragment(key);
@@ -1452,12 +1495,28 @@ bool FrameRenderer::finished(void* self, uint32_t frameIndex)
 void FrameRenderer::preparePrograms(const render::Frame& frame)
 {
     m_programs.resize(frame.drawCount);
+    // The draws of msaa scenes, and the colour clears carried to one of them, use programs of the msaa mode.
+    bool msaa = false;
+    for (uint32_t i = 0; i < frame.sceneCount && !msaa; ++i)
+        msaa = m_plan[i].msaa;
+    if (msaa)
+    {
+        m_drawMsaa.assign(frame.drawCount, 0);
+        for (uint32_t i = 0; i < frame.sceneCount; ++i)
+        {
+            const render::Scene& scene = frame.scenes[i];
+            if (m_plan[m_plan[i].skipped ? m_plan[i].carriedTo : i].msaa)
+                memset(m_drawMsaa.data() + scene.firstDraw, 1, scene.drawCount);
+        }
+    }
     DrawPrograms last = { nullptr, nullptr };
     const render::DrawState* previous = nullptr;
+    bool previousMsaa = false;
     for (uint32_t i = 0; i < frame.drawCount; ++i)
     {
         prefetchDraw(&frame.draws[i + 4]);
         const render::DrawState& s = frame.draws[i].state;
+        const bool drawMsaa = msaa && m_drawMsaa[i];
         if (!frame.draws[i].count)
         {
             m_programs[i] = DrawPrograms{ nullptr, nullptr };
@@ -1470,10 +1529,11 @@ void FrameRenderer::preparePrograms(const render::Frame& frame)
             || s.alphaTest != previous->alphaTest || s.factorOutput != previous->factorOutput
             || s.blendEnable != previous->blendEnable || s.srcBlend != previous->srcBlend
             || s.dstBlend != previous->dstBlend || s.colorMask != previous->colorMask
-            || (m_particleHalf && s.depthEnable != previous->depthEnable))
-            last.fragment = fragmentProgram(s);
+            || (m_particleHalf && s.depthEnable != previous->depthEnable) || drawMsaa != previousMsaa)
+            last.fragment = fragmentProgram(s, drawMsaa);
         m_programs[i] = last;
         previous = &s;
+        previousMsaa = drawMsaa;
     }
 }
 
@@ -1782,6 +1842,76 @@ void FrameRenderer::planFrame(const render::Frame& frame, bool stretchDirect)
             m_plan[i].carriedTo = m_plan[m_plan[i].carriedTo].carriedTo;
     }
 
+    // Setting msaa (the frame's mode, Frame::msaaSamples): a scene drawing with depth into a 2D target of the back
+    // buffer's size is multisampled when its depth holds the mode's samples. A depth continued by a later scene keeps
+    // its sample layout, so both scenes are multisampled or neither is.
+    m_msaaSamples = frame.msaaSamples == 4 ? 4 : frame.msaaSamples == 2 ? 2 : 1;
+    m_msaa = m_msaaSamples == 4 ? SCE_GXM_MULTISAMPLE_4X
+           : m_msaaSamples == 2 ? SCE_GXM_MULTISAMPLE_2X : SCE_GXM_MULTISAMPLE_NONE;
+    if (m_msaaSamples != m_msaaModeShown)
+    {
+        if (m_msaaSamples > 1)
+            logInfo("gxm: msaa %ux from frame %u: scenes drawing with depth into a 2D target of the back buffer's size "
+                    "are multisampled, colour downscaled when stored", unsigned(m_msaaSamples), unsigned(frame.index));
+        else
+            logInfo("gxm: msaa off from frame %u", unsigned(frame.index));
+        m_msaaModeShown = m_msaaSamples;
+        m_msaaShown = ~0u;
+        m_msaaFailed = false;
+    }
+    const auto nextDepthScene = [&](uint32_t i) {
+        uint32_t j = i + 1;
+        while (j < frame.sceneCount
+               && (frame.scenes[j].target.depth != frame.scenes[i].target.depth || !m_plan[j].depthUsed))
+            ++j;
+        return j;
+    };
+    uint32_t msaaScenes = 0, msaaStores = 0;
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        const render::Scene& scene = frame.scenes[i];
+        const render::TextureStorage* color = scene.target.color;
+        const Depth* depth = static_cast<const Depth*>(scene.target.depth);
+        m_plan[i].msaa = m_msaaSamples > 1 && !m_msaaFailed && m_plan[i].depthUsed && color && color->desc.target
+                      && !color->desc.cube && scene.width == frame.width && scene.height == frame.height
+                      && depth->samples == m_msaaSamples && depth->width >= scene.width && depth->height >= scene.height;
+        m_plan[i].storesDepth = false;
+    }
+    for (bool changed = m_msaaSamples > 1; changed;)
+    {
+        changed = false;
+        for (uint32_t i = 0; i < frame.sceneCount; ++i)
+        {
+            if (!m_plan[i].depthUsed)
+                continue;
+            const uint32_t j = nextDepthScene(i);
+            if (j < frame.sceneCount && !frame.scenes[j].depthCleared && m_plan[i].msaa != m_plan[j].msaa)
+            {
+                m_plan[i].msaa = m_plan[j].msaa = false;
+                changed = true;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < frame.sceneCount; ++i)
+    {
+        if (!m_plan[i].depthUsed)
+            continue;
+        const uint32_t j = nextDepthScene(i);
+        m_plan[i].storesDepth = j < frame.sceneCount && !frame.scenes[j].depthCleared;
+        msaaScenes += m_plan[i].msaa;
+        msaaStores += m_plan[i].msaa && m_plan[i].storesDepth;
+    }
+    // The first 16 changes of the number of msaa scenes and of those storing depth, in the log.
+    const uint32_t msaaShown = msaaScenes << 16 | msaaStores;
+    if (m_msaaSamples > 1 && msaaShown != m_msaaShown && m_msaaLogs < 16)
+    {
+        ++m_msaaLogs;
+        logInfo("gxm: msaa %ux: %u of %u scenes multisampled (back buffer %ux%u), %u of them store depth for a later "
+                "scene", unsigned(m_msaaSamples), unsigned(msaaScenes), unsigned(frame.sceneCount),
+                unsigned(frame.width), unsigned(frame.height), unsigned(msaaStores));
+    }
+    m_msaaShown = msaaShown;
+
     // A stretched back buffer whose scenes need no depth is drawn to the display at its resolution: no offscreen
     // store and no scaling pass.
     Slot& slot = m_slots[frame.index % Slots];
@@ -1798,6 +1928,17 @@ void FrameRenderer::planFrame(const render::Frame& frame, bool stretchDirect)
         }
         slot.direct = any && !depth;
     }
+    // The first 16 changes of the back buffer size or of where it is drawn, in the log.
+    const uint32_t size = uint32_t(frame.width) << 16 | frame.height;
+    if ((size != m_shownSize || slot.direct != m_shownDirect) && m_shownLogs < 16)
+    {
+        ++m_shownLogs;
+        logInfo("gxm: back buffer %ux%u drawn %s", unsigned(frame.width), unsigned(frame.height),
+                !slot.direct ? "offscreen, scaled to the display when shown"
+                : frame.width == 960 && frame.height == 544 ? "to the display" : "to the display, scaled per draw");
+    }
+    m_shownSize = size;
+    m_shownDirect = slot.direct;
 }
 
 namespace
@@ -1989,6 +2130,12 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
         {
             const Texture* t = static_cast<const Texture*>(scene.target.color);
             p.color = &t->surfaces[scene.target.face < 6 ? scene.target.face : 0];
+            if (p.msaa)
+            {
+                p.msaaColor = t->surfaces[0];
+                sceGxmColorSurfaceSetScaleMode(&p.msaaColor, SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE);
+                p.color = &p.msaaColor;
+            }
         }
         else if (slot.direct)
         {
@@ -2067,6 +2214,7 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
             s.width = uint16_t(p.width);
             s.height = uint16_t(p.height);
             s.draws = uint16_t(p.orderCount);
+            s.samples = uint8_t(p.msaa ? m_msaaSamples : 1);
             for (uint32_t n = 0; n < p.orderCount; ++n)
             {
                 const render::DrawState& st = frame.draws[m_order[p.firstOrder + n]].state;
@@ -2084,26 +2232,25 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
         const Depth* d = m_plan[i].depthUsed ? static_cast<const Depth*>(scene.target.depth) : nullptr;
         if (d)
         {
-            depth = d->surface;
+            depth = p.msaa ? d->msaaSurface : d->surface;
             if (scene.depthCleared)
                 sceGxmDepthStencilSurfaceSetBackgroundDepth(&depth, scene.clearDepth);
             sceGxmDepthStencilSurfaceSetForceLoadMode(&depth, scene.depthCleared ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED
                                                                                  : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
             // Stored only when the next scene of the frame using this depth continues with it.
-            bool store = false;
-            for (uint32_t j = i + 1; j < frame.sceneCount; ++j)
-            {
-                if (frame.scenes[j].target.depth == scene.target.depth && m_plan[j].depthUsed)
-                {
-                    store = !frame.scenes[j].depthCleared;
-                    break;
-                }
-            }
-            sceGxmDepthStencilSurfaceSetForceStoreMode(&depth, store ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED
-                                                                     : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
+            sceGxmDepthStencilSurfaceSetForceStoreMode(&depth, p.storesDepth
+                                                                   ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED
+                                                                   : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
         }
-        sceGxmBeginScene(m_context, 0, renderTarget(p.width, p.height), nullptr, nullptr, p.sync, p.color,
-                         d ? &depth : nullptr);
+        const int begun = sceGxmBeginScene(m_context, 0, renderTarget(p.width, p.height, p.msaa), nullptr, nullptr,
+                                           p.sync, p.color, d ? &depth : nullptr);
+        // A multisampled scene the GPU refuses turns msaa off from the next frame on, until the mode changes.
+        if (begun < 0 && p.msaa && !m_msaaFailed)
+        {
+            m_msaaFailed = true;
+            logError("gxm: sceGxmBeginScene of a %ux%u msaa scene failed: 0x%08x; msaa off from the next frame until "
+                     "the mode changes", unsigned(p.width), unsigned(p.height), begun);
+        }
         bool recorded = lists && p.jobCount;
         for (uint32_t j = 0; j < p.jobCount && recorded; ++j)
         {

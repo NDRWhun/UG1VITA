@@ -1,8 +1,10 @@
 // Fixed function stage 0: vertex colour (the non-texture factors) times the texel where uTextureMask is 1, scaled,
 // plus the texel where uAddMask is 1. TEX samples the texture, PROJ divides the coordinates by z first.
 
-float4 main(
-    float4 vColor : COLOR0,
+#include "precision.h"
+
+colour4 main(
+    colour4 vColor : COLOR0,
     float3 vTex0 : TEXCOORD0,
     uniform sampler2D uTex0,
     uniform float4 uTextureMask,
@@ -11,14 +13,14 @@ float4 main(
     uniform float4 uAlphaTest) : COLOR
 {
 #if defined(PROJ)
-    float4 t = tex2Dproj(uTex0, vTex0);
+    colour4 t = tex2Dproj<colour4>(uTex0, vTex0);
 #elif defined(TEX)
-    float4 t = tex2D(uTex0, vTex0.xy);
+    colour4 t = tex2D<colour4>(uTex0, vTex0.xy);
 #endif
 #if defined(PROJ) || defined(TEX)
-    float4 c = lerp(float4(1.0), t, uTextureMask) * vColor * uScale + t * uAddMask;
+    colour4 c = lerp(colour4(1.0), t, (colour4)uTextureMask) * vColor * (colour4)uScale + t * (colour4)uAddMask;
 #else
-    float4 c = vColor * uScale;
+    colour4 c = vColor * (colour4)uScale;
 #endif
 #ifdef ATEST
     if (uAlphaTest.x * saturate(c.a) < uAlphaTest.y)

@@ -769,10 +769,10 @@ void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
     // A stretched back buffer without gamma can be drawn to the display directly.
     const Rect box = Device::windowRect(frame.width, frame.height);
     const bool stretched = box.x0 == 0 && box.y0 == 0 && box.x1 == DisplayWidth && box.y1 == DisplayHeight;
-    // A frame at the display's size is drawn into the display buffer, which keeps what an earlier frame left. The
-    // game's frames without depth (movies, loading and other 2D-only screens) cover the 4:3 part only: the display
-    // buffer is cleared black first.
-    if (frame.width == DisplayWidth && frame.height == DisplayHeight && !usesDepth(frame))
+    // A frame at the display's size, or a stretched one without depth, is drawn into the display buffer, which keeps
+    // what an earlier frame left. The game's frames without depth (movies, loading and other 2D-only screens) cover
+    // the 4:3 part only: the display buffer is cleared black first.
+    if (((frame.width == DisplayWidth && frame.height == DisplayHeight) || stretched) && !usesDepth(frame))
     {
         sceGxmBeginScene(context, 0, displayTarget, nullptr, nullptr, displaySync[backBuffer], &displaySurface[backBuffer],
                          nullptr);
@@ -812,7 +812,9 @@ void Device::Impl::presentFrame(const render::Frame& frame, uint32_t frameIndex)
         void* uniforms = nullptr;
         sceGxmReserveFragmentDefaultUniformBuffer(context, &uniforms);
         sceGxmSetUniformDataF(uniforms, clearColorParam, 0, 4, black);
-        drawQuad(Rect{ 0, 0, DisplayWidth, DisplayHeight }, 0, 0, 0, 0, nullptr, false);
+        // An offscreen back buffer stretched over the display covers it: no black first.
+        if (!drawn.offscreen || !stretched)
+            drawQuad(Rect{ 0, 0, DisplayWidth, DisplayHeight }, 0, 0, 0, 0, nullptr, false);
         if (drawn.offscreen)
         {
             blitPrograms();
@@ -1090,9 +1092,9 @@ void Device::waitUpload(uint32_t ticket)
     m_impl->frames.waitUpload(ticket);
 }
 
-render::DepthStorage* Device::createDepth(uint32_t width, uint32_t height)
+render::DepthStorage* Device::createDepth(uint32_t width, uint32_t height, uint32_t samples)
 {
-    return m_impl->frames.createDepth(width, height);
+    return m_impl->frames.createDepth(width, height, samples);
 }
 
 render::BufferStorage* Device::createBuffer(uint32_t size)

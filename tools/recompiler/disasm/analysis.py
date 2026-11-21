@@ -205,8 +205,10 @@ class Function:
                 codegen.generate(ctx, ins)
             e = ctx.effects
             self.effects[i] = e
-            # A partial register write merges into the register's current value: it reads it.
-            self.use[i] = e.flag_use | e.flag_sync | (e.reg_use | e.reg_partial) << REG_SHIFT
+            # A partial register write merges into the register's current value: it reads it where the register is
+            # live after it, which liveness gets from the write not killing it.
+            partial = e.reg_partial if self.program.partial_reads else 0
+            self.use[i] = e.flag_use | e.flag_sync | (e.reg_use | partial) << REG_SHIFT
             self.kill[i] = e.flag_def | e.reg_def << REG_SHIFT
             eflags = getattr(ins, 'eflags', 0) if self.branch[i][0] != 'skip' else 0
             for f, sets in X86_SETS.items():
@@ -755,10 +757,22 @@ class Program:
     def __init__(self, modules, thread_segments, skip_instructions, function_names, flags_preserved=(), not_code=(),
                  native_overrides=(), local_registers=True, memory_functions=(), local_x87=True, setjmp=None,
                  longjmp_jumps=None, fpu_check=False, fpu_deltas=None, preempt_loops=False, address_taken=None,
-                 abi_flags=False, jump_targets=None, flag_audit=False):
+                 abi_flags=False, jump_targets=None, flag_audit=False, partial_reads=False, fold_constants=True,
+                 mutable_constants=(), restrict_cpu=True, preempt_stub=True):
         self.functions = {}
+        # A partial register write reads the register (else only where the register is live after it, the only
+        # place where the merged bits are used).
+        self.partial_reads = partial_reads
+        # x87 operands at fixed addresses in read-only sections become constants, except in mutable_constants
+        # ((address, length) ranges the runtime or the patches write).
+        self.fold_constants = fold_constants
+        self.mutable_constants = list(mutable_constants)
+        # Translated functions take cpu as a restrict reference.
+        self.restrict_cpu = restrict_cpu
         # Backward jumps are preemption points (WinApplication::allowPreemption).
         self.preempt_loops = preempt_loops
+        # Loop preemption points call the yield through a stub that keeps every register.
+        self.preempt_stub = preempt_stub
         # Check the x87 depth after every call with a known result depth (diagnostic builds).
         self.fpu_check = fpu_check
         # Declared net x87 pushes of functions whose exits the analysis cannot follow.

@@ -47,6 +47,8 @@ std::atomic<bool> s_dumping{false};
 
 // bridge::setMotionBlurEnhanced: taken by each frame when it is opened.
 bool s_motionBlurEnhanced = false;
+// bridge::setMsaaSamples: taken by each frame when it is opened (Device::applyMsaa).
+std::atomic<uint32_t> s_msaaSamples{1};
 
 bool dumpThisFrame(uint32_t index)
 {
@@ -199,7 +201,8 @@ void Device::resetBackBuffer(const D3DPRESENT_PARAMETERS& params)
     if (m_params.EnableAutoDepthStencil)
     {
         m_autoDepth = new Surface(this, Surface::RoleDepth, w, h, m_params.AutoDepthStencilFormat);
-        m_autoDepth->setDepth(gpu().createDepth(w, h));
+        m_autoDepth->setDepth(gpu().createDepth(w, h, m_msaaSamples));
+        m_depthSurfaces.push_back(m_autoDepth);
         publish(m_app, m_autoDepth);
     }
     pf::logInfo("d3d9: back buffer %ux%u%s", w, h, m_autoDepth ? " with depth" : "");
@@ -270,6 +273,8 @@ render::Frame* Device::frame(WinApplication* app, x86::CPU& cpu)
             pf::perf::event(pf::perf::EventSlotWaitUs, pf::perf::now() - start);
         m_sceneOpen = false;
         m_frameFull = false;
+        applyMsaa();
+        m_frame->msaaSamples = uint8_t(m_msaaSamples);
         m_stream = &frameStream(m_frame->index);
         m_motionBlurEnhanced = s_motionBlurEnhanced;
         m_stream->motionBlurEnhanced = m_motionBlurEnhanced;
@@ -295,6 +300,49 @@ void setMotionBlurEnhanced(bool on)
     s_motionBlurEnhanced = on;
 }
 
+void setMsaaSamples(uint32_t samples)
+{
+    s_msaaSamples = samples == 4 ? 4 : samples == 2 ? 2 : 1;
+}
+
+}
+
+void Device::applyMsaa()
+{
+    const uint32_t samples = s_msaaSamples;
+    if (samples == m_msaaSamples)
+        return;
+    uint32_t replaced = 0, kept = 0;
+    for (Surface* s : m_depthSurfaces)
+    {
+        render::DepthStorage* depth = gpu().createDepth(s->width(), s->height(), samples);
+        if (!depth)
+        {
+            ++kept;
+            continue;
+        }
+        // Frames recorded before this one keep the old depth; it is freed once they are finished.
+        gpu().release(s->depth());
+        s->setDepth(depth);
+        ++replaced;
+    }
+    pf::logInfo("d3d9: msaa %s from frame %u: %u depth surfaces replaced for it%s", samples == 1 ? "off"
+                : samples == 2 ? "2x" : "4x", m_frame->index, unsigned(replaced),
+                kept ? ", some kept (no GPU memory): their scenes stay 1x" : "");
+    m_msaaSamples = samples;
+}
+
+void Device::forgetDepth(Surface* surface)
+{
+    for (size_t i = 0; i < m_depthSurfaces.size(); ++i)
+    {
+        if (m_depthSurfaces[i] == surface)
+        {
+            m_depthSurfaces[i] = m_depthSurfaces.back();
+            m_depthSurfaces.pop_back();
+            return;
+        }
+    }
 }
 
 // Hands the recorded frame to the device.
@@ -876,11 +924,12 @@ HRESULT Device::CreateDepthStencilSurface(WinApplication* app, x86::CPU& cpu, UI
     RC_USE(sharedHandle);
     if (!surface || !width || !height)
         return D3DERR_INVALIDCALL;
-    render::DepthStorage* depth = gpu().createDepth(width, height);
+    render::DepthStorage* depth = gpu().createDepth(width, height, m_msaaSamples);
     if (!depth)
         return D3DERR_OUTOFVIDEOMEMORY;
     Surface* s = new Surface(this, Surface::RoleDepth, width, height, format);
     s->setDepth(depth);
+    m_depthSurfaces.push_back(s);
     *surface = publish(app, s);
     return D3D_OK;
 }
@@ -1405,11 +1454,15 @@ HRESULT Device::drawIndexedFrameVertices(WinApplication* app, x86::CPU& cpu, DWO
 
 // The motion blur draws three quads into the half-size targets (the downsample of the scene, then two zoom passes:
 // tap i samples i zoom steps away in the first, 4 i in the second) and composites onto the scene with the next quad.
-// Every tap moves by half a target pixel, so that the target's pixel centres sample texel centres. The composite's
-// texture coordinate 1 is the blur's extent over its 16 steps at that pixel, in MaskPixels.
+// Every tap moves by half a target pixel, so that the target's pixel centres sample texel centres. The composite
+// (FactorAlphaMask) covers nothing within SharpRadius half screen heights of the zoom centre and the full blend at
+// FullRadius and beyond, smoothly in between; the game's blend factor (min(1.5 x its blur amount, 1), which follows
+// the camera speed) scales it from 0 at FactorStart to 1 at FactorFull.
 void Device::motionBlurQuad(float* v)
 {
-    const float MaskPixels = 8.0f;
+    const float SharpRadius = 0.4f, FullRadius = 1.6f;
+    const float FactorStart = 0.15f, FactorFull = 0.75f;
+    const float CentreRange = 0.15f;    // the zoom centre stays within this of the screen centre (texture units)
     const D3DVIEWPORT9& vp = m_state.viewport;
     const bool half = vp.Width * 2 == m_params.BackBufferWidth && vp.Height * 2 == m_params.BackBufferHeight;
     if (!half && m_blurPasses != 3)
@@ -1452,15 +1505,28 @@ void Device::motionBlurQuad(float* v)
     }
     if (half)
         return;
-    // A tap i samples i (-s0 + u (s0 - s2)) away in u at screen position u, likewise in v.
+    // A tap i samples i (-s0 + u (s0 - s2)) away in u at screen position u, likewise in v: the zoom is centred where
+    // that offset is 0, u = s0 / (s0 - s2) (the point the camera moves towards), kept near the screen centre.
     const float* s = m_blurStep;
-    const float scaleU = 15.0f * float(vp.Width) / MaskPixels, scaleV = 15.0f * float(vp.Height) / MaskPixels;
+    const auto centre = [=](float a, float b) {
+        const float d = a - b;
+        const float c = std::fabs(d) > 1e-6f ? a / d : 0.5f;
+        return std::min(std::max(c, 0.5f - CentreRange), 0.5f + CentreRange);
+    };
+    const float cu = centre(s[0], s[2]), cv = centre(s[1], s[3]);
+    // Texture coordinate 1: the offset from the centre in half screen heights; 2: the mask's start radius and
+    // 1 / its width; 3: the blend factor where the blur starts and 1 / the range up to full strength.
+    const float aspect = float(vp.Width) / float(vp.Height);
     for (int i = 0; i < 4; ++i)
     {
         float* p = v + 12 * i;
         const float u = p[0] < 0.0f ? 0.0f : 1.0f, w = p[1] > 0.0f ? 0.0f : 1.0f;
-        p[6] = scaleU * (-s[0] + u * (s[0] - s[2]));
-        p[7] = scaleV * (-s[1] + w * (s[1] - s[3]));
+        p[6] = 2.0f * aspect * (u - cu);
+        p[7] = 2.0f * (w - cv);
+        p[8] = SharpRadius;
+        p[9] = 1.0f / (FullRadius - SharpRadius);
+        p[10] = FactorStart;
+        p[11] = 1.0f / (FactorFull - FactorStart);
     }
 }
 

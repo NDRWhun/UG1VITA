@@ -803,6 +803,8 @@ public:
     void effectTextureApplied(uint32_t stage)   { m_deviceSamplers &= ~(uint32_t(DeviceTexture) << (stage * 8)); }
     // The stream of the frame being recorded; null between frames.
     Stream* stream() const                      { return m_stream; }
+    // A depth surface is destroyed: it leaves the list whose depths follow the msaa mode.
+    void forgetDepth(Surface* surface);
     // What draws need bound: stream 0 and its stride, indices, a declaration, the FVF.
     void bindings(bool& stream, UINT& stride, bool& indices, bool& declaration, DWORD& fvf) const
     {
@@ -942,9 +944,13 @@ private:
                  bool positionT, render::BufferStorage* vertexStorage, render::BufferStorage* indexStorage);
     VertexDeclaration* fvfDeclaration(DWORD fvf);
     // Enhanced motion blur (bridge::setMotionBlurEnhanced): the motion blur passes sample texel centres, and the
-    // composite (filter1 with BLENDFACTOR/INVBLENDFACTOR, FactorAlphaMask) covers each pixel in proportion to how far
-    // the blur smears it. Adjusts a 48-byte filter quad (position, colour, four texture coordinates) of these passes.
+    // composite (filter1 with BLENDFACTOR/INVBLENDFACTOR, FactorAlphaMask) leaves the centre of the screen sharp and
+    // covers the rest more towards the edges and the faster the camera moves. Adjusts a 48-byte filter quad
+    // (position, colour, four texture coordinates) of these passes.
     void motionBlurQuad(float* vertices);
+    // Game thread, when a frame is opened: takes the msaa sample count of bridge::setMsaaSamples; when it changed,
+    // every depth surface gets a depth for the new count (the old one is freed after the frames using it).
+    void applyMsaa();
 
     WinApplication*         m_app;
     Direct3D*               m_d3d;
@@ -957,6 +963,8 @@ private:
     const EffectPass*       m_effectPass = nullptr;
     uint32_t                m_deviceSamplers = 0;
     bool                    m_motionBlurEnhanced = false;   // the frame being recorded draws the enhanced motion blur
+    uint32_t                m_msaaSamples = 1;      // samples of the depths created now and of the frames opened
+    std::vector<Surface*>   m_depthSurfaces;        // the auto depth and CreateDepthStencilSurface surfaces alive
     uint32_t                m_blurPasses = 0;       // half-size motion blur quads since the last composite
     float                   m_blurStep[4] = {};     // per-tap offsets of the zoom: left, top, right, bottom edge
     std::vector<VertexDeclaration*> m_fvfDeclarations;

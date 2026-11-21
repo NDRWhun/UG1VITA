@@ -28,7 +28,7 @@
 
 </div>
 
-> **Version 0.9, playtesting.** The game is being tested before the final release. It's worth the wait!
+> **Version 1.0.**
 
 ## Requirements
 
@@ -61,6 +61,7 @@ If the game closes right away, `ux0:data/NFSUG1VITA/nfsug1vita.log` says what is
 | <img src="assets/icons/circle.svg" width="20" alt="Circle"> | Back |
 | <img src="assets/icons/triangle.svg" width="20" alt="Triangle"> | Extra option on the screen (Customize, Stock, …) |
 | <img src="assets/icons/start.svg" width="20" alt="Start"> | Start, skip movie |
+| <img src="assets/icons/rstick.svg" width="20" alt="Right stick"> | Turn the car view (garage, car select); the further, the faster |
 
 ### Driving
 
@@ -74,6 +75,7 @@ If the game closes right away, `ux0:data/NFSUG1VITA/nfsug1vita.log` says what is
 | <img src="assets/icons/circle.svg" width="20" alt="Circle"> | Look back |
 | <img src="assets/icons/triangle.svg" width="20" alt="Triangle"> | Change camera |
 | <img src="assets/icons/dpad-up.svg" width="20" alt="D-pad up"> / <img src="assets/icons/dpad-down.svg" width="20" alt="D-pad down"> | Shift up / down |
+| <img src="assets/icons/rstick.svg" width="20" alt="Right stick"> up / down | Shift up / down |
 | Rear touch, right / left | Shift up / down |
 | <img src="assets/icons/select.svg" width="20" alt="Select"> | Reset car to the track |
 | <img src="assets/icons/start.svg" width="20" alt="Start"> | Pause |
@@ -85,7 +87,19 @@ Text fields open the Vita keyboard (or <img src="assets/icons/select.svg" width=
 
 ## Settings
 
-Settings are optional. Create a text file `ux0:data/NFSUG1VITA/nfsug1vita.cfg` (not `nfsug1vita.cfg.txt`) with one
+### In the game
+
+Options > Display has two settings added for the Vita. Both are saved with your profile, like every option you change
+there:
+
+- **Configure Graphics Card > Anti-Aliasing**: Off (default), 2x or 4x. Smoother edges of the cars and the world,
+  at a GPU cost. It takes effect immediately. (With `widescreen=off` this row is the game's original Resolution.)
+- **Customize Display Settings > Motion Blur**: Off (default), On (the original full-screen blur) or Enhanced (a
+  speed blur that keeps the centre of the screen sharp).
+
+### Settings file
+
+The settings file is optional. Create a text file `ux0:data/NFSUG1VITA/nfsug1vita.cfg` (not `nfsug1vita.cfg.txt`) with one
 setting per line, for example:
 
 ```
@@ -95,6 +109,9 @@ menu_widescreen=off
 | Setting | Values | What it does |
 |---------|--------|--------------|
 | `widescreen` | `on` (default), `off` | Full 16:9 picture, or the original 4:3 one |
+| `render_resolution` | `960x544` (default), `840x476`, `720x408`, `600x340` | Resolution the game draws at, scaled to the screen; lower is softer and lighter on the GPU |
+| `msaa` | `off`, `2x`, `4x` | Overrides the in-game Anti-Aliasing setting for every profile (leave it out to use the game's setting) |
+| `shader_precision` | `half` (default), `full` | Shader math precision; `full` is slower on the GPU and only for comparison |
 | `fit_4_3` | `stretch` (default), `pillarbox` | With `widescreen=off`: stretch the 4:3 picture, or keep it with black bars |
 | `menu_widescreen` | `on` (default), `off` | Menus laid out for the wide screen, or centred at 4:3 |
 | `hud_widescreen` | `on` (default), `off` | Race HUD at the screen edges, or centred at 4:3 |
@@ -106,9 +123,9 @@ menu_widescreen=off
 ## Known issues
 
 - A few frames drop below 30 fps in busy moments of a race.
-- The 3D garage behind some menus can look washed out.
 - No online or LAN play.
-- There are some issues with EU Region versions due to shifted addresses. It's being investigated now. 
+- The European version 1.4 is supported but less tested than the US version; if something goes wrong, please open
+  an issue with `nfsug1vita.log`.
 
 ## Build
 

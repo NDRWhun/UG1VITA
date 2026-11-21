@@ -1715,6 +1715,12 @@ namespace physics
 
 void logShadowTotal()
 {
+    if (native::settings().cache && native::settings().shadow)
+        pf::logInfo("shadow_shift_points: %u calls compared, %u differ", unsigned(native::s_compared),
+                    unsigned(native::s_differing));
+    if (native::settings().topSpeed && native::settings().topSpeedShadow)
+        pf::logInfo("shadow_top_speed: %u calls compared, %u differ", unsigned(native::s_topCompared),
+                    unsigned(native::s_topDiffering));
     if (native::settings().forces && native::settings().forcesShadow)
         pf::logInfo("shadow_forces: %u calls compared, %u differ", unsigned(native::s_forcesCompared),
                     unsigned(native::s_forcesDiffering));

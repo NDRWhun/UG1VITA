@@ -10,11 +10,35 @@ def _index(ctx, op):
     return int(name[-2] if name.endswith(')') else name[-1])
 
 
+def constant_operand(ctx, op):
+    """The bits of a float or double operand at a fixed address in a read-only data section, or None."""
+    m = op.mem
+    program = ctx.fn.program
+    if program is None or not program.fold_constants or m.segment or m.base or m.index or op.size not in (4, 8):
+        return None
+    address = m.disp & 0xffffffff
+    image = ctx.fn.module.image
+    s = image.section_of(address)
+    if s is None or s.code or s.writable or address + op.size > s.address + s.virtual_size:
+        return None
+    if any(address < slot + 4 and slot < address + op.size for slot in program.import_slots):
+        return None
+    if any(address < a + n and a < address + op.size for a, n in program.mutable_constants):
+        return None
+    return int.from_bytes(image.read(address, op.size), 'little')
+
+
 def fval(ctx, op):
     """Operand as an x86::Float rvalue."""
     if op.type == X.X86_OP_REG:
         return ctx.st(_index(ctx, op))
     if op.type == X.X86_OP_MEM:
+        bits = constant_operand(ctx, op)
+        if bits is not None:
+            # Read-only data: the value the load would give.
+            if op.size == 4:
+                return 'x86::Float(rc::f32(0x%08xu))' % bits
+            return 'x86::Float(rc::f64(0x%016xull))' % bits
         a = ctx.address(op)
         if op.size == 4:
             return 'x86::Float(rc::ldf32(%s))' % a

@@ -1,13 +1,15 @@
-// Native draw queue (draw.h): the model submit 0x40c910, the packet enqueue 0x40f1e0 with the slot-pool pops of
-// 0x567160, and the flush 0x40ed50 with direct device and effect calls (d3d9_native.h) and direct calls of the
-// setup functions (draw.cpp). The guest functions they call (the effect group functions, the slot-pool allocation
-// of an empty pool, the texture swaps 0x53f540 / 0x53f500) run as guest code on the caller's CPU state, with the
-// registers and stack arguments the guest gives them.
+// Native draw queue (draw.h): the model submit 0x40c910, the packet enqueues 0x40f1e0 and 0x40f0f0 (car shadows)
+// with the slot-pool pops of 0x567160, and the flush 0x40ed50 with direct device and effect calls (d3d9_native.h) and direct calls of the
+// setup functions (draw.cpp). The effect group functions and the texture swaps 0x53f540 / 0x53f500 (groups.h) and the
+// slot-pool allocation of an empty pool run on the caller's CPU state, with the registers and stack arguments the
+// guest gives them.
 
 #include "cars.h"
 #include "draw.h"
+#include "groups.h"
 #include "retstate.h"
 #include "phases.h"
+#include "sceneshadow.h"
 
 #include <winapi/d3d9_native.h>
 #include <platform/config.h>
@@ -27,6 +29,7 @@ namespace nfsu
 // The translated guest bodies of the overridden functions (generated).
 void sub_40c910_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_40f1e0_guest(win32::WinApplication* app, x86::CPU& cpu);
+void sub_40f0f0_guest(win32::WinApplication* app, x86::CPU& cpu);
 void sub_40ed50_guest(win32::WinApplication* app, x86::CPU& cpu);
 // Guest functions the native code calls (generated).
 void sub_567160(win32::WinApplication* app, x86::CPU& cpu);
@@ -99,7 +102,13 @@ const Settings& settings()
     {
         Settings r = { pf::Config::getBool("flush_native", true), shadowCompare(), bridge::DeferOff };
         const int async = pf::Config::getInt("flush_async", 1);
-        if (r.native && !r.shadow && (async == 1 || async == 2))
+        // Shadow compares with call captures see only calls that run at once.
+        bool captures = r.shadow;
+        for (const char* key : { "shadow_groups", "shadow_views", "shadow_cars", "shadow_lights", "shadow_world_models",
+                                 "shadow_scene_callbacks", "shadow_view_parts", "shadow_scene_snapshot",
+                                 "shadow_scene_thread" })
+            captures = captures || pf::Config::getBool(key, false);
+        if (r.native && !captures && (async == 1 || async == 2))
             r.async = async == 1 ? bridge::DeferThread : bridge::DeferInline;
         const int defaultCore = pf::cores::hasCore3() ? 3 : 2;
         int core = pf::Config::getInt("flush_async_core", defaultCore);
@@ -164,12 +173,12 @@ inline bool leafCall(Leaf leaf, WinApplication* app, x86::CPU& cpu, Regs& r, reg
     return true;
 }
 
-// A guest function called with the guest's registers through a pointer (an effect group function).
+// An effect group function called with the guest's registers through a pointer (groups.h).
 inline bool guestCall(WinApplication* app, x86::CPU& cpu, Regs& r, reg32 esp, reg32 target)
 {
     r.to(cpu);
     cpu.esp = esp;
-    bridge::callGuest(app, cpu, target);
+    groups::call(app, cpu, target);
     if (cpu.terminate)
         return false;
     r.from(cpu);
@@ -298,6 +307,92 @@ void enqueueNative(WinApplication* app, x86::CPU& cpu)
     cpu.ebp = ebp0;
     cpu.esi = esi0;
     cpu.edi = edi0;
+    cpu.esp = entry + 4;
+}
+
+// 0x40f0f0, the user-pointer packet enqueue of the car shadows: eax = the model, edi = the group key; stack
+// arguments 1..5: the vertex slot, the light context, the world, the material, the bone palette. The same node and
+// list handling as 0x40f1e0; the packet is a user-pointer one (+0xc = 1).
+void enqueueUserNative(WinApplication* app, x86::CPU& cpu)
+{
+    const reg32 entry = cpu.esp;
+    const auto arg = [entry](reg32 n) { return rc::ld32(entry + 4 * n); };
+    const reg32 ebx0 = cpu.ebx, ebp0 = cpu.ebp, esi0 = cpu.esi;
+    const reg32 key = cpu.edi;
+    const reg32 model = cpu.eax;
+    rc::st32(entry - 4, ebx0);
+    rc::st32(entry - 8, ebp0);
+    rc::st32(entry - 12, esi0);
+    const reg32 holder = rc::ld32(model);
+    Regs r(cpu);
+    r.esi = model;
+    r.ebx = 0;
+    cpu.ebp = holder;
+    reg32 node = rc::ld32(holder + 0x1c);
+    if (node == 0 || rc::ld32(node + 0x14) != key)
+    {
+        r.eax = rc::ld32(NodePool);
+        node = allocate(app, cpu, r, r.eax, entry - 12);
+        if (cpu.terminate)
+            return;
+        if (node != 0)
+        {
+            store(node + 0x18, node + 0x18);
+            store(node + 0x1c, node + 0x18);
+            store(node + 0x10, model);
+            store(node + 8, 0);
+            store(node + 0xc, 0);
+        }
+        store(holder + 0x1c, node);
+        const reg8 second = rc::ld8(model + 0x54);
+        const reg32 index = reg32(sreg32(sreg8(rc::ld8(model + 0x51)))) * 7 + rc::ld32(key);
+        const reg32 head = index * 8 + (second ? SecondHeads : Heads);
+        const reg32 tail = rc::ld32(head + 4);
+        store(tail, node);
+        store(head + 4, node);
+        store(node + 4, tail);
+        store(node, head);
+        increment(QueuedNodes);
+        r.ecx = head;
+        r.edx = tail;
+    }
+    r.eax = rc::ld32(PacketPool);
+    const reg32 owner = rc::ld32(holder + 0x1c);
+    r.esi = owner;
+    const reg32 packet = allocate(app, cpu, r, r.eax, entry - 12);
+    if (cpu.terminate)
+        return;
+    if (packet != 0)
+    {
+        store(packet + 8, arg(1));
+        store(packet + 0x14, arg(2));
+        store(packet + 0x1c, arg(4));
+        store(packet + 0xc, 1);
+        store(packet + 0x10, 0);
+        store(packet + 0x20, arg(5));
+        store(packet + 0x24, arg(3));
+        store(packet + 0x18, key);
+        store(packet + 0x28, 0);
+    }
+    const reg32 tail = rc::ld32(owner + 0x1c);
+    store(tail, packet);
+    store(owner + 0x1c, packet);
+    store(packet + 4, tail);
+    store(packet, owner + 0x18);
+    const reg32 count = rc::ld32(owner + 8) + 1;
+    const reg32 vertices = rc::ld32(owner + 0xc);
+    store(owner + 8, count);
+    store(owner + 0x14, key);
+    const reg32 slot = arg(1);
+    const reg32 added = rc::ld32(slot);
+    store(owner + 0xc, vertices + added);
+    ++s_usage.enqueues;
+    cpu.eax = added;
+    cpu.ecx = vertices + added;
+    cpu.edx = slot;
+    cpu.ebx = ebx0;
+    cpu.ebp = ebp0;
+    cpu.esi = esi0;
     cpu.esp = entry + 4;
 }
 
@@ -886,15 +981,24 @@ struct Shadow
     std::vector<reg8> before, guestAfter, nativeAfter;
 };
 
-Shadow s_enqueueShadow, s_submitShadow, s_flushShadow;
+Shadow s_enqueueShadow, s_enqueueUserShadow, s_submitShadow, s_flushShadow;
 uint32_t s_logged = 0;
+
+// Totals of the race for the bench end: all compares, and those of the user-pointer enqueue 0x40f0f0.
+struct ShadowTotal
+{
+    uint32_t compared, differing, userCompared, userDiffering;
+};
+ShadowTotal s_total = {};
 
 void report(const char* what, const x86::CPU& entry, bool same, const char* text)
 {
     ++s_usage.compared;
+    ++s_total.compared;
     if (same)
         return;
     ++s_usage.differing;
+    ++s_total.differing;
     if (s_logged < ShadowLogLimit)
     {
         ++s_logged;
@@ -904,12 +1008,12 @@ void report(const char* what, const x86::CPU& entry, bool same, const char* text
 }
 
 // Guest memory the enqueue may store to (false: an allocation would expand a pool, not compared).
-bool enqueueSpans(const x86::CPU& cpu, std::vector<Span>& spans)
+bool enqueueSpans(const x86::CPU& cpu, std::vector<Span>& spans, bool user)
 {
     spans.clear();
     const reg32 entry = cpu.esp;
     const reg32 model = cpu.eax;
-    const reg32 key = rc::ld32(entry + 0x10);
+    const reg32 key = user ? cpu.edi : rc::ld32(entry + 0x10);
     const reg32 holder = rc::ld32(model);
     const reg32 nodePool = rc::ld32(NodePool), packetPool = rc::ld32(PacketPool);
     if (nodePool == packetPool)
@@ -1031,7 +1135,7 @@ struct Compare
 void enqueueShadow(WinApplication* app, x86::CPU& cpu)
 {
     Shadow& s = s_enqueueShadow;
-    if (!enqueueSpans(cpu, s.spans))
+    if (!enqueueSpans(cpu, s.spans, false))
     {
         ++s_usage.skipped;
         sub_40f1e0_guest(app, cpu);
@@ -1049,6 +1153,32 @@ void enqueueShadow(WinApplication* app, x86::CPU& cpu)
     const bool same = sameState(0x40f1e0, RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, c.guest, c.native, text,
                                 sizeof(text))
                       && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
+    report(c.what, c.entry, same, text);
+}
+
+void enqueueUserShadow(WinApplication* app, x86::CPU& cpu)
+{
+    Shadow& s = s_enqueueUserShadow;
+    if (!enqueueSpans(cpu, s.spans, true))
+    {
+        ++s_usage.skipped;
+        sub_40f0f0_guest(app, cpu);
+        return;
+    }
+    Compare c("enqueue 0x40f0f0", s, cpu);
+    snapshot(s.spans, s.before);
+    sub_40f0f0_guest(app, cpu);
+    if (cpu.terminate)
+        return;
+    const uint32_t enqueues = s_usage.enqueues;
+    c.runNative(app, cpu, &enqueueUserNative, false);
+    s_usage.enqueues = enqueues;
+    char text[200] = {};
+    const bool same = sameState(0x40f0f0, RegEbx | RegEsp | RegEbp | RegEsi | RegEdi, c.guest, c.native, text,
+                                sizeof(text))
+                      && sameMemory(s.spans, s.guestAfter, s.nativeAfter, text, sizeof(text));
+    ++s_total.userCompared;
+    s_total.userDiffering += same ? 0 : 1;
     report(c.what, c.entry, same, text);
 }
 
@@ -1169,6 +1299,15 @@ bool nativeQueue()
     return settings().native;
 }
 
+void logShadowTotal()
+{
+    if (!settings().native || !settings().shadow)
+        return;
+    pf::logInfo("shadow_draw: queue %u calls compared, %u differ; of them the user-pointer enqueue 0x40f0f0 %u "
+                "compared, %u differ", unsigned(s_total.compared), unsigned(s_total.differing),
+                unsigned(s_total.userCompared), unsigned(s_total.userDiffering));
+}
+
 void logDeferral(unsigned frames)
 {
     if (!frames || settings().async == bridge::DeferOff)
@@ -1218,6 +1357,9 @@ namespace native
 
 void sub_40ed50(win32::WinApplication* app, x86::CPU& cpu)
 {
+    // Recorded in the guest run of a shadow compare (sceneshadow.h): the screen passes of viewparts.cpp call it.
+    if (sceneshadow::record(0x40ed50, 0, 0, app, cpu, &sub_40ed50))
+        return;
     phases::Scope scope(phases::Flush);
     const draw::Settings& s = draw::settings();
     const bool timed = pf::perf::enabled();
@@ -1277,9 +1419,31 @@ void sub_40f1e0(win32::WinApplication* app, x86::CPU& cpu)
     }
 }
 
+void sub_40f0f0(win32::WinApplication* app, x86::CPU& cpu)
+{
+    if (cars::tap(0x40f0f0, app, cpu, &sub_40f0f0))
+        return;
+    const draw::Settings& s = draw::settings();
+    if (!s.native)
+    {
+        ++draw::s_usage.enqueues;
+        sub_40f0f0_guest(app, cpu);
+    }
+    else if (s.shadow && !win32::d3d9::bridge::capturing())
+    {
+        ++draw::s_usage.enqueues;
+        draw::enqueueUserShadow(app, cpu);
+    }
+    else
+    {
+        draw::enqueueUserNative(app, cpu);
+    }
+}
+
 void sub_40c910(win32::WinApplication* app, x86::CPU& cpu)
 {
-    if (cars::tap(0x40c910, app, cpu, &sub_40c910))
+    if (cars::tap(0x40c910, app, cpu, &sub_40c910) ||
+        sceneshadow::record(0x40c910, 5, retstate::Eax, app, cpu, &sub_40c910))
         return;
     phases::Scope scope(phases::Submit);
     const draw::Settings& s = draw::settings();

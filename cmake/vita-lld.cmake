@@ -16,6 +16,17 @@ function(nfsu_lld_script out_var)
   string(REPLACE "    PROVIDE_HIDDEN (__init_array_start = .);"
     "    PROVIDE_HIDDEN (__preinit_array_start = .);\n    KEEP (*(.preinit_array))\n    PROVIDE_HIDDEN (__preinit_array_end = .);\n    PROVIDE_HIDDEN (__init_array_start = .);"
     script "${script}")
+  # Leaves 0x1000 bytes after the read-only sections: vita-elf-create appends the module info, imports and stubs to
+  # the text segment and overruns the data segment when lld starts it closer than that.
+  # The SDK's script starts the data segment with DATA_SEGMENT_ALIGN or, in other SDK versions, with an ALIGN to the
+  # page size.
+  string(REPLACE "\n  . = DATA_SEGMENT_ALIGN (CONSTANT (MAXPAGESIZE), 0x10000);"
+    "\n  . += 0x1000;\n  . = DATA_SEGMENT_ALIGN (CONSTANT (MAXPAGESIZE), 0x10000);" script "${script}")
+  string(REPLACE "\n  . = ALIGN(CONSTANT (MAXPAGESIZE)) + (. & (CONSTANT (MAXPAGESIZE) - 1));"
+    "\n  . += 0x1000;\n  . = ALIGN(CONSTANT (MAXPAGESIZE)) + (. & (CONSTANT (MAXPAGESIZE) - 1));" script "${script}")
+  if(NOT script MATCHES "\\. \\+= 0x1000;")
+    message(FATAL_ERROR "${stock} changed: update cmake/vita-lld.cmake")
+  endif()
   if(script MATCHES "NEXT_SECTION|\\.stack[ ]+0x80000|\\.preinit_array[ ]+:" OR NOT script MATCHES "__preinit_array_end"
      OR script STREQUAL original)
     message(FATAL_ERROR "${stock} changed: update cmake/vita-lld.cmake")
