@@ -362,7 +362,9 @@ void stuffScenery(win32::WinApplication* app, x86::CPU& cpu)
 
 void frame(win32::WinApplication* app, x86::CPU& cpu)
 {
-    display::frame();
+    display::frame(app, cpu);
+    if (cpu.terminate)
+        return;
     {
         phases::Scope scope(phases::Render);
         sub_40a580_guest(app, cpu);
