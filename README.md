@@ -22,7 +22,7 @@
   <a href="../../issues">Report Bug</a>
 </p>
 
-[![build][build-shield]][build-url]&nbsp;[![issues][issues-shield]][issues-url]&nbsp;[![last commit][commit-shield]][commit-url]
+[![build][build-shield]][build-url]&nbsp;[![downloads][downloads-shield]][downloads-url]&nbsp;[![issues][issues-shield]][issues-url]&nbsp;[![last commit][commit-shield]][commit-url]
 
 [![platform][platform-shield]][platform-url]&nbsp;[![resolution][resolution-shield]][resolution-url]&nbsp;[![renderer][renderer-shield]][renderer-url]&nbsp;[![license][license-shield]][license-url]
 
@@ -168,13 +168,15 @@ trademark of Electronic Arts. You must own the game.
 
 [build-shield]: https://img.shields.io/github/actions/workflow/status/NDRWhun/UG1VITA/build.yml?branch=main&label=build&style=for-the-badge&labelColor=1a1f3d&logo=githubactions&logoColor=white
 [build-url]: ../../actions/workflows/build.yml
+[downloads-shield]: https://img.shields.io/github/downloads/NDRWhun/UG1VITA/total?label=downloads&style=for-the-badge&labelColor=1a1f3d&color=b44dff&logo=github&logoColor=white
+[downloads-url]: ../../releases
 [issues-shield]: https://img.shields.io/github/issues/NDRWhun/UG1VITA?label=issues&style=for-the-badge&labelColor=1a1f3d&color=2f7bff&logo=github&logoColor=white
 [issues-url]: ../../issues
 [commit-shield]: https://img.shields.io/github/last-commit/NDRWhun/UG1VITA?label=updated&style=for-the-badge&labelColor=1a1f3d&color=ff3b5c
 [commit-url]: ../../commits/main
-[platform-shield]: https://img.shields.io/badge/PS%20Vita-native-2f7bff?style=for-the-badge&labelColor=1a1f3d&logo=playstation&logoColor=white
+[platform-shield]: https://img.shields.io/badge/PS%20Vita-homebrew-2f7bff?style=for-the-badge&labelColor=1a1f3d&logo=playstation&logoColor=white
 [platform-url]: https://vitasdk.org
-[resolution-shield]: https://img.shields.io/badge/960x544-native-b44dff?style=for-the-badge&labelColor=1a1f3d
+[resolution-shield]: https://img.shields.io/badge/960x544-16%3A9-b44dff?style=for-the-badge&labelColor=1a1f3d
 [resolution-url]: #settings
 [renderer-shield]: https://img.shields.io/badge/renderer-sceGxm-ff3b5c?style=for-the-badge&labelColor=1a1f3d
 [renderer-url]: #build
