@@ -28,7 +28,7 @@
 
 </div>
 
-> **Version 1.0.**
+> **Version 1.0.1.**
 
 ## Requirements
 
