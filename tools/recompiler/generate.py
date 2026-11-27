@@ -299,6 +299,9 @@ PATCHES = [
     # Display setting limits 0x410B70: with motion blur available, the limit of MOTIONBLUR [0x701064] is 2 instead of 1
     # (enhanced, display.cpp); the limit is only compared with 0 and clamps the setting (0x410CE0, 0x415F90).
     (0x410c3e, '893564107000 893568107000 5e c3 90909090', 'c70564107000 02000000 893568107000 5e c3'),
+    # Screen target check 0x40B3F0: the world is drawn into the scene target [0x736460] and copied to the back buffer
+    # with Motion Blur and Light Trails both off too ([0x736384] and [0x73645C] stay 1), as with either one on.
+    (0x40b403, '7526', 'eb26'),
 ]
 
 # Guest addresses in or after the read-only data that the port writes at run time (HUD mapping 0x6D3440 in

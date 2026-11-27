@@ -201,7 +201,7 @@ void Device::resetBackBuffer(const D3DPRESENT_PARAMETERS& params)
     if (m_params.EnableAutoDepthStencil)
     {
         m_autoDepth = new Surface(this, Surface::RoleDepth, w, h, m_params.AutoDepthStencilFormat);
-        m_autoDepth->setDepth(gpu().createDepth(w, h, m_msaaSamples));
+        m_autoDepth->setDepth(createDepth(w, h));
         m_depthSurfaces.push_back(m_autoDepth);
         publish(m_app, m_autoDepth);
     }
@@ -330,6 +330,16 @@ void Device::applyMsaa()
                 : samples == 2 ? "2x" : "4x", m_frame->index, unsigned(replaced),
                 kept ? ", some kept (no GPU memory): their scenes stay 1x" : "");
     m_msaaSamples = samples;
+}
+
+render::DepthStorage* Device::createDepth(uint32_t width, uint32_t height)
+{
+    render::DepthStorage* depth = gpu().createDepth(width, height, m_msaaSamples);
+    if (depth || m_msaaSamples == 1)
+        return depth;
+    pf::logInfo("d3d9: no GPU memory for a %ux%u depth at msaa %ux, made single-sampled", unsigned(width),
+                unsigned(height), unsigned(m_msaaSamples));
+    return gpu().createDepth(width, height, 1);
 }
 
 void Device::forgetDepth(Surface* surface)
@@ -924,7 +934,7 @@ HRESULT Device::CreateDepthStencilSurface(WinApplication* app, x86::CPU& cpu, UI
     RC_USE(sharedHandle);
     if (!surface || !width || !height)
         return D3DERR_INVALIDCALL;
-    render::DepthStorage* depth = gpu().createDepth(width, height, m_msaaSamples);
+    render::DepthStorage* depth = createDepth(width, height);
     if (!depth)
         return D3DERR_OUTOFVIDEOMEMORY;
     Surface* s = new Surface(this, Surface::RoleDepth, width, height, format);

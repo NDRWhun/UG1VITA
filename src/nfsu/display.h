@@ -19,8 +19,8 @@ namespace nfsu { namespace display
 {
 
 // Game thread, before each frame is rendered: the renderer draws the frame's motion blur enhanced when the setting
-// is 2, and multisamples with the Anti-Aliasing setting (or cfg msaa) from this frame on. With Motion Blur on and
-// its render targets ([0x71AB9C]) not made, the guest makes them (0x40CB80).
+// is 2, and multisamples with the Anti-Aliasing setting (or cfg msaa) from this frame on. With Motion Blur or Light
+// Streaks on and their render targets not made, the guest releases and makes them again (0x40CCE0, 0x40CB80).
 void frame(win32::WinApplication* app, x86::CPU& cpu);
 
 }}

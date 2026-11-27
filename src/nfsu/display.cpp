@@ -43,9 +43,12 @@ namespace
 using x86::reg32;
 
 const reg32 MotionBlur = 0x00700E98;
-// The first motion blur render target, 0 while they are not made; 0x40CB80 makes them while Motion Blur is on.
-const reg32 MotionBlurTargets = 0x0071AB9C;
-const reg32 MakeMotionBlurTargets = 0x0040CB80;
+const reg32 LightStreaks = 0x00700E9C;
+// The first motion blur render target and the light streak render target, 0 while they are not made. 0x40CB80
+// makes the motion blur ones while Motion Blur is on and the light streak one while Light Streaks is on; 0x40CCE0
+// releases them all.
+const reg32 MotionBlurTargets = 0x0071AB9C, LightStreakTarget = 0x0071ABA4;
+const reg32 MakeScreenTargets = 0x0040CB80, ReleaseScreenTargets = 0x0040CCE0;
 const reg32 Enhanced = 2;
 const reg32 MotionBlurRow = 0xAE5C3F41;     // name hash of motion_blur_option
 const reg32 Entries = 0x20, EntryRow = 0x1b0, EntryValue = 0x230, PackageName = 0xc;
@@ -235,16 +238,23 @@ void showAntiAliasing(win32::WinApplication* app, x86::CPU& cpu, reg32 screen)
 
 void frame(win32::WinApplication* app, x86::CPU& cpu)
 {
-    if (rc::ld32(MotionBlur) != 0 && rc::ld32(MotionBlurTargets) == 0)
+    const bool motionBlur = rc::ld32(MotionBlur) != 0 && rc::ld32(MotionBlurTargets) == 0;
+    const bool lightStreaks = rc::ld32(LightStreaks) != 0 && rc::ld32(LightStreakTarget) == 0;
+    if (motionBlur || lightStreaks)
     {
         const reg32 eax = cpu.eax, ebx = cpu.ebx, ecx = cpu.ecx, edx = cpu.edx, esi = cpu.esi, edi = cpu.edi,
                     ebp = cpu.ebp, esp = cpu.esp;
-        ::native::callGuest(app, cpu, MakeMotionBlurTargets);
+        ::native::callGuest(app, cpu, ReleaseScreenTargets);
+        if (cpu.terminate)
+            return;
+        cpu.esp = esp;
+        ::native::callGuest(app, cpu, MakeScreenTargets);
         if (cpu.terminate)
             return;
         cpu.eax = eax, cpu.ebx = ebx, cpu.ecx = ecx, cpu.edx = edx, cpu.esi = esi, cpu.edi = edi, cpu.ebp = ebp;
         cpu.esp = esp;
-        pf::logInfo("display: motion blur render targets made");
+        pf::logInfo("display: render targets made again for%s%s", motionBlur ? " motion blur" : "",
+                    lightStreaks ? " light streaks" : "");
     }
     static const reg32 cfgSamples = msaaOverride();
     win32::d3d9::bridge::setMotionBlurEnhanced(rc::ld32(MotionBlur) == Enhanced);

@@ -82,6 +82,9 @@ static bool loadExecutable(std::vector<uint8_t>& image)
     if (hash != nfsu::layout::exeSha256)
         pf::logInfo("%s: %u bytes, SHA-256 %s; the code was generated from %u bytes, SHA-256 %s", exeFile,
                     unsigned(image.size()), hash.c_str(), nfsu::layout::exeSize, nfsu::layout::exeSha256);
+    else
+        pf::logInfo("%s: %u bytes, SHA-256 %s (the build the code was generated from)", exeFile,
+                    unsigned(image.size()), hash.c_str());
     return true;
 }
 
@@ -166,6 +169,8 @@ static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Conve
     }
     if (converted)
         pf::logInfo("%s: %s version 1.4, its data converted", s_exeName, region.name);
+    else
+        pf::logInfo("%s: US version 1.4", s_exeName);
     sections.push_back(win32::Section{ image.data(), nfsu::layout::imageBase,
                                        x86::reg32(std::min<size_t>(nfsu::layout::headerSize, image.size())) });
     for (size_t i = 0; i < SectionCount; ++i)
@@ -453,6 +458,22 @@ static void changedParts(const Settings& a, const Settings& b, char* text, size_
 // the current screen (package name at 0x0072CDD0) has changed while no race is driven and no action is being
 // assigned, they are compared with the ones last read or written, and when they differ the current profile's files
 // are written. Nothing with benchmark=on.
+// The loaded profile, the game's language ([0x70430C]) and the display settings that change how frames are drawn:
+// Details (PERFORMANCE [0x736334]), Motion Blur [0x700E98], Light Trails (LIGHTSTREAKS [0x700E9C]) and
+// Anti-Aliasing (BPP [0x700E6C]).
+static void logProfile(const char* profile)
+{
+    static const char* const Languages[] = { "English", "French", "German", "Italian", "Spanish", "Dutch", "Swedish",
+                                             "Korean", "Chinese" };
+    const x86::reg32 language = guestDword(0x0070430C);
+    const x86::reg32 motionBlur = guestDword(0x00700E98), antiAliasing = guestDword(0x00700E6C);
+    pf::logInfo("profile %s: language %s, details %u, motion blur %s, light trails %s, anti-aliasing %s", profile,
+                language < sizeof(Languages) / sizeof(Languages[0]) ? Languages[language] : "other",
+                unsigned(guestDword(0x00736334)), motionBlur == 0 ? "off" : motionBlur == 2 ? "enhanced" : "on",
+                guestDword(0x00700E9C) ? "on" : "off",
+                antiAliasing == 4 ? "4x" : antiAliasing == 2 ? "2x" : "off");
+}
+
 static bool saveSettings(win32::WinApplication* app, x86::CPU& cpu, x86::reg32 slot)
 {
     static Settings s_saved;
@@ -481,6 +502,7 @@ static bool saveSettings(win32::WinApplication* app, x86::CPU& cpu, x86::reg32 s
     {
         strncpy(s_profile, profile, sizeof(s_profile) - 1);
         s_saved = current;
+        logProfile(profile);
         return true;
     }
     if (memcmp(current.bytes, s_saved.bytes, sizeof(current.bytes)) == 0)

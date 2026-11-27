@@ -951,6 +951,8 @@ private:
     // Game thread, when a frame is opened: takes the msaa sample count of bridge::setMsaaSamples; when it changed,
     // every depth surface gets a depth for the new count (the old one is freed after the frames using it).
     void applyMsaa();
+    // A depth for the current msaa mode, or a single-sampled one when that cannot be allocated (its scenes stay 1x).
+    render::DepthStorage* createDepth(uint32_t width, uint32_t height);
 
     WinApplication*         m_app;
     Direct3D*               m_d3d;

@@ -505,7 +505,7 @@ extern "C" void rcYieldFromStub(win32::WinApplication* app, const x86::CPU* cpu)
 }
 
 // rc_yield_stub(r0 app, r1 cpu): yieldContext keeping r0-r3, r12, d0-d7, d16-d31 and the FPSCR (the callee-saved
-// registers are kept by the call itself). 224 bytes pushed keep the stack 8-byte aligned.
+// registers are kept by the call itself). The call runs on a stack aligned to 8 bytes (r4 holds the stack before).
 asm(R"(
     .text
     .p2align 2
@@ -514,17 +514,21 @@ asm(R"(
     .thumb
     .thumb_func
 rc_yield_stub:
-    push {r0-r3, r12, lr}
+    push {r0-r4, r12, lr}
     vpush {d0-d7}
     vpush {d16-d31}
     vmrs r2, fpscr
     push {r2, r3}
+    mov r4, sp
+    bic r2, r4, #7
+    mov sp, r2
     bl rcYieldFromStub
+    mov sp, r4
     pop {r2, r3}
     vmsr fpscr, r2
     vpop {d16-d31}
     vpop {d0-d7}
-    pop {r0-r3, r12, pc}
+    pop {r0-r4, r12, pc}
     .size rc_yield_stub, .-rc_yield_stub
 )");
 #endif
