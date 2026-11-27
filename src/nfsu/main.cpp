@@ -1,5 +1,6 @@
 #include "bankcode.h"
 #include "bench.h"
+#include "embedded.h"
 #include "phases.h"
 #include "prompts.h"
 #include "region.h"
@@ -97,20 +98,23 @@ static uint32_t imageWord(const std::vector<uint8_t>& image, size_t offset, size
 // table. Only the sections of the generated layout are taken, each clipped to its size there; each also gets an
 // entry without data that covers its whole size (the arena is zeroed, so the rest of a section reads as zero).
 // Sections with a SHA-256 in the layout (all but code) must match it, or the executable must be one of another
-// region whose .rdata and .data are then converted into region.
+// region whose .rdata and .data are then converted into region. Without report a mismatch is not logged (the
+// caller tries embeddedFallback next).
 static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Converted& region,
-                          std::vector<win32::Section>& sections)
+                          std::vector<win32::Section>& sections, bool report = true)
 {
     const size_t pe = imageWord(image, 0x3c, 4);
     if (imageWord(image, 0, 2) != 0x5a4d || imageWord(image, pe, 4) != 0x4550)
     {
-        pf::logError("%s is not a Windows executable", s_exeName);
+        if (report)
+            pf::logError("%s is not a Windows executable", s_exeName);
         return false;
     }
     const uint32_t imageBase = imageWord(image, pe + 24 + 28, 4);
     if (imageBase != nfsu::layout::imageBase)
     {
-        pf::logError("%s: image base 0x%08x, expected 0x%08x", s_exeName, imageBase, nfsu::layout::imageBase);
+        if (report)
+            pf::logError("%s: image base 0x%08x, expected 0x%08x", s_exeName, imageBase, nfsu::layout::imageBase);
         return false;
     }
     const size_t count = imageWord(image, pe + 6, 2);
@@ -132,7 +136,8 @@ static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Conve
             entry += 40;
         if (entry >= table + count * 40)
         {
-            pf::logError("%s has no section at 0x%08x (%s): not version 1.4", s_exeName, s.address, s.name);
+            if (report)
+                pf::logError("%s has no section at 0x%08x (%s): not version 1.4", s_exeName, s.address, s.name);
             return false;
         }
         rawOffsets[i] = imageWord(image, entry + 20, 4);
@@ -155,16 +160,19 @@ static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Conve
             dataIndex = i;
         }
     }
-    const bool converted = !same && *rdata && *data
+    // A region embeddedFallback converted already.
+    const bool given = !region.rdata.empty() && !region.data.empty();
+    const bool converted = given || (!same && *rdata && *data
         && nfsu::region::convert(targetRdata, targetData, rdata, data, image.data() + rawOffsets[rdataIndex],
-                                 image.data() + rawOffsets[dataIndex], region);
+                                 image.data() + rawOffsets[dataIndex], region));
     if (!same && !converted)
     {
-        pf::logError("%s: a version 1.4 build that is not supported (supported: the US build and the regions in "
-                     "region.cpp)", s_exeName);
+        if (report)
+            pf::logError("%s: a version 1.4 build that is not supported (supported: the US build and the regions in "
+                         "region.cpp)", s_exeName);
         return false;
     }
-    if (converted)
+    if (converted && !given)
         pf::logInfo("%s: %s version 1.4, its data converted", s_exeName, region.name);
     sections.push_back(win32::Section{ image.data(), nfsu::layout::imageBase,
                                        x86::reg32(std::min<size_t>(nfsu::layout::headerSize, image.size())) });
@@ -186,6 +194,79 @@ static bool imageSections(const std::vector<uint8_t>& image, nfsu::region::Conve
     }
     for (const nfsu::region::Variable& v : region.variables)
         sections.push_back(win32::Section{ reinterpret_cast<const x86::reg8*>(&v.value), v.address, 4 });
+    return true;
+}
+
+// The raw data of the executable's section at guest address, from its section table; nullptr without that section.
+static const uint8_t* sectionData(const std::vector<uint8_t>& image, x86::reg32 address, size_t& rawSize)
+{
+    const size_t pe = imageWord(image, 0x3c, 4);
+    if (imageWord(image, 0, 2) != 0x5a4d || imageWord(image, pe, 4) != 0x4550
+        || imageWord(image, pe + 24 + 28, 4) != nfsu::layout::imageBase)
+        return nullptr;
+    const size_t count = imageWord(image, pe + 6, 2);
+    const size_t table = pe + 24 + imageWord(image, pe + 20, 2);
+    for (size_t entry = table; entry < table + count * 40; entry += 40)
+    {
+        if (imageWord(image, entry + 12, 4) != address - nfsu::layout::imageBase)
+            continue;
+        const size_t offset = imageWord(image, entry + 20, 4);
+        rawSize = imageWord(image, entry + 16, 4);
+        if (offset > image.size())
+            return nullptr;
+        rawSize = std::min(rawSize, image.size() - offset);
+        return image.data() + offset;
+    }
+    return nullptr;
+}
+
+// A version 1.4 executable whose data imageSections cannot use: the copy-protected one of an unmodified install,
+// US or European. The protection encrypts its code and .data, so neither is read. It runs from the embedded copy of
+// the executable the code was generated from (NFSU_EMBED_EXE, embedded.h), which replaces image. Its .rdata stays
+// readable apart from the imports and identifies the build (region::convertProtected): the US build uses the
+// embedded sections as they are; a European one keeps its own .rdata, converted into region, and the embedded
+// .data, which is what the European .data converts to. An executable of another version matches about 12% and is
+// refused.
+static bool embeddedFallback(std::vector<uint8_t>& image, nfsu::region::Converted& region)
+{
+    uint32_t embeddedSize = 0;
+    const uint8_t* const embedded = nfsu::image::exe(embeddedSize);
+    const nfsu::layout::ImageSection* rdata = nullptr;
+    const nfsu::layout::ImageSection* data = nullptr;
+    for (const nfsu::layout::ImageSection& s : nfsu::layout::sections)
+    {
+        if (!strcmp(s.name, ".rdata"))
+            rdata = &s;
+        else if (!strcmp(s.name, ".data"))
+            data = &s;
+    }
+    if (!embedded || !rdata || !data || size_t(rdata->fileOffset) + rdata->rawSize > embeddedSize
+        || size_t(data->fileOffset) + data->rawSize > embeddedSize)
+    {
+        pf::logError("%s: its data cannot be read, and this build has no embedded executable to run it with "
+                     "(NFSU_EMBED_EXE)", s_exeName);
+        return false;
+    }
+    size_t rawSize = 0;
+    const uint8_t* const own = sectionData(image, rdata->address, rawSize);
+    if (!own)
+    {
+        pf::logError("%s has no section at 0x%08x (.rdata): not version 1.4", s_exeName, rdata->address);
+        return false;
+    }
+    double share = 0;
+    const char* error = nullptr;
+    const char* const build = nfsu::region::convertProtected(own, rawSize, embedded + rdata->fileOffset,
+                                                             embedded + data->fileOffset, region, share, error);
+    if (!build)
+    {
+        pf::logError("%s: .rdata %.1f%% the same as version 1.4's: %s", s_exeName, 100.0 * share, error);
+        return false;
+    }
+    pf::logInfo("%s: %s version 1.4 (.rdata %.1f%% the same) whose code and data cannot be read (a copy-protected "
+                "executable); the embedded executable is used in its place%s", s_exeName, build, 100.0 * share,
+                region.rdata.empty() ? "" : ", with this executable's .rdata");
+    image.assign(embedded, embedded + embeddedSize);
     return true;
 }
 
@@ -644,8 +725,19 @@ int main(int, char**)
     std::vector<uint8_t> image;
     nfsu::region::Converted region;
     std::vector<win32::Section> sections;
-    if (!loadExecutable(image) || !imageSections(image, region, sections))
-        pf::fatal("the game executable is missing or not version 1.4 (see the log)");
+    // With an embedded executable, a file whose data does not match is tried with it (embeddedFallback), which then
+    // logs the reason a file is refused.
+    uint32_t embeddedSize = 0;
+    const bool embedded = nfsu::image::exe(embeddedSize) != nullptr;
+    if (!loadExecutable(image))
+        pf::fatal("the game executable is missing (see the log)");
+    if (!imageSections(image, region, sections, !embedded))
+    {
+        region = nfsu::region::Converted();
+        sections.clear();
+        if (!embedded || !embeddedFallback(image, region) || !imageSections(image, region, sections))
+            pf::fatal("the game executable is not version 1.4 (see the log)");
+    }
     if (!pf::gxm::Device::get().init())
         pf::fatal("graphics initialisation failed");
     if (pf::Config::getBool("gxm_program_list", true))

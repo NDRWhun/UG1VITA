@@ -1,7 +1,7 @@
 # One-step build of the VPK: finds the game, regenerates the recompiled code when needed, configures and builds.
 # Usage: tools/build.ps1 [-Game <the game folder>] [-Config Release|Debug] [-Clean] [-Reconfigure] [-Jobs N]
 #                        [-Regenerate] [-Compiler clang|gcc] [-NoLto] [-PgoGenerate [-PgoList <file>]]
-#                        [-PgoUse <profile>[,<profile>...]] [-NoPgo] [-FlagAudit]
+#                        [-PgoUse <profile>[,<profile>...]] [-NoPgo] [-FlagAudit] [-EmbedExe]
 # The game folder (with Speed.exe) comes from -Game, then NFSU_GAME_DIR, then the folder used last time; it is
 # remembered for the next run. Code is generated again when the executable, the audio banks (Sound/**/*.abk) or the
 # recompiler changed, or with -Regenerate. Only what changed is rebuilt.
@@ -11,6 +11,8 @@
 # instrumented build (build-<config>-pgogen; -PgoList: only the functions and sources a clang -fprofile-list file
 # selects). -Compiler gcc builds with VitaSDK's gcc into build-<config>; there -PgoGenerate builds into
 # build-<config>-gcov and -PgoUse takes one or more nfsu.gcov files from instrumented runs (build-<config>-pgo).
+# -EmbedExe embeds the game executable (NFSU_EMBED_EXE), so the VPK also runs from an unmodified, copy-protected 1.4
+# Speed.exe; such a VPK contains the executable and is for your own use only.
 param(
     [string]$Game,
     [string]$Config = 'Release',
@@ -24,7 +26,8 @@ param(
     [switch]$PgoGenerate,
     [string]$PgoList,
     [string[]]$PgoUse,
-    [switch]$NoPgo
+    [switch]$NoPgo,
+    [switch]$EmbedExe
 )
 if ($NoPgo -and $PgoUse) { throw '-NoPgo and -PgoUse exclude each other' }
 if ($NoLto -and $Compiler -ne 'clang') { throw '-NoLto needs -Compiler clang' }
@@ -108,7 +111,7 @@ if ($Clean -and (Test-Path $build)) { Remove-Item $build -Recurse -Force -ErrorA
 
 # Reconfigures when the compiler options (and the profiles' contents) differ from build-options.txt in the build folder.
 $compilerOptions = @("-DNFSU_COMPILER=$Compiler", "-DNFSU_PGO_GENERATE=$(if ($PgoGenerate) { 'ON' } else { 'OFF' })",
-                     "-DNFSU_PGO_USE=$($PgoUse -join ';')")
+                     "-DNFSU_PGO_USE=$($PgoUse -join ';')", "-DNFSU_EMBED_EXE=$(if ($EmbedExe) { 'ON' } else { 'OFF' })")
 if ($Compiler -eq 'clang') {
     $compilerOptions += "-DNFSU_LTO=$(if ($NoLto) { 'OFF' } else { 'ON' })", "-DNFSU_PGO_LIST=$PgoList"
     if (-not $env:NFSU_LLVM) { Write-Host 'NFSU_LLVM not set: clang from PATH' }

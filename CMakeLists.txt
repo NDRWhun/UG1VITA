@@ -43,6 +43,11 @@ set(NFSU_VERSION  "1.0.1")
 set(VITA_VERSION  "01.01")
 
 option(NFSU_LOG_DEBUG        "Verbose runtime logging" OFF)
+# NFSU_EMBED_EXE embeds the executable the code was generated from (src/nfsu/embedded.h, nfsu_image.cpp): the game
+# then also runs from a copy-protected 1.4 executable (an unmodified retail install, US or European), whose code and
+# data cannot be read; its readable .rdata only identifies the build. Such a binary contains the game's executable,
+# so it is for the player's own use and not for distribution.
+option(NFSU_EMBED_EXE        "Embed the game executable (runs from a copy-protected 1.4 executable)" OFF)
 option(NFSU_ASSERT_SOFT      "Log failed assertions instead of trapping" OFF)
 # Profile-guided optimisation: cmake/gcc.cmake, cmake/clang.cmake.
 option(NFSU_PGO_GENERATE "Instrument for a PGO profile" OFF)
@@ -86,6 +91,9 @@ if(NFSU_ASSERT_SOFT)
 endif()
 
 set(NFSU_GENERATED_DIR "${CMAKE_SOURCE_DIR}/src/nfsu/generated" CACHE PATH "Generated game code (tools/generate.ps1)")
+if(NFSU_EMBED_EXE)
+  set_property(SOURCE "${NFSU_GENERATED_DIR}/nfsu_image.cpp" APPEND PROPERTY COMPILE_DEFINITIONS NFSU_EMBED_EXE)
+endif()
 set(NFSU_INCLUDES
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src/nfsu

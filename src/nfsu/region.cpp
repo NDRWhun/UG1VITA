@@ -41,11 +41,17 @@ struct Region
     size_t          pointerCount;
     const MovedVariable* variables;
     size_t          variableCount;
+    // The moved variables' values in the region's .data, for its copy-protected executable, whose .data cannot be
+    // read; nullptr until they are recorded from the region's unprotected executable.
+    const x86::reg32* variableValues;
 };
 
 // Raw .rdata and .data of the build the tables are for.
 static const char* const s_targetRdata = "45bb01ac47bfd4c330d968d2793f9edce502f062253c063df59cf92720fcb4a7";
 static const char* const s_targetData = "8a6b064b100372e5b3c097c855969c61a409e70857a9329a6fd76c854172a332";
+
+// The build the code was generated from.
+static const char* const s_layoutName = "US";
 
 static const x86::reg32 RdataAddress = 0x697000, RdataSize = 0x3d000, DataAddress = 0x6d4000, DataSize = 0x34000;
 
@@ -217,6 +223,8 @@ static const Pointer s_pointers0[] = {
 static const MovedVariable s_variables0[] = {
     { 0x734998, 0x6f21ac, 0x0 },
 };
+// Its value in the European .data (read from the unprotected European executable, 8234b86f...).
+static const x86::reg32 s_variableValues0[] = { 0x1 };
 
 static const Region s_regions[] = {
     { "European",
@@ -224,7 +232,7 @@ static const Region s_regions[] = {
       "918a0665bd52c6add801feae54ac2989985c2425657e0e0b617330254b4fa9ad",
       "63dc1bb38a2f0cc9cdf2d36aa2ec536cdb8676c1d5c2b25276672618d6b8c054",
       "8a6b064b100372e5b3c097c855969c61a409e70857a9329a6fd76c854172a332",
-      s_moves0, 1, s_pointers0, 957, s_variables0, 1 },
+      s_moves0, 1, s_pointers0, 957, s_variables0, 1, s_variableValues0 },
 };
 
 bool convert(const char* targetRdata, const char* targetData, const char* rdata, const char* data,
@@ -267,6 +275,107 @@ bool convert(const char* targetRdata, const char* targetData, const char* rdata,
             && pf::sha256Hex(out.data.data(), out.data.size()) == r.convertedData;
     }
     return false;
+}
+
+// .rdata bytes where the build the code was generated from (the no-DVD executable) differs from the copy-protected
+// one beyond the imports. A region's copy-protected executable gets them from the layout. 0x6cbfa8: the folder
+// prefix of the game's paths: ".\" (the game folder), where the copy-protected executable has "%c:\" (the disc's
+// drive letter). The generated code is the no-DVD code, which expects ".\". Same address in the European build
+// (before its moves), whose no-DVD executable has ".\" there too.
+struct Range
+{
+    x86::reg32  begin, end;
+};
+static const Range s_noDiscRdata[] = {
+    { 0x6cbfa8, 0x6cbfac },
+};
+
+// The file's .rdata with the region's moves and its pointers into .rdata applied (r nullptr: unchanged).
+static void convertRdata(const Region* r, const uint8_t* rdataBytes, std::vector<uint8_t>& rdata)
+{
+    rdata.assign(rdataBytes, rdataBytes + RdataSize);
+    if (!r)
+        return;
+    for (size_t i = 0; i < r->moveCount; ++i)
+    {
+        const Move& m = r->moves[i];
+        memcpy(rdata.data() + (m.begin - RdataAddress), rdataBytes + (m.begin + m.shift - RdataAddress),
+               m.end - m.begin);
+    }
+    for (size_t i = 0; i < r->pointerCount; ++i)
+    {
+        const Pointer& p = r->pointers[i];
+        if (p.address >= DataAddress)
+            continue;
+        uint8_t* word = rdata.data() + (p.address - RdataAddress);
+        uint32_t value;
+        memcpy(&value, word, 4);
+        value += uint32_t(int32_t(p.delta));
+        memcpy(word, &value, 4);
+    }
+}
+
+static double equalShare(const std::vector<uint8_t>& a, const uint8_t* b)
+{
+    size_t equal = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        equal += a[i] == b[i];
+    return double(equal) / double(a.size());
+}
+
+const char* convertProtected(const uint8_t* rdataBytes, size_t rdataSize, const uint8_t* layoutRdata,
+                             const uint8_t* layoutData, Converted& out, double& share, const char*& error)
+{
+    share = 0;
+    error = nullptr;
+    if (rdataSize < RdataSize)
+    {
+        error = ".rdata smaller than version 1.4's";
+        return nullptr;
+    }
+    if (pf::sha256Hex(layoutRdata, RdataSize) != s_targetRdata || pf::sha256Hex(layoutData, DataSize) != s_targetData)
+    {
+        error = "the embedded executable is not the build the region tables are for";
+        return nullptr;
+    }
+    // Candidates: the layout's own build, then each region whose .data converts to exactly the layout's (so the
+    // encrypted .data is not needed).
+    const Region* best = nullptr;
+    std::vector<uint8_t> rdata;
+    convertRdata(nullptr, rdataBytes, rdata);
+    share = equalShare(rdata, layoutRdata);
+    for (const Region& r : s_regions)
+    {
+        if (strcmp(r.convertedData, s_targetData))
+            continue;
+        convertRdata(&r, rdataBytes, rdata);
+        const double s = equalShare(rdata, layoutRdata);
+        if (s > share)
+        {
+            share = s;
+            best = &r;
+        }
+    }
+    if (share < 0.9)
+    {
+        error = "not version 1.4";
+        return nullptr;
+    }
+    if (!best)
+        return s_layoutName;
+    if (!best->variableValues)
+    {
+        error = "this region's moved variables are not recorded for its copy-protected executable (region.cpp)";
+        return nullptr;
+    }
+    out.name = best->name;
+    convertRdata(best, rdataBytes, out.rdata);
+    for (const Range& r : s_noDiscRdata)
+        memcpy(out.rdata.data() + (r.begin - RdataAddress), layoutRdata + (r.begin - RdataAddress), r.end - r.begin);
+    out.data.assign(layoutData, layoutData + DataSize);
+    for (size_t i = 0; i < best->variableCount; ++i)
+        out.variables.push_back({ best->variables[i].address, best->variableValues[i] });
+    return best->name;
 }
 
 }}

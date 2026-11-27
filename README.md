@@ -33,7 +33,8 @@
 ## Requirements
 
 - Need for Speed Underground for PC, **US or European, version 1.4** (your own copy)
-- The game's `Speed.exe` must have the **no-DVD patch** applied
+- The game's `Speed.exe` must have the **no-DVD patch** applied, unless you build the VPK yourself with `-EmbedExe`
+  (see [Build](#build)): that VPK also runs from the unmodified, copy-protected 1.4 `Speed.exe` of a retail install
 - PS Vita with HENkaku / Ensō and [VitaShell](https://github.com/TheOfficialFloW/VitaShell)
 - About 1.5 GB free on the memory card
 - Overclocking is mandatory, for example with [PSVshell](https://github.com/Electry/PSVshell)
@@ -140,6 +141,10 @@ tools/build.ps1 -Game "<folder with Speed.exe>"   # -> build-release-clang/NFSUG
 - The recompiled code is generated from your own `Speed.exe`; no game code or data is in this repository.
 - Shaders ship prebuilt in `shaders/gxp/`.
 - The build options are described at the top of `tools/build.ps1`.
+- `-EmbedExe` (CMake `NFSU_EMBED_EXE=ON`) embeds the `Speed.exe` the code was generated from in the VPK. The game
+  then also runs from a copy-protected 1.4 `Speed.exe`, US or European: its code and data are encrypted, so they
+  come from the embedded copy, and its readable `.rdata` only identifies the build. Nothing is decrypted. Such a
+  VPK contains the game's executable: it is for your own use, not for sharing.
 
 | Path | Contents |
 |------|----------|
