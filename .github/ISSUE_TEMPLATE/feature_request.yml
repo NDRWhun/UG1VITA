@@ -1,6 +1,6 @@
 name: Feature request
 description: An idea or a wish for the port
-labels: ["enhancement"]
+labels: ["Feature request"]
 body:
   - type: textarea
     id: idea
