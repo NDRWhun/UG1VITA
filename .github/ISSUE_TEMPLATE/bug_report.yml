@@ -1,0 +1,91 @@
+name: Bug report
+description: Something doesn't work, looks wrong or runs slowly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The log file answers most questions, so please always attach it:
+        `ux0:data/NFSUG1VITA/nfsug1vita.log` (copy it right after the problem happens, before starting the game again).
+
+  - type: input
+    id: version
+    attributes:
+      label: Port version
+      description: Shown on the LiveArea screen and in the first line of nfsug1vita.log.
+      placeholder: "1.0.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: region
+    attributes:
+      label: Game version
+      options:
+        - US 1.4
+        - European 1.4
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: language
+    attributes:
+      label: Game language
+      placeholder: "English"
+    validations:
+      required: true
+
+  - type: textarea
+    id: mods
+    attributes:
+      label: Mods, translations or patches
+      description: Anything added to or changed in the game folder (fan translations, texture packs, widescreen or other fixes, a different Speed.exe). Write "none" if it's a plain copy.
+      placeholder: "none"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: setup
+    attributes:
+      label: Vita setup
+      options:
+        - label: The CPU runs at 500 MHz (for example with PSVshell)
+          required: true
+        - label: CapUnlocker is installed
+
+  - type: input
+    id: console
+    attributes:
+      label: Console and firmware
+      placeholder: "PS Vita 2000, 3.65 Ensō"
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what happened, and what you expected instead. For slowdowns, say where (track, mode, menu) and roughly what frame rate.
+      placeholder: |
+        1. Options > Display > Customize Display Settings: Light Trails Off
+        2. Start a Quick Race on ...
+        3. The frame rate drops to about 15 fps
+    validations:
+      required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings
+      description: |
+        If your report depends on game settings, attach your profile's settings file `ux0:data/NFSUG1VITA/save/nfs underground/<profile name>.cfg`.
+        GitHub doesn't accept `.cfg` files: rename it to `.txt` (or zip it), then drag it here.
+        If you made `ux0:data/NFSUG1VITA/nfsug1vita.cfg`, paste its contents here.
+      render: text
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Log and media
+      description: Drag nfsug1vita.log here (required; drag and drop or paste works in this box). Screenshots or a short video help a lot for graphics and menu problems. Large videos can go in a .zip or a link.
+    validations:
+      required: true

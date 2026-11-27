@@ -1,0 +1,17 @@
+name: Feature request
+description: An idea or a wish for the port
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: Describe the feature and why it would help. If it comes from a PC mod, name the mod and link it.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Port version you're using
+      placeholder: "1.0.1"
