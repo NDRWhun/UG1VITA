@@ -347,6 +347,7 @@ private:
     bool halfPrecision(const render::DrawState& state) const;
     // Creates the fragment program of a cache key (fragmentKey) and adds it to the cache.
     const FragmentEntry* createFragment(uint64_t key);
+    // The render target of a size (kept per size and mode); null when a multisampled one cannot be created.
     SceGxmRenderTarget* renderTarget(uint32_t width, uint32_t height, bool msaa);
     static bool finished(void* self, uint32_t frameIndex);
     // Patched programs of every draw (render thread; creates them on first use).
@@ -395,7 +396,8 @@ private:
     SceGxmMultisampleMode   m_msaa = SCE_GXM_MULTISAMPLE_NONE;
     uint32_t                m_msaaSamples = 1;
     uint32_t                m_msaaModeShown = 1;        // samples of the last planned frame, for the log
-    bool                    m_msaaFailed = false;       // the GPU refused a multisampled scene
+    // A multisampled render target or scene failed: no scene is multisampled until the mode changes.
+    bool                    m_msaaFailed = false;
     uint32_t                m_msaaShown = ~0u;          // msaa scenes << 16 | of them storing depth, last planned frame
     uint32_t                m_msaaLogs = 0;
     uint32_t                m_depthLogs = 0;

@@ -163,9 +163,32 @@ Device::~Device()
         bindSlot(texture, static_cast<Object*>(nullptr));
     for (VertexDeclaration* d : m_fvfDeclarations)
         delete d;
+    // Depth surfaces the game still holds outlive the device.
+    for (Surface* s : m_depthSurfaces)
+    {
+        if (s != m_autoDepth)
+            s->detachDevice();
+    }
     delete m_backBuffer;
     delete m_autoDepth;
     m_d3d->release();
+}
+
+void Device::boundOnlySlots(const std::vector<const void*>& values, std::vector<const void*>& slots) const
+{
+    // Slots are compared by value only: a slot may hold an object the game released past its bindings.
+    const auto add = [&](const void* object, const void* slot)
+    {
+        if (object && std::find(values.begin(), values.end(), object) != values.end())
+            slots.push_back(slot);
+    };
+    for (DWORD stage = 0; stage < MaxSamplerStages; ++stage)
+        add(m_state.textures[stage], &m_state.textures[stage]);
+    add(m_state.declaration, &m_state.declaration);
+    add(m_state.stream, &m_state.stream);
+    add(m_state.indices, &m_state.indices);
+    add(m_state.target, &m_state.target);
+    add(m_state.depth, &m_state.depth);
 }
 
 template< typename T >

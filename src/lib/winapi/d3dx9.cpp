@@ -363,6 +363,12 @@ public:
     HRESULT setProduct(x86::reg32 handle, const float* const* matrices, uint32_t count, uint32_t fpscr);
     // The pass count Begin stores.
     UINT passCount() const                  { return info().passes[m_technique]; }
+    // The binding slot SetTexture of a handle changes; null when the handle is not a texture parameter.
+    const void* textureSlot(x86::reg32 handle) const
+    {
+        const int p = param(handle);
+        return p >= 0 && s_params[p].type == TypeTexture ? &values(p).textures[p] : nullptr;
+    }
     // The type of each parameter handle in this effect (bridge::effect::paramTypes).
     const uint8_t* paramTypes() const
     {
@@ -1233,6 +1239,28 @@ const uint8_t* paramTypes(reg32 effect)
 {
     const Object* o = lookup(effect);
     return o && o->kind() == KindEffect ? static_cast<const Effect*>(o)->paramTypes() : nullptr;
+}
+
+const void* textureSlot(reg32 effect, reg32 handle)
+{
+    const Object* o = lookup(effect);
+    return o && o->kind() == KindEffect ? static_cast<const Effect*>(o)->textureSlot(handle) : nullptr;
+}
+
+void boundOnlySlots(const std::vector<const void*>& values, std::vector<const void*>& slots)
+{
+    // Compared by value only: a slot may hold a texture the game released past its bindings.
+    for (const Values* v : s_blocks)
+    {
+        if (!v)
+            continue;
+        for (int p = 0; p < ParamCount; ++p)
+        {
+            const void* t = v->textures[p];
+            if (t && std::find(values.begin(), values.end(), t) != values.end())
+                slots.push_back(&v->textures[p]);
+        }
+    }
 }
 
 HRESULT checkPass(reg32 effect, UINT pass)

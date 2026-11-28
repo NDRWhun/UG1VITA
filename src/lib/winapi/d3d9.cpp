@@ -64,7 +64,7 @@ Object::~Object()
 {
     ++g_objectGeneration;
     if (m_boundOnly)
-        bridge::countBoundOnly(-1);
+        bridge::countBoundOnly(this, false);
     if (!m_guest || !s_app)
         return;
     const uint32_t handle = s_app->getMemory<x86::reg32>(m_guest + 4);
@@ -91,9 +91,17 @@ ULONG Object::release()
     else if (refs == m_bindings && !m_boundOnly && !bridge::onQueueThread())
     {
         m_boundOnly = true;
-        bridge::countBoundOnly(1);
+        bridge::countBoundOnly(this, true);
     }
     return refs;
+}
+
+void Object::heldAgain()
+{
+    if (bridge::onQueueThread())
+        return;
+    m_boundOnly = false;
+    bridge::countBoundOnly(this, false);
 }
 
 HRESULT Object::QueryInterface(WinApplication* app, x86::CPU& cpu, const GUID* iid, x86::reg32* object)

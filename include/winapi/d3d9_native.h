@@ -83,6 +83,19 @@ class CallGroup;
 // The group whose record in the queue is open (CallGroup::queue closes it).
 extern CallGroup* g_openGroup;
 
+// Objects that only bindings hold (countBoundOnly). Game thread.
+extern uint32_t g_boundOnly;
+// With g_boundOnly != 0: false when a call that sets the binding slot slot (null: none) to the object next has to run
+// at once: the slot holds an object only bindings hold, or next is one. Game thread.
+bool bindingQueuesSlow(const void* slot, reg32 next);
+inline bool bindingQueues(const void* slot, reg32 next)
+{
+    return __builtin_expect(g_boundOnly == 0, 1) || bindingQueuesSlow(slot, next);
+}
+// The same for SetTexture of the window's device and for effect SetTexture.
+bool textureQueuesSlow(DWORD stage, reg32 texture);
+bool effectTextureQueuesSlow(reg32 effect, reg32 handle, reg32 texture);
+
 // Device and effect calls in order: inside a window collected and queued as one record (queue(), or when a call has
 // to be made at once), returning D3D_OK; else made at once, returning their results. The entries are written into
 // a record reserved in the queue; another record, a publish or a drain closes it first.
@@ -155,7 +168,8 @@ public:
     }
     HRESULT setEffectTexture(reg32 effect, reg32 handle, reg32 texture)
     {
-        if (uint32_t* e = m_bindings ? effectEntry(KindEffectTexture, effect, handle, 1) : nullptr)
+        if (uint32_t* e = __builtin_expect(g_boundOnly == 0, 1) || effectTextureQueuesSlow(effect, handle, texture)
+                          ? effectEntry(KindEffectTexture, effect, handle, 1) : nullptr)
         {
             e[0] = texture;
             return D3D_OK;
@@ -173,7 +187,9 @@ public:
     }
     HRESULT setTexture(reg32 device, DWORD stage, reg32 texture)
     {
-        if (uint32_t* e = device == m_device && m_bindings ? entry(KindDeviceTexture, device, stage, 1) : nullptr)
+        if (uint32_t* e = device == m_device && (__builtin_expect(g_boundOnly == 0, 1)
+                                                 || textureQueuesSlow(stage, texture))
+                          ? entry(KindDeviceTexture, device, stage, 1) : nullptr)
         {
             e[0] = texture;
             return D3D_OK;
@@ -235,7 +251,6 @@ private:
     WinApplication* m_app;
     x86::CPU& m_cpu;
     bool m_queued;          // inside a window of this CPU
-    bool m_bindings;        // calls that change bindings may be collected
     reg32 m_device;         // the window's device
     uint32_t m_fpscr;
     uint32_t m_size = 0;
@@ -436,6 +451,11 @@ UINT passCount(reg32 effect);
 enum : uint32_t { ParamHandleBase = 0x1000, ParamHandleCount = 64 };
 enum : uint8_t { ParamFloat, ParamInt, ParamTexture, ParamNone = 0xff };
 const uint8_t* paramTypes(reg32 effect);
+// The binding slot SetTexture of a handle changes; null when the effect or handle has none.
+const void* textureSlot(reg32 effect, reg32 handle);
+// Appends the effect texture slots that hold one of values (Object::slotValues of the objects only bindings hold).
+// Game thread, no queued calls.
+void boundOnlySlots(const std::vector<const void*>& values, std::vector<const void*>& slots);
 // The result Pass returns for pass, without running it.
 HRESULT checkPass(reg32 effect, UINT pass);
 HRESULT begin(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT* passes, DWORD flags);

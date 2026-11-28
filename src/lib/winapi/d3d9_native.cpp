@@ -8,6 +8,7 @@
 #include <platform/sync.h>
 #include <psp2/kernel/processmgr.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -407,7 +408,12 @@ struct Deferral
     uint32_t drained = 0;               // head at the last completed drain
     uint32_t fpscr = 0;
     bool fpscrSent = false;
-    uint32_t boundOnly = 0;             // objects only bindings hold (countBoundOnly)
+    // The binding slots that hold an object only bindings hold (g_boundOnly), in queue order; taken again while no
+    // calls are queued when stale.
+    std::vector<const void*> boundSlots;
+    bool boundSlotsStale = false;
+    std::vector<Object*> boundObjects;  // the objects only bindings hold (alive: their destructor removes them)
+    std::vector<const void*> boundValues;   // their Object::slotValues
     std::vector<Object*> deletes;       // filled by the queue run, emptied by drains
 
     // Shared with the queue thread.
@@ -452,11 +458,34 @@ inline bool deferringDraw(const x86::CPU& cpu, reg32 guest)
     return deferringDevice(cpu, guest) && s_defer.frameOpen;
 }
 
-// Calls that change a binding: not deferred while an object is held only by bindings.
-inline bool deferringBinding(const x86::CPU& cpu, reg32 guest)
+// The binding slots that hold an object only bindings hold; game thread, no queued calls.
+void takeBoundSlots()
 {
-    return deferringDevice(cpu, guest) && s_defer.boundOnly == 0;
+    Deferral& d = s_defer;
+    d.boundSlots.clear();
+    d.boundValues.clear();
+    d.boundSlotsStale = false;
+    if (!g_boundOnly)
+        return;
+    for (const Object* object : d.boundObjects)
+        object->slotValues(d.boundValues);
+    if (d.device)
+        d.device->boundOnlySlots(d.boundValues, d.boundSlots);
+    effect::boundOnlySlots(d.boundValues, d.boundSlots);
 }
+
+// After a call that ran at once and may have changed bindings (no queued calls).
+inline void afterBinding()
+{
+    if (__builtin_expect(g_boundOnly != 0, 0))
+        takeBoundSlots();
+}
+
+// Calls afterBinding when the scope of a call that runs at once ends.
+struct AfterBinding
+{
+    ~AfterBinding() { afterBinding(); }
+};
 
 // Effect calls with a parameter handle: deferred for handles, not for names.
 inline bool deferringEffect(const x86::CPU& cpu, reg32 handle)
@@ -1336,6 +1365,7 @@ void deferEnd()
 void afterDirect()
 {
     refreshBindings();
+    afterBinding();
 }
 
 void deviceGone(const Device* device)
@@ -1347,6 +1377,8 @@ void deviceGone(const Device* device)
     d.inWindow = false;
     d.device = nullptr;
     d.deviceGuest = 0;
+    d.boundSlots.clear();
+    d.boundSlotsStale = true;
 }
 
 void drainSlow(reg32 site)
@@ -1381,6 +1413,8 @@ void drainSlow(reg32 site)
     d.stats.deletes += uint32_t(d.deletes.size());
     d.deletes.clear();
     g_deferPending = false;
+    if (d.boundSlotsStale && g_boundOnly)
+        takeBoundSlots();
 }
 
 DeferStats takeDeferStats()
@@ -1438,9 +1472,50 @@ void deleteLater(Object* object)
     s_defer.deletes.push_back(object);
 }
 
-void countBoundOnly(int delta)
+uint32_t g_boundOnly = 0;
+
+void countBoundOnly(Object* object, bool bound)
 {
-    s_defer.boundOnly += uint32_t(delta);
+    Deferral& d = s_defer;
+    const auto it = std::find(d.boundObjects.begin(), d.boundObjects.end(), object);
+    if (bound && it == d.boundObjects.end())
+        d.boundObjects.push_back(object);
+    else if (!bound && it != d.boundObjects.end())
+        d.boundObjects.erase(it);
+    g_boundOnly = uint32_t(d.boundObjects.size());
+    d.boundSlotsStale = true;
+}
+
+bool bindingQueuesSlow(const void* slot, reg32 next)
+{
+    Deferral& d = s_defer;
+    if (d.boundSlotsStale)
+    {
+        // Runs at once after a drain, which takes the slots again.
+        if (g_deferPending)
+            return false;
+        takeBoundSlots();
+    }
+    if (slot && std::find(d.boundSlots.begin(), d.boundSlots.end(), slot) != d.boundSlots.end())
+        return false;
+    if (next)
+    {
+        const void* object = lookup(next);
+        if (object && std::find(d.boundValues.begin(), d.boundValues.end(), object) != d.boundValues.end())
+            return false;
+    }
+    return true;
+}
+
+bool textureQueuesSlow(DWORD stage, reg32 texture)
+{
+    const Device* device = s_defer.device;
+    return bindingQueuesSlow(device ? device->textureSlot(stage) : nullptr, texture);
+}
+
+bool effectTextureQueuesSlow(reg32 effect, reg32 handle, reg32 texture)
+{
+    return bindingQueuesSlow(handle < 0x10000 ? effect::textureSlot(effect, handle) : nullptr, texture);
 }
 
 // ---- Device ----
@@ -1710,7 +1785,7 @@ HRESULT setViewport(WinApplication* app, x86::CPU& cpu, reg32 guest, const DWORD
 
 HRESULT setFVF(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD fvf)
 {
-    if (deferringBinding(cpu, guest))
+    if (deferringDevice(cpu, guest) && bindingQueues(s_defer.device->declarationSlot(), 0))
     {
         uint32_t* w = put(OpSetFVF, 2);
         w[0] = guest;
@@ -1722,6 +1797,7 @@ HRESULT setFVF(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD fvf)
     drain();
     const HRESULT h = device(guest)->SetFVF(app, cpu, fvf);
     refreshBindings();
+    afterBinding();
     return h;
 }
 
@@ -1792,7 +1868,7 @@ HRESULT endScene(WinApplication* app, x86::CPU& cpu, reg32 guest)
 
 HRESULT setRenderTarget(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD index, reg32 surface)
 {
-    if (deferringBinding(cpu, guest))
+    if (deferringDevice(cpu, guest) && bindingQueues(s_defer.device->targetSlot(index), surface))
     {
         uint32_t* w = put(OpSetRenderTarget, 3);
         w[0] = guest;
@@ -1803,6 +1879,7 @@ HRESULT setRenderTarget(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD i
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(RecordRenderTarget);
@@ -1823,7 +1900,7 @@ HRESULT setRenderTarget(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD i
 
 HRESULT setDepthStencilSurface(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 surface)
 {
-    if (deferringBinding(cpu, guest))
+    if (deferringDevice(cpu, guest) && bindingQueues(s_defer.device->depthSlot(), surface))
     {
         uint32_t* w = put(OpSetDepthStencilSurface, 2);
         w[0] = guest;
@@ -1833,6 +1910,7 @@ HRESULT setDepthStencilSurface(WinApplication* app, x86::CPU& cpu, reg32 guest, 
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(RecordDepthStencilSurface);
@@ -1967,7 +2045,7 @@ HRESULT passDrawIndexed(WinApplication* app, x86::CPU& cpu, reg32 effect, UINT p
 // ---- CallGroup ----
 
 CallGroup::CallGroup(WinApplication* app, x86::CPU& cpu)
-    :   m_app(app), m_cpu(cpu), m_queued(s_defer.inWindow && deferring(cpu)), m_bindings(s_defer.boundOnly == 0),
+    :   m_app(app), m_cpu(cpu), m_queued(s_defer.inWindow && deferring(cpu)),
         m_device(s_defer.deviceGuest), m_fpscr(s_defer.fpscr)
 {
 }
@@ -2063,7 +2141,7 @@ HRESULT CallGroup::setTransformAtOnce(reg32 device, DWORD state, const float* ma
 
 HRESULT setTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD stage, reg32 texture)
 {
-    if (deferringBinding(cpu, guest))
+    if (deferringDevice(cpu, guest) && bindingQueues(s_defer.device->textureSlot(stage), texture))
     {
         uint32_t* w = put(MethodSetTexture, 3);
         w[0] = guest;
@@ -2079,6 +2157,7 @@ HRESULT setTextureDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD 
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(MethodSetTexture);
@@ -2099,7 +2178,7 @@ HRESULT setTextureDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD 
 
 HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 declaration)
 {
-    if (deferringBinding(cpu, guest))
+    if (deferringDevice(cpu, guest) && bindingQueues(s_defer.device->declarationSlot(), declaration))
     {
         uint32_t* w = put(MethodSetVertexDeclaration, 2);
         w[0] = guest;
@@ -2109,6 +2188,7 @@ HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 guest, re
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(MethodSetVertexDeclaration);
@@ -2133,7 +2213,7 @@ HRESULT setVertexDeclaration(WinApplication* app, x86::CPU& cpu, reg32 guest, re
 HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT stream, reg32 buffer, UINT offset,
                         UINT stride)
 {
-    if (deferringBinding(cpu, guest))
+    if (deferringDevice(cpu, guest) && bindingQueues(s_defer.device->streamSlot(stream), buffer))
     {
         uint32_t* w = put(MethodSetStreamSource, 5);
         w[0] = guest;
@@ -2146,6 +2226,7 @@ HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT st
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(MethodSetStreamSource);
@@ -2172,7 +2253,7 @@ HRESULT setStreamSource(WinApplication* app, x86::CPU& cpu, reg32 guest, UINT st
 
 HRESULT setIndices(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 buffer)
 {
-    if (deferringBinding(cpu, guest))
+    if (deferringDevice(cpu, guest) && bindingQueues(s_defer.device->indicesSlot(), buffer))
     {
         uint32_t* w = put(MethodSetIndices, 2);
         w[0] = guest;
@@ -2182,6 +2263,7 @@ HRESULT setIndices(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 buffer
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(MethodSetIndices);
@@ -2258,7 +2340,7 @@ HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD t
 {
     const uint32_t bytes = primitiveVertices(type, count) * stride;
     const uint32_t words = (bytes + 3) / 4;
-    if (deferringDraw(cpu, guest) && s_defer.boundOnly == 0 && words <= MaxRecordWords)
+    if (deferringDraw(cpu, guest) && words <= MaxRecordWords && bindingQueues(s_defer.device->streamSlot(0), 0))
     {
         uint32_t* w = put(MethodDrawPrimitiveUP, data ? 5 + words : 5);
         w[0] = guest;
@@ -2278,6 +2360,7 @@ HRESULT drawPrimitiveUP(WinApplication* app, x86::CPU& cpu, reg32 guest, DWORD t
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(MethodDrawPrimitiveUP);
@@ -2571,7 +2654,8 @@ HRESULT effectSetMatrixProductDirect(WinApplication* app, x86::CPU& cpu, reg32 g
 
 HRESULT effectSetTexture(WinApplication* app, x86::CPU& cpu, reg32 guest, reg32 handle, reg32 texture)
 {
-    if (deferringEffect(cpu, handle) && s_defer.boundOnly == 0)
+    if (deferringEffect(cpu, handle)
+        && (__builtin_expect(g_boundOnly == 0, 1) || effectTextureQueuesSlow(guest, handle, texture)))
     {
         uint32_t* w = put(MethodEffectSetTexture, 3);
         w[0] = guest;
@@ -2587,6 +2671,7 @@ HRESULT effectSetTextureDirect(WinApplication* app, x86::CPU& cpu, reg32 guest, 
     if (deferring(cpu))
         fallback();
     drain();
+    const AfterBinding after;
     if (active())
     {
         Record r(MethodEffectSetTexture);

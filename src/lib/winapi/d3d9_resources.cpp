@@ -258,6 +258,16 @@ Texture::~Texture()
     m_device->release();
 }
 
+void Texture::slotValues(std::vector<const void*>& values) const
+{
+    values.push_back(this);
+    for (const Surface* surface : m_surfaces)
+    {
+        if (surface)
+            values.push_back(surface);
+    }
+}
+
 void Texture::fillDesc(UINT level, D3DSURFACE_DESC* desc) const
 {
     desc->Format = m_format;
@@ -590,6 +600,8 @@ HRESULT Surface::GetDevice(WinApplication* app, x86::CPU& cpu, x86::reg32* devic
 {
     RC_USE(app);
     RC_USE(cpu);
+    if (!device || !m_device)
+        return D3DERR_INVALIDCALL;
     m_device->addRef();
     *device = m_device->guest();
     return D3D_OK;
@@ -631,6 +643,8 @@ HRESULT Surface::GetContainer(WinApplication* app, x86::CPU& cpu, const GUID* ii
     if (!container)
         return D3DERR_INVALIDCALL;
     Object* owner = m_container ? static_cast<Object*>(m_container) : static_cast<Object*>(m_device);
+    if (!owner)
+        return D3DERR_INVALIDCALL;
     owner->addRef();
     *container = owner->guest();
     return D3D_OK;

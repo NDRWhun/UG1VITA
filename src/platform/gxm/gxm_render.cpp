@@ -1199,8 +1199,14 @@ SceGxmRenderTarget* FrameRenderer::renderTarget(uint32_t width, uint32_t height,
     params.driverMemBlock = -1;
     SceGxmRenderTarget* target = nullptr;
     const int result = sceGxmCreateRenderTarget(&params, &target);
+    if (result < 0 && msaa)
+    {
+        logError("gxm: sceGxmCreateRenderTarget(%ux%u, msaa %ux) failed: 0x%08x", width, height,
+                 unsigned(m_msaaSamples), result);
+        return nullptr;
+    }
     if (result < 0)
-        fatal("sceGxmCreateRenderTarget(%ux%u%s) failed: 0x%08x", width, height, msaa ? ", msaa" : "", result);
+        fatal("sceGxmCreateRenderTarget(%ux%u) failed: 0x%08x", width, height, result);
     if (msaa)
     {
         unsigned int driverBytes = 0, plainBytes = 0;
@@ -1877,6 +1883,21 @@ void FrameRenderer::planFrame(const render::Frame& frame, bool stretchDirect)
                       && depth->samples == m_msaaSamples && depth->width >= scene.width && depth->height >= scene.height;
         m_plan[i].storesDepth = false;
     }
+    // Multisampled scenes draw into the frame's size; without its multisampled render target every scene stays 1x.
+    if (m_msaaSamples > 1 && !m_msaaFailed)
+    {
+        bool any = false;
+        for (uint32_t i = 0; i < frame.sceneCount && !any; ++i)
+            any = m_plan[i].msaa;
+        if (any && !renderTarget(frame.width, frame.height, true))
+        {
+            m_msaaFailed = true;
+            logError("gxm: no %ux%u msaa %ux render target; msaa off from frame %u until the mode changes",
+                     unsigned(frame.width), unsigned(frame.height), unsigned(m_msaaSamples), unsigned(frame.index));
+            for (uint32_t i = 0; i < frame.sceneCount; ++i)
+                m_plan[i].msaa = false;
+        }
+    }
     for (bool changed = m_msaaSamples > 1; changed;)
     {
         changed = false;
@@ -2244,12 +2265,27 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
         }
         const int begun = sceGxmBeginScene(m_context, 0, renderTarget(p.width, p.height, p.msaa), nullptr, nullptr,
                                            p.sync, p.color, d ? &depth : nullptr);
-        // A multisampled scene the GPU refuses turns msaa off from the next frame on, until the mode changes.
-        if (begun < 0 && p.msaa && !m_msaaFailed)
+        const bool last = i + 1 == sceneCount;
+        SceGxmNotification* fragmentDone = last && lastWritesDone ? &slot.done : nullptr;
+        // A multisampled scene the GPU refuses turns msaa off from the next frame on, until the mode changes; its
+        // draws are left out of this frame. When it would have written the frame's notification, an empty 1x scene
+        // into its colour surface writes it.
+        if (begun < 0 && p.msaa)
         {
-            m_msaaFailed = true;
-            logError("gxm: sceGxmBeginScene of a %ux%u msaa scene failed: 0x%08x; msaa off from the next frame until "
-                     "the mode changes", unsigned(p.width), unsigned(p.height), begun);
+            if (!m_msaaFailed)
+            {
+                m_msaaFailed = true;
+                logError("gxm: sceGxmBeginScene of a %ux%u msaa scene failed: 0x%08x; its draws are left out, msaa off "
+                         "from the next frame until the mode changes", unsigned(p.width), unsigned(p.height), begun);
+            }
+            if (fragmentDone)
+            {
+                const Texture* t = static_cast<const Texture*>(scene.target.color);
+                if (sceGxmBeginScene(m_context, 0, renderTarget(p.width, p.height, false), nullptr, nullptr, nullptr,
+                                     &t->surfaces[0], nullptr) >= 0)
+                    sceGxmEndScene(m_context, nullptr, fragmentDone);
+            }
+            continue;
         }
         bool recorded = lists && p.jobCount;
         for (uint32_t j = 0; j < p.jobCount && recorded; ++j)
@@ -2276,8 +2312,6 @@ FrameRenderer::Shown FrameRenderer::drawFrame(const render::Frame& frame, const 
             for (uint32_t n = 0; n < p.orderCount; ++n)
                 draw(m_main, frame, m_order[p.firstOrder + n]);
         }
-        const bool last = i + 1 == sceneCount;
-        SceGxmNotification* fragmentDone = last && lastWritesDone ? &slot.done : nullptr;
         if (log && log->count < SceneLogScenes)
         {
             SceGxmNotification ta = { s_notifications + SceneLogVertexWords + log->count, frame.index };

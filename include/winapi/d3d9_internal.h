@@ -233,12 +233,20 @@ public:
     x86::reg32 guest() const        { return m_guest; }
     // Deletes the object (and frees its guest block) on the last reference. Texture surfaces count their
     // container's references, as in Direct3D.
-    virtual ULONG addRef()          { return ++m_refs; }
+    virtual ULONG addRef()
+    {
+        const ULONG refs = ++m_refs;
+        if (__builtin_expect(m_boundOnly, 0) && refs > m_bindings)
+            heldAgain();
+        return refs;
+    }
     virtual ULONG release();
     // A reference of a binding that deferred calls change (device texture stages, vertex declaration, stream and
-    // indices; effect textures), counted apart as well.
+    // indices, render target and depth; effect textures), counted apart as well.
     virtual void bind()             { ++m_bindings; addRef(); }
     virtual ULONG unbind()          { --m_bindings; return release(); }
+    // The addresses a binding slot holding this object holds: the object (a texture: and its level surfaces).
+    virtual void slotValues(std::vector<const void*>& values) const     { values.push_back(this); }
 
     HRESULT QueryInterface(WinApplication* app, x86::CPU& cpu, const GUID* iid, x86::reg32* object);
     ULONG AddRef(WinApplication* app, x86::CPU& cpu);
@@ -246,6 +254,8 @@ public:
 
 private:
     friend x86::reg32 publish(WinApplication* app, Object* object);
+    // A reference other than a binding was added to an object only bindings held.
+    void heldAgain();
 
     Kind        m_kind;
     uint32_t    m_refs;
@@ -270,9 +280,10 @@ namespace bridge
 bool onQueueThread();
 // Queue thread: the object is deleted by the next drain.
 void deleteLater(Object* object);
-// Objects that only bindings hold: +1 when one becomes so, -1 when it is deleted. While there are any, calls that
-// change bindings are not deferred. Game thread.
-void countBoundOnly(int delta);
+// Objects that only bindings hold: added when one becomes so, removed when it is held again or deleted. While there
+// are any, a call that changes a binding slot holding one of them, or binds one of them, runs at once (its references
+// then change on the game thread). Game thread.
+void countBoundOnly(Object* object, bool bound);
 // A device is deleted.
 void deviceGone(const Device* device);
 
@@ -397,6 +408,7 @@ class Texture : public Object
 public:
     Texture(Device* device, const render::TextureDesc& desc, DWORD format, DWORD usage, DWORD pool);
     ~Texture() override;
+    void slotValues(std::vector<const void*>& values) const override;
 
     render::TextureStorage* storage() const    { return m_storage; }
     const render::TextureDesc& desc() const    { return m_desc; }
@@ -473,6 +485,8 @@ public:
     render::DepthStorage* depth() const     { return m_depth; }
     void setContainer(Texture* texture, uint32_t face, uint32_t level);
     void setDepth(render::DepthStorage* depth) { m_depth = depth; }
+    // The device is deleted before the surface: the surface no longer refers to it.
+    void detachDevice()                     { m_device = nullptr; }
     ULONG addRef() override;
     ULONG release() override;
     void bind() override;
@@ -814,6 +828,16 @@ public:
         declaration = m_state.declaration != nullptr;
         fvf = m_state.fvf;
     }
+    // Addresses of the binding slots (bridge::countBoundOnly); null for a stage, stream or index without one.
+    const void* textureSlot(DWORD stage) const  { return stage < MaxSamplerStages ? &m_state.textures[stage] : nullptr; }
+    const void* declarationSlot() const         { return &m_state.declaration; }
+    const void* streamSlot(UINT stream) const   { return stream == 0 ? &m_state.stream : nullptr; }
+    const void* indicesSlot() const             { return &m_state.indices; }
+    const void* targetSlot(DWORD index) const   { return index == 0 ? &m_state.target : nullptr; }
+    const void* depthSlot() const               { return &m_state.depth; }
+    // Appends the slots that hold one of values (Object::slotValues of the objects only bindings hold). Game thread,
+    // no queued calls.
+    void boundOnlySlots(const std::vector<const void*>& values, std::vector<const void*>& slots) const;
 
     HRESULT TestCooperativeLevel(WinApplication* app, x86::CPU& cpu);
     UINT GetAvailableTextureMem(WinApplication* app, x86::CPU& cpu);
